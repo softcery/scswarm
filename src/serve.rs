@@ -17,16 +17,14 @@ const FIRST_STAGE: usize = 1;
 pub fn serve(repo: &Git, project: &str) -> Result<()> {
     let config = Config::from_main(repo)?;
     let mut pool = Pool::open(repo, project, &config)?;
-    repo.fetch()?;
-    let mut head = repo.branch_commit(git::MAIN)?;
-    event::fetch(&head);
+    let mut head = String::new();
     loop {
         cycle(repo, &mut pool, &mut head)?;
         thread::sleep(POLL);
     }
 }
 
-/// Report the fetch only when `main` moved: an idle swarm stays silent.
+/// Report a fetch only when `main` moved. Head starts empty, so cycle 1 reports.
 fn cycle(repo: &Git, pool: &mut Pool, head: &mut String) -> Result<()> {
     pool.collect()?;
     repo.fetch()?;

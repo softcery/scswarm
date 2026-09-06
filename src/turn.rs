@@ -29,10 +29,8 @@ pub struct Turn<'a> {
     pub dir: &'a Path,
     pub log: &'a Path,
     pub number: usize,
-    /// Task id, stage number and stage total: event context only.
-    pub id: &'a str,
-    pub stage: usize,
-    pub total: usize,
+    /// Task and stage this turn belongs to: event context only.
+    pub at: event::At<'a>,
 }
 
 pub struct Reply {
@@ -60,7 +58,7 @@ pub struct Entry {
 
 impl Turn<'_> {
     pub fn run(&self) -> Result<Reply> {
-        event::turn(self.id, self.stage, self.total, self.number);
+        event::turn(&self.at, self.number);
         let mut wait = RETRY_WAIT;
         let mut attempt = 1;
         loop {
@@ -77,14 +75,7 @@ impl Turn<'_> {
                 })?;
                 return Ok(reply);
             }
-            event::retry(
-                self.id,
-                self.stage,
-                self.total,
-                self.number,
-                attempt,
-                out.status.code(),
-            );
+            event::retry(&self.at, self.number, attempt, out.status.code());
             self.record(Entry {
                 exit: out.status.code(),
                 stdout: Some(stdout.trim().to_string()),

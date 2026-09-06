@@ -75,7 +75,12 @@ impl Pool {
     pub fn assign(&mut self, index: usize, job: Job) -> Result<()> {
         let worker = &mut self.workers[index];
         worker.task = Some(job.row.id().to_string());
-        event::assign(job.row.id(), index, job.from, job.config.stages.len());
+        let at = event::At {
+            id: job.row.id(),
+            stage: job.from,
+            total: job.config.stages.len(),
+        };
+        event::assign(&at, index);
         worker.jobs.send(job).map_err(|_| stopped(index))
     }
 }
@@ -111,9 +116,18 @@ fn work(slot: &Slot, project: &str, index: usize, queue: &Receiver<Job>, done: &
         let total = job.config.stages.len();
         match stages(slot, project, &job) {
             Ok(()) => event::land(&id),
-            Err((stage, why)) => event::fail(&id, stage, total, &why),
+            Err((stage, why)) => event::fail(
+                &event::At {
+                    id: &id,
+                    stage,
+                    total,
+                },
+                &why,
+            ),
         }
-        slot.release().expect("slot release");
+        if let Err(why) = slot.release() {
+            panic!("slot {index} must detach its worktree after a task: {why}");
+        }
         if done.send(index).is_err() {
             return;
         }

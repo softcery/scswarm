@@ -47,6 +47,14 @@ struct StageRun<'a> {
 }
 
 impl StageRun<'_> {
+    fn at(&self) -> event::At<'_> {
+        event::At {
+            id: self.row.id(),
+            stage: self.number,
+            total: self.total,
+        }
+    }
+
     fn turn(&mut self, prompt: &str, turn: usize) -> Result<String> {
         let reply = Turn {
             agent: self.agent,
@@ -56,9 +64,7 @@ impl StageRun<'_> {
             dir: self.slot.path(),
             log: self.log,
             number: turn,
-            id: self.row.id(),
-            stage: self.number,
-            total: self.total,
+            at: self.at(),
         }
         .run()?;
         if reply.session.is_some() {
@@ -82,7 +88,7 @@ impl StageRun<'_> {
                 (STAGE_TRAILER, format!("{number}/{total}")),
             ];
             let commit = self.slot.commit(message, &trailers)?;
-            event::commit(self.row.id(), number, total, &commit);
+            event::commit(&self.at(), &commit);
             return Ok(());
         }
     }

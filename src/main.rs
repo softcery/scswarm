@@ -1,6 +1,7 @@
 mod board;
 mod config;
 mod error;
+mod event;
 mod git;
 mod init;
 mod log;

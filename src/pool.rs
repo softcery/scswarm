@@ -5,6 +5,7 @@ use std::thread::{self, JoinHandle};
 use crate::board::Row;
 use crate::config::Config;
 use crate::error::{Error, Result};
+use crate::event;
 use crate::git::{self, Git};
 use crate::slot::Slot;
 use crate::state;
@@ -71,6 +72,7 @@ impl Pool {
     pub fn assign(&mut self, index: usize, job: Job) -> Result<()> {
         let worker = &mut self.workers[index];
         worker.task = Some(job.row.id().to_string());
+        event::assign(job.row.id(), index, job.from, job.config.stages.len());
         worker.jobs.send(job).map_err(|_| stopped(index))
     }
 }
@@ -101,8 +103,10 @@ fn stopped(index: usize) -> Error {
 /// One job at a time until scheduler drops queue. Failed job frees slot.
 fn work(slot: &Slot, project: &str, index: usize, queue: &Receiver<Job>, done: &Sender<usize>) {
     for job in queue {
-        if let Err(why) = run(slot, project, &job) {
-            eprintln!("{}: {why}", job.row.id());
+        let id = job.row.id().to_string();
+        match run(slot, project, &job) {
+            Ok(()) => event::land(&id),
+            Err(why) => event::fail(&id, &why),
         }
         if done.send(index).is_err() {
             return;

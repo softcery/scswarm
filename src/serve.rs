@@ -5,7 +5,8 @@ use std::time::Duration;
 use crate::board::{Board, Row};
 use crate::config::Config;
 use crate::error::Result;
-use crate::git::Git;
+use crate::event;
+use crate::git::{self, Git};
 use crate::pool::{Job, Pool};
 use crate::state::{self, State};
 
@@ -16,15 +17,22 @@ const FIRST_STAGE: usize = 1;
 pub fn serve(repo: &Git, project: &str) -> Result<()> {
     let config = Config::from_main(repo)?;
     let mut pool = Pool::open(repo, project, &config)?;
+    let mut head = repo.branch_commit(git::MAIN)?;
     loop {
-        cycle(repo, &mut pool)?;
+        cycle(repo, &mut pool, &mut head)?;
         thread::sleep(POLL);
     }
 }
 
-fn cycle(repo: &Git, pool: &mut Pool) -> Result<()> {
+/// Report the fetch only when `main` moved: an idle swarm stays silent.
+fn cycle(repo: &Git, pool: &mut Pool, head: &mut String) -> Result<()> {
     pool.collect()?;
     repo.fetch()?;
+    let sha = repo.branch_commit(git::MAIN)?;
+    if sha != *head {
+        event::fetch(&sha);
+        *head = sha;
+    }
     let config = Arc::new(Config::from_main(repo)?);
     let board = Board::from_main(repo, &config)?;
     let states = state::derive(&board, config.stages.len(), repo)?;

@@ -10,6 +10,7 @@ use serde_json::Value;
 
 use crate::config::{Agent, SESSION_SLOT};
 use crate::error::{Error, Result};
+use crate::event;
 use crate::podman::Container;
 
 /// Wait before a turn runs again. Doubles up to the cap while agent keeps failing.
@@ -28,6 +29,10 @@ pub struct Turn<'a> {
     pub dir: &'a Path,
     pub log: &'a Path,
     pub number: usize,
+    /// Task id, stage number and stage total: event context only.
+    pub id: &'a str,
+    pub stage: usize,
+    pub total: usize,
 }
 
 pub struct Reply {
@@ -55,7 +60,9 @@ pub struct Entry {
 
 impl Turn<'_> {
     pub fn run(&self) -> Result<Reply> {
+        event::turn(self.id, self.stage, self.total, self.number);
         let mut wait = RETRY_WAIT;
+        let mut attempt = 1;
         loop {
             let out = self.command()?.output().map_err(|why| {
                 Error::Failed(format!("agent command `{}`: {why}", self.agent.exec))
@@ -70,6 +77,14 @@ impl Turn<'_> {
                 })?;
                 return Ok(reply);
             }
+            event::retry(
+                self.id,
+                self.stage,
+                self.total,
+                self.number,
+                attempt,
+                out.status.code(),
+            );
             self.record(Entry {
                 exit: out.status.code(),
                 stdout: Some(stdout.trim().to_string()),
@@ -78,6 +93,7 @@ impl Turn<'_> {
             })?;
             thread::sleep(wait);
             wait = (wait * 2).min(RETRY_WAIT_MAX);
+            attempt += 1;
         }
     }
 

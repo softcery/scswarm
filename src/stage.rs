@@ -4,6 +4,7 @@ use std::thread;
 use crate::board::Row;
 use crate::config::{self, Agent, Config, COMMIT_TURN, TASK_SLOT};
 use crate::error::{Error, Result};
+use crate::event;
 use crate::slot::Slot;
 use crate::state::{STAGE_TRAILER, TASK_TRAILER};
 use crate::turn::{Turn, RETRY_WAIT};
@@ -54,6 +55,9 @@ impl StageRun<'_> {
             dir: self.slot.path(),
             log: self.log,
             number: turn,
+            id: self.row.id(),
+            stage: self.number,
+            total: self.total,
         }
         .run()?;
         if reply.session.is_some() {
@@ -77,11 +81,7 @@ impl StageRun<'_> {
                 (STAGE_TRAILER, format!("{number}/{total}")),
             ];
             let commit = self.slot.commit(message, &trailers)?;
-            println!(
-                "{} stage {number}/{total} {}",
-                self.row.id(),
-                short(&commit)
-            );
+            event::commit(self.row.id(), number, total, &commit);
             return Ok(());
         }
     }
@@ -95,8 +95,4 @@ fn agent<'a>(config: &'a Config, row: &Row, stage: &config::Stage) -> Result<&'a
             config::FILE
         ))
     })
-}
-
-fn short(commit: &str) -> String {
-    commit.chars().take(7).collect()
 }

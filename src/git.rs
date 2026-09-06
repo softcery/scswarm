@@ -81,6 +81,11 @@ impl Git {
         probe(&self.root, &["show-ref", "--verify", "--quiet", &refname])
     }
 
+    /// Commit sha at the tip of `branch`.
+    pub fn branch_commit(&self, branch: &str) -> Result<String> {
+        run(&self.root, &["rev-parse", &head_ref(branch)]).map(|sha| sha.trim().to_string())
+    }
+
     /// Newest commit of `branch` with trailer `key` = `value`, plus its `want` trailer.
     pub fn trailer_commit(
         &self,

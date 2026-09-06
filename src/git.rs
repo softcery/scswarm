@@ -1,0 +1,180 @@
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+use crate::error::{Error, Result};
+
+pub const MAIN: &str = "main";
+
+/// Sole caller of `git`.
+pub struct Git {
+    root: PathBuf,
+}
+
+/// Commit picked by one trailer, value of another.
+pub struct Trailer {
+    pub commit: String,
+    pub value: String,
+}
+
+impl Git {
+    pub fn discover() -> Result<Self> {
+        let root = run(Path::new("."), &["rev-parse", "--show-toplevel"])?;
+        Ok(Self::at(PathBuf::from(root.trim())))
+    }
+
+    pub fn at(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn fetch(&self) -> Result<()> {
+        run(&self.root, &["fetch", "--prune", "--quiet"]).map(drop)
+    }
+
+    /// File content at a revision. `None` when the revision holds no such path.
+    pub fn show(&self, rev: &str, path: &str) -> Result<Option<String>> {
+        let listing = run(&self.root, &["ls-tree", &head_ref(rev), "--", path])?;
+        if listing.trim().is_empty() {
+            return Ok(None);
+        }
+        run(&self.root, &["show", &format!("{rev}:{path}")]).map(Some)
+    }
+
+    pub fn branch_exists(&self, branch: &str) -> Result<bool> {
+        let refname = head_ref(branch);
+        probe(&self.root, &["show-ref", "--verify", "--quiet", &refname])
+    }
+
+    /// Newest commit of `branch` with trailer `key` = `value`, plus its `want` trailer.
+    pub fn trailer_commit(
+        &self,
+        branch: &str,
+        key: &str,
+        value: &str,
+        want: &str,
+    ) -> Result<Option<Trailer>> {
+        let format = format!(
+            "--format=%H%x1f{}%x1f{}",
+            trailer_format(key),
+            trailer_format(want)
+        );
+        let log = run(&self.root, &["log", &format, &head_ref(branch), "--"])?;
+        Ok(log.lines().find_map(|line| parse_trailer(line, value)))
+    }
+
+    pub fn is_ancestor(&self, commit: &str, branch: &str) -> Result<bool> {
+        let refname = head_ref(branch);
+        probe(
+            &self.root,
+            &["merge-base", "--is-ancestor", commit, &refname],
+        )
+    }
+
+    pub fn head(&self) -> Result<String> {
+        run(&self.root, &["rev-parse", "HEAD"]).map(|sha| sha.trim().to_string())
+    }
+
+    pub fn branch_create(&self, branch: &str, base: &str) -> Result<()> {
+        run(&self.root, &["branch", branch, &head_ref(base)]).map(drop)
+    }
+
+    /// Drop every local change, then put `branch` in the worktree.
+    pub fn checkout(&self, branch: &str) -> Result<()> {
+        run(&self.root, &["checkout", "--force", branch])?;
+        run(&self.root, &["clean", "--force", "-d"]).map(drop)
+    }
+
+    pub fn worktree_add(&self, path: &Path, rev: &str) -> Result<()> {
+        run(&self.root, &["worktree", "prune"])?;
+        let path = path_arg(path)?;
+        run(
+            &self.root,
+            &["worktree", "add", "--detach", &path, &head_ref(rev)],
+        )
+        .map(drop)
+    }
+
+    /// Stage every change and commit it: message from the agent, trailers from the host.
+    pub fn commit(&self, message: &str, trailers: &[(&str, String)]) -> Result<String> {
+        run(&self.root, &["add", "--all"])?;
+        let mut args = vec![
+            "commit".to_string(),
+            "--allow-empty".to_string(),
+            "--message".to_string(),
+            message.to_string(),
+        ];
+        for (key, value) in trailers {
+            args.push("--trailer".to_string());
+            args.push(format!("{key}={value}"));
+        }
+        run(&self.root, &borrow(&args))?;
+        self.head()
+    }
+}
+
+/// Full ref name: a branch name alone can also read as a path.
+fn head_ref(branch: &str) -> String {
+    format!("refs/heads/{branch}")
+}
+
+fn trailer_format(key: &str) -> String {
+    format!("%(trailers:key={key},valueonly,separator=%x1e)")
+}
+
+fn parse_trailer(line: &str, value: &str) -> Option<Trailer> {
+    let mut fields = line.split('\x1f');
+    let commit = fields.next()?;
+    let picked = fields.next()?.trim();
+    let wanted = fields.next()?.trim();
+    (picked == value && !wanted.is_empty()).then(|| Trailer {
+        commit: commit.to_string(),
+        value: wanted.to_string(),
+    })
+}
+
+fn path_arg(path: &Path) -> Result<String> {
+    path.to_str()
+        .map(str::to_string)
+        .ok_or_else(|| Error::Failed(format!("path must be utf-8: {}", path.display())))
+}
+
+fn borrow(args: &[String]) -> Vec<&str> {
+    args.iter().map(String::as_str).collect()
+}
+
+fn run(dir: &Path, args: &[&str]) -> Result<String> {
+    let out = output(dir, args)?;
+    if !out.status.success() {
+        return Err(failed(args, text(&out.stderr).trim()));
+    }
+    Ok(text(&out.stdout))
+}
+
+/// Exit 0 = yes, exit 1 = no, rest = failure.
+fn probe(dir: &Path, args: &[&str]) -> Result<bool> {
+    let out = output(dir, args)?;
+    match out.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(failed(args, text(&out.stderr).trim())),
+    }
+}
+
+fn output(dir: &Path, args: &[&str]) -> Result<Output> {
+    Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .map_err(|why| failed(args, &why.to_string()))
+}
+
+fn failed(args: &[&str], why: &str) -> Error {
+    Error::Failed(format!("git {}: {why}", args.join(" ")))
+}
+
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}

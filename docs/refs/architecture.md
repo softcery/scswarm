@@ -28,7 +28,7 @@ Job queue, worker pool, explicit outcome states, persisted state. Queue = board 
 
 ## Turn
 
-`podman exec <slot> <exec> [<resume>] <prompt>`. Stdout parsed for `session_id` and `result`. Transcript appended to `~/swarm/log/<project>/<id>/<stage>.jsonl`. Non-zero exit: backoff, same turn again.
+`podman exec <slot> sh -c '<exec> "$@"' sercswarm [<resume>] <prompt>`. Prompt, resume and session id ride as argv, so agent text never reaches the shell. Stdout parsed for `session_id` and `result`. Transcript appended to `~/swarm/log/<project>/<id>/<stage>.jsonl`. Non-zero exit: backoff, same turn again.
 
 ## Known limits
 

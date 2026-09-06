@@ -54,7 +54,9 @@ Project root. RON, `IMPLICIT_SOME`.
 
 - Remote: bare repo `~/swarm/<project>.git`. Project pushes `main`.
 - Branch per task: `swarm/<id>`. Base: `main`, or `swarm/<parent>` when a parent in `after` is landed and not merged.
-- Commit per stage, message from agent, trailers `Swarm-Task: <id>` and `Swarm-Stage: <n>/<total>`.
+- Worktree per slot: `~/swarm/slot/<project>/<n>`. Never inside the project checkout.
+- Commit per stage, message from agent, trailers `Swarm-Task: <id>` and `Swarm-Stage: <n>/<total>`. A stage with no diff commits empty, so state still moves.
+- Stage restart resets the worktree to the last stage commit and drops untracked files. Ignored files stay, so build caches survive.
 - Landed: last stage committed. Done: that commit is ancestor of `main`. Ready: not started, every `after` done or landed.
 
 ## CLI

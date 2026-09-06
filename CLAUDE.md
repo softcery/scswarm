@@ -78,7 +78,7 @@ Apply to everything: chat, docs, comments, commit messages, PR descriptions. Nev
 - Keep no backwards compatibility or hash stability across changes.
 - Stay on current branch. Never switch.
 - Spawn no subagents without user request or permission. Ask first when needed.
-- Write docs as claim, number, source. No prose. Rewrite with `/deslop`. Delete superseded docs. Never enter unmeasured claim into ref. Pay doc bill in same change.
+- Write docs as claim, number, source. No prose. Rewrite with `/deslop`. Delete superseded docs. Never enter unmeasured claim into ref.
 - Docs: state known limits and failure modes, not only what works. Name destination in link text. Put alt text on meaningful images. Never carry meaning by bold/color/position alone.
 - Code: put public entry point first in file, helpers below. Use one name per concept across codebase.
 - Error messages: name field, expected format, shape of received value. Never include raw failed-validation value or secret.

@@ -4,7 +4,7 @@
 
 **Why.** A 12 s `serve` run on an empty board printed 0 lines. Operator reads a stalled swarm only through `status` and `log`, and a stall inside a turn shows nowhere.
 
-**Done when.** `journalctl --user -u sercswarm` shows, in order: fetch of `main`, each row assigned with slot and stage, each stage commit with short sha, each landed task, every failure with cause and every retry with attempt number. `status` output unchanged.
+**Done when.** `journalctl --user -u sercswarm` shows, in order: fetch of `main`, each row assigned with slot and stage, each turn, each stage commit with short sha, each landed task, every failure with cause and every retry with attempt number. `status` output unchanged.
 
 ## Shape
 
@@ -58,3 +58,16 @@ Verified against source: `cargo build`, `cargo test` (7 pass), `make lint` (clea
 5. This file, Done-when (line 7) — add `turn` to the listed line order.
 6. No new tests: `pool.rs` and `stage.rs` carry none today (threading and `Slot`/`Container` need real podman to fake), matches "in doubt, write no test." `event.rs` stays untested, same as now.
 7. Verify: `cargo build`, `cargo test`, `make lint`, confirm `status.rs` still shows no diff.
+
+## Fixed
+
+- `serve.rs:21` — `event::fetch(&head)` fires once at startup, before the loop. Startup fetch line now prints every run, moving swarm or not.
+- `serve.rs:20` — plan's literal wording read `head` from `branch_commit` (a bare `rev-parse`, no network) with no `repo.fetch()` first, so the new startup event named a fetch that never ran. Added `repo.fetch()?` right before `head` loads. Line now reports a real fetch, not a stale local ref.
+- `pool.rs` — dropped `run()`. `work()` matches `stages()` directly: `land` on `Ok`, `fail` on `Err`. `slot.release()` runs after, unconditional, `.expect()` on error. A release failure panics the thread; `collect()` already turns a finished thread into `stopped` (`pool.rs:59`), no new mechanism.
+- `pool.rs` — `stages()` returns `Staged<()>` (`type Staged<T> = Result<T, (usize, Error)>`, `pool.rs:15`). Checkout failure tags `job.from`, each loop-body failure tags `number`. `fail` now reports the real stalled stage, never the release step.
+- `event.rs:39-41` — `fail(id, why)` → `fail(id, stage, total, why)`. Field order matches `commit`/`retry`: `task=`, `stage=N/T`, then payload.
+- `event.rs:3` — doc comment narrowed to "Sole writer of `serve` loop operator lines." `init.rs`/`reset.rs` untouched: one-shot command output stays outside this task's scope.
+- Done-when (line 7) — added `turn` to the listed event order.
+- No new tests: matches plan's "in doubt, write no test," `pool.rs`/`stage.rs` still carry none.
+
+**Verified.** `cargo build`, `cargo test` (7 pass), `make lint` exit 0 (fmt, clippy clean; comment-budget: `pool.rs` 16.0% prose, warn only, under 20% fail line; `paths.rs`/`slot.rs` warns pre-exist, untouched by this change). `status.rs`, `init.rs`, `reset.rs`, `main.rs` show no diff.

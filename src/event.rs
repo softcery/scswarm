@@ -1,6 +1,6 @@
 use crate::error::Error;
 
-/// Sole writer of operator lines. One function per event, fixed field order.
+/// Sole writer of `serve` loop operator lines. One function per event, fixed field order.
 /// journald stamps every line, so none carries a timestamp field.
 pub fn fetch(sha: &str) {
     println!("fetch main={}", short(sha));
@@ -36,8 +36,8 @@ pub fn land(id: &str) {
     println!("land task={id}");
 }
 
-pub fn fail(id: &str, why: &Error) {
-    println!("fail task={id} cause={why}");
+pub fn fail(id: &str, stage: usize, total: usize, why: &Error) {
+    println!("fail task={id} stage={stage}/{total} cause={why}");
 }
 
 fn short(sha: &str) -> String {

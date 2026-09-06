@@ -17,7 +17,9 @@ const FIRST_STAGE: usize = 1;
 pub fn serve(repo: &Git, project: &str) -> Result<()> {
     let config = Config::from_main(repo)?;
     let mut pool = Pool::open(repo, project, &config)?;
+    repo.fetch()?;
     let mut head = repo.branch_commit(git::MAIN)?;
+    event::fetch(&head);
     loop {
         cycle(repo, &mut pool, &mut head)?;
         thread::sleep(POLL);

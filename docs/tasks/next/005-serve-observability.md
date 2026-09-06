@@ -38,3 +38,23 @@ Line shape open: `key=value` pairs or plain words. Pick one, apply to every even
 - `status.rs` untouched, confirmed by diff.
 
 **Verified.** `cargo build`, `cargo test` (7 pass), `make lint` (fmt, clippy, comment-budget all clean). `pool.rs` comment-budget warn (15.2%) predates this change (15.9% on prior `HEAD`, checked against a throwaway copy) — not a regression.
+
+## Audit
+
+- 🔴 `serve.rs:17-25` — `serve()` reads `head` before the loop, never calls `event::fetch` for it. `cycle()` only fires `fetch` when the polled sha differs from `head`. When `main` never moves during a run, no `fetch` line prints, ever, even with rows assigning and landing throughout. Breaks the Done-when's literal first line.
+- 🔴 `pool.rs:104-121` — `work()` picks `land` vs `fail` from `run()`, and `run()` is `stages(...).and(slot.release())`. `slot.release()` (`slot.rs:68-70`, `git checkout --detach`) runs regardless and its failure overrides a successful `stages()` result. A task with every stage committed (git already reports it `Landed`, `state.rs:86-90`) prints `fail` if `release` alone fails. Contract's own known limit (`architecture.md:41`, two `serve` processes share slot worktrees, nothing locks them) makes this reachable, not hypothetical.
+- 🟡 `event.rs:39-41` — `fail(id, why)` is the one event with no `stage=`/`total=` field. `assign`, `turn`, `retry`, `commit` all carry it. A failed multi-stage task's log line gives no stage, forcing a fallback to `sercswarm log ID --stage N` for exactly the context this task exists to put on stdout.
+- 🟡 `event.rs:3` — doc comment claims "sole writer of operator lines." False: `init.rs:19,28` and `reset.rs:21` `println!` directly, `main.rs:61` `eprintln!` directly. None route through `event`.
+- 🟢 Done-when (line 7) lists fetch, assign, commit, land, failure, retry — omits `turn`, which Shape and Impl both add. Doc-only gap, no code fault.
+
+Verified against source: `cargo build`, `cargo test` (7 pass), `make lint` (clean, `pool.rs` warn predates this change) all still hold as of the audit; no regression from what Impl recorded.
+
+## Plan
+
+1. `serve.rs:20` — add `event::fetch(&head);` right after `head` loads, before the loop. `cycle()`'s change-only gate stays as is; it guards repeat polls, not the one-time startup line.
+2. `pool.rs` — drop `run()`. In `work()`, match on `stages()` directly for `land`/`fail`, so the event reflects real landing, not release. Call `slot.release()` after, unconditionally; on its error, panic the thread instead of routing through `event::fail`. `collect()` already turns a finished (panicked) thread into `Err(stopped(index))` (`pool.rs:52-58`) — reuse that, no new mechanism.
+3. `pool.rs` + `event.rs` — change `stages()` to `Result<(), (usize, Error)>`, tagging every `?` site with the stage in flight (`job.from` for the checkout, `number` inside the loop). Extend `event::fail` to `fail(id, stage, total, why)`, same field order as `commit`/`retry`.
+4. `event.rs:3` — narrow the comment to `Sole writer of \`serve\` loop operator lines.` Leave `init.rs`/`reset.rs` alone: one-shot command output is a different concept from the polling loop's event stream, out of this task's scope.
+5. This file, Done-when (line 7) — add `turn` to the listed line order.
+6. No new tests: `pool.rs` and `stage.rs` carry none today (threading and `Slot`/`Container` need real podman to fake), matches "in doubt, write no test." `event.rs` stays untested, same as now.
+7. Verify: `cargo build`, `cargo test`, `make lint`, confirm `status.rs` still shows no diff.

@@ -78,7 +78,7 @@ Exit codes: 0 ok, 1 input invalid (config, board, unknown id), 2 git or podman f
 
 ## Container
 
-Rootless podman, `--userns=keep-id`, one long-lived container per slot, named `sercswarm-<project>-<n>`. It sleeps; every turn is one `podman exec`. Mounts: slot worktree rw at same path, bare repo ro at same path, `mounts` rw. Credentials arrive as `env` names. Network on. Agent runs with its own permission checks off.
+Rootless podman, `--userns=keep-id`, one long-lived container per slot, named `sercswarm-<project>-<n>`. It sleeps; every turn is one `podman exec`. Mounts: slot worktree rw at same path, bare repo ro at same path, `mounts` rw. Every bind carries the `z` flag, so an SELinux host relabels it shared. Credentials arrive as `env` names. Network on. Agent runs with its own permission checks off.
 
 Image: `image` names a Containerfile in the checkout, built as `localhost/sercswarm/<project>`, or an image podman resolves.
 

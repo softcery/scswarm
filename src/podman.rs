@@ -12,6 +12,8 @@ const NAME: &str = "sercswarm";
 const LOCAL: &str = "localhost";
 const READ: &str = "ro";
 const WRITE: &str = "rw";
+/// SELinux hosts deny a container every host label. `z` relabels the bind shared.
+const SHARED: &str = "z";
 /// Container sleeps; work arrives through `exec`.
 const SLEEP: &str = "--entrypoint=sleep";
 const FOREVER: &str = "infinity";
@@ -135,7 +137,7 @@ fn here() -> &'static Path {
 }
 
 fn bind(host: &str, guest: &str, mode: &str) -> String {
-    format!("--volume={host}:{guest}:{mode}")
+    format!("--volume={host}:{guest}:{mode},{SHARED}")
 }
 
 fn slug(project: &str) -> String {
@@ -171,9 +173,9 @@ mod tests {
             .expect("utf-8 paths must build arguments");
         let holds = |arg: &str| args.iter().any(|held| held == arg);
         assert!(holds("--name=sercswarm-alpha-2"), "{args:?}");
-        assert!(holds("--volume=/slot/2:/slot/2:rw"), "{args:?}");
-        assert!(holds("--volume=/repo.git:/repo.git:ro"), "{args:?}");
-        assert!(holds("--volume=/records:/mnt:rw"), "{args:?}");
+        assert!(holds("--volume=/slot/2:/slot/2:rw,z"), "{args:?}");
+        assert!(holds("--volume=/repo.git:/repo.git:ro,z"), "{args:?}");
+        assert!(holds("--volume=/records:/mnt:rw,z"), "{args:?}");
         assert_eq!(args.last().map(String::as_str), Some(FOREVER));
     }
 }

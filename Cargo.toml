@@ -1,0 +1,17 @@
+[package]
+name = "sercswarm"
+version = "0.1.0"
+edition = "2021"
+description = "Autonomous task swarm: board in git, worker per worktree and container, agent sessions as scripted turns."
+authors = ["Elijah Atamas"]
+publish = false
+
+[[bin]]
+name = "sercswarm"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "wrap_help"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ron = "0.10"

@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "enabledPlugins": {
+    "caveman@caveman": false
+  },
+  "permissions": {
+    "allow": [
+      "Bash(cargo build)",
+      "Bash(cargo build *)",
+      "Bash(cargo run)",
+      "Bash(cargo run *)",
+      "Bash(cargo check)",
+      "Bash(cargo check *)",
+      "Bash(cargo test)",
+      "Bash(cargo test *)",
+      "Bash(cargo fmt)",
+      "Bash(cargo fmt *)",
+      "Bash(cargo clippy)",
+      "Bash(cargo clippy *)",
+      "Bash(cargo add *)",
+      "Bash(cargo tree)",
+      "Bash(cargo tree *)",
+      "Bash(cargo doc)",
+      "Bash(cargo doc *)",
+      "Bash(make lint)",
+      "Bash(make fmt)",
+      "Bash(make test)",
+      "Bash(python3 scripts/comment-budget.py)",
+      "Bash(python3 scripts/comment-budget.py *)",
+      "Bash(rmap *)",
+      "Bash(rg *)",
+      "Bash(git status)",
+      "Bash(git status *)",
+      "Bash(git diff)",
+      "Bash(git diff *)",
+      "Bash(git log)",
+      "Bash(git log *)",
+      "Bash(git show)",
+      "Bash(git show *)",
+      "Bash(git branch)",
+      "Bash(git branch --show-current)",
+      "Bash(git branch --list)",
+      "Bash(git branch --list *)",
+      "Bash(git add *)"
+    ],
+    "deny": [
+      "ScheduleWakeup",
+      "ReportFindings",
+      "DesignSync",
+      "EnterWorktree",
+      "ExitWorktree",
+      "SendFeedback",
+      "CronCreate",
+      "CronDelete",
+      "CronList",
+      "NotebookEdit"
+    ]
+  },
+  "outputStyle": "Caveman",
+  "enableArtifact": false,
+  "disableClaudeAiConnectors": true,
+  "disableWorkflows": true
+}

@@ -1,0 +1,47 @@
+# Architecture
+
+Why the tool has this shape. Contract: [docs/spec/contract.md](../spec/contract.md).
+
+## Purpose
+
+Fully autonomous execution of every planned task, at any time, on one workstation, with no client machine in the loop. Human writes tasks and merges. Nothing else.
+
+## Pattern
+
+Job queue, worker pool, explicit outcome states, persisted state. Queue = board on `main`. Workers = slots. State = git. Textbook shape, no framework.
+
+## Invariants
+
+- **Board is input only.** Tool reads `SWARM.md`, writes no file in the project. Chokepoint: `board` module has no write path. Violation: three branches edit one file, merges conflict.
+- **State derives from git.** Ready, running, landed, done come from branch existence and trailer commits. Chokepoint: `state` module reads git only. Violation: a crash leaves a database and a repo that disagree.
+- **Host owns git.** Agents see gitdir read-only. Every commit runs on the host with the agent's message. Chokepoint: `git` module, sole caller of `git commit`. Violation: agent rewrites history or lands a half-stage.
+- **Stage is atomic.** Restart resets the worktree to the last stage commit and reruns the next stage in a fresh session. Chokepoint: worker start reads `Swarm-Stage` trailer. Violation: half-edited worktree continues with lost context.
+- **Container is the boundary.** Agent permission checks off, container mounts fixed. One rule for every agent. Chokepoint: `podman` module builds every `run` and `exec`. Violation: two sandbox semantics, one agent escapes.
+- **Tool knows no project.** Dir names, ids, prompts, image, mounts come from the project files. Chokepoint: `config` module is the only reader of project files. Violation: second project needs a code change.
+
+## Loop
+
+1. Fetch `main` into bare repo. Parse board and config from `main`.
+2. Derive state per row.
+3. For each idle worker and ready row, in board order: create branch, run stages, land.
+4. Sleep, repeat.
+
+## Turn
+
+`podman exec <slot> <exec> [<resume>] <prompt>`. Stdout parsed for `session_id` and `result`. Transcript appended to `~/swarm/log/<project>/<id>/<stage>.jsonl`. Non-zero exit: backoff, same turn again.
+
+## Known limits
+
+- One model executes and audits when only one agent is configured.
+- Stacked branch on a rejected parent needs `reset`.
+- Board on `main` only.
+- Worker count times cargo jobs must fit the core count; set `CARGO_BUILD_JOBS` in the image.
+- Credential expiry stalls every worker.
+
+## Smells
+
+- Any path or dir name from a project in `src/`.
+- A file written under the project root by the tool.
+- `git commit` outside the `git` module.
+- A `podman` argument outside the `podman` module.
+- State kept in memory that a restart cannot rebuild from git.

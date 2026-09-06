@@ -8,7 +8,8 @@ use crate::slot::Slot;
 use crate::state::{STAGE_TRAILER, TASK_TRAILER};
 use crate::turn::{Turn, RETRY_WAIT};
 
-const COMMIT_PROMPT: &str = "Reply with the commit message for this stage. Message only.";
+const COMMIT_PROMPT: &str =
+    "Reply with the commit message for the work in this session. Message only.";
 
 /// Send every turn of one stage in one session, commit the worktree on `{commit}`.
 pub fn run(slot: &Slot, config: &Config, row: &Row, number: usize, log: &Path) -> Result<()> {

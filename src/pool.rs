@@ -5,10 +5,14 @@ use std::thread::{self, JoinHandle};
 use crate::board::Row;
 use crate::config::Config;
 use crate::error::{Error, Result};
+use crate::event;
 use crate::git::{self, Git};
 use crate::slot::Slot;
 use crate::state;
 use crate::{paths, stage};
+
+/// Outcome of running a job's stages: `Err` carries the stage in flight.
+type Staged<T> = std::result::Result<T, (usize, Error)>;
 
 /// One task on one slot: row, branches its base needs, stage to start at.
 pub struct Job {
@@ -71,6 +75,7 @@ impl Pool {
     pub fn assign(&mut self, index: usize, job: Job) -> Result<()> {
         let worker = &mut self.workers[index];
         worker.task = Some(job.row.id().to_string());
+        event::assign(job.row.id(), index, job.from, job.config.stages.len());
         worker.jobs.send(job).map_err(|_| stopped(index))
     }
 }
@@ -98,31 +103,31 @@ fn stopped(index: usize) -> Error {
     Error::Failed(format!("slot {index} stopped: restart `sercswarm serve`"))
 }
 
-/// One job at a time until scheduler drops queue. Failed job frees slot.
+/// Release always runs, so a held branch never blocks another slot.
+/// Release failing panics the thread; `collect()` turns that into `stopped`.
 fn work(slot: &Slot, project: &str, index: usize, queue: &Receiver<Job>, done: &Sender<usize>) {
     for job in queue {
-        if let Err(why) = run(slot, project, &job) {
-            eprintln!("{}: {why}", job.row.id());
+        let id = job.row.id().to_string();
+        let total = job.config.stages.len();
+        match stages(slot, project, &job) {
+            Ok(()) => event::land(&id),
+            Err((stage, why)) => event::fail(&id, stage, total, &why),
         }
+        slot.release().expect("slot release");
         if done.send(index).is_err() {
             return;
         }
     }
 }
 
-/// Release runs however the stages end: a held branch blocks every other slot.
-fn run(slot: &Slot, project: &str, job: &Job) -> Result<()> {
-    let outcome = stages(slot, project, job);
-    outcome.and(slot.release())
-}
-
-fn stages(slot: &Slot, project: &str, job: &Job) -> Result<()> {
+fn stages(slot: &Slot, project: &str, job: &Job) -> Staged<()> {
     let id = job.row.id();
-    slot.checkout(&state::branch(id), git::MAIN, &job.stack)?;
+    slot.checkout(&state::branch(id), git::MAIN, &job.stack)
+        .map_err(|why| (job.from, why))?;
     let total = job.config.stages.len();
     for number in job.from..=total {
-        let log = paths::transcript(project, id, number)?;
-        stage::run(slot, &job.config, &job.row, number, &log)?;
+        let log = paths::transcript(project, id, number).map_err(|why| (number, why))?;
+        stage::run(slot, &job.config, &job.row, number, &log).map_err(|why| (number, why))?;
     }
     Ok(())
 }

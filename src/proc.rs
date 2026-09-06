@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 pub fn run<S: AsRef<OsStr>>(bin: &str, dir: &Path, args: &[S]) -> Result<String> {
     let out = output(bin, dir, args)?;
     if !out.status.success() {
-        return Err(failed(bin, args, text(&out.stderr).trim()));
+        return Err(failed(bin, args, &fault(&out)));
     }
     Ok(text(&out.stdout))
 }
@@ -20,7 +20,7 @@ pub fn probe<S: AsRef<OsStr>>(bin: &str, dir: &Path, args: &[S]) -> Result<bool>
     match out.status.code() {
         Some(0) => Ok(true),
         Some(1) => Ok(false),
-        _ => Err(failed(bin, args, text(&out.stderr).trim())),
+        _ => Err(failed(bin, args, &fault(&out))),
     }
 }
 
@@ -51,6 +51,15 @@ fn unspawned<S: AsRef<OsStr>>(bin: &str, args: &[S], why: &io::Error) -> Error {
     match why.kind() {
         io::ErrorKind::NotFound => Error::Failed(format!("{bin} must sit on PATH")),
         _ => failed(bin, args, &why.to_string()),
+    }
+}
+
+/// git states a merge conflict on stdout, a fault on stderr. Take whichever spoke.
+fn fault(out: &Output) -> String {
+    let error = text(&out.stderr).trim().to_string();
+    match error.is_empty() {
+        true => text(&out.stdout).trim().to_string(),
+        false => error,
     }
 }
 

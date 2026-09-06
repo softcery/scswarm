@@ -5,7 +5,8 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde_json::{json, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::config::{Agent, SESSION_SLOT};
 use crate::error::{Error, Result};
@@ -26,12 +27,30 @@ pub struct Turn<'a> {
     pub prompt: &'a str,
     pub dir: &'a Path,
     pub log: &'a Path,
-    pub index: usize,
+    pub number: usize,
 }
 
 pub struct Reply {
     pub session: Option<String>,
     pub result: String,
+}
+
+/// Transcript line. Written here, read by `log`. One schema, both directions.
+#[derive(Default, Serialize, Deserialize)]
+pub struct Entry {
+    pub at: u64,
+    pub turn: usize,
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 impl Turn<'_> {
@@ -44,23 +63,19 @@ impl Turn<'_> {
             let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
             if out.status.success() {
                 let reply = parse(&stdout);
-                self.record(&json!({
-                    "at": now(),
-                    "turn": self.index,
-                    "prompt": self.prompt,
-                    "session": reply.session,
-                    "result": reply.result,
-                }))?;
+                self.record(Entry {
+                    session: reply.session.clone(),
+                    result: Some(reply.result.clone()),
+                    ..self.entry()
+                })?;
                 return Ok(reply);
             }
-            self.record(&json!({
-                "at": now(),
-                "turn": self.index,
-                "prompt": self.prompt,
-                "exit": out.status.code(),
-                "stdout": stdout.trim(),
-                "error": String::from_utf8_lossy(&out.stderr).trim(),
-            }))?;
+            self.record(Entry {
+                exit: out.status.code(),
+                stdout: Some(stdout.trim().to_string()),
+                error: Some(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+                ..self.entry()
+            })?;
             thread::sleep(wait);
             wait = (wait * 2).min(RETRY_WAIT_MAX);
         }
@@ -85,7 +100,18 @@ impl Turn<'_> {
         self.container.exec(self.dir, &argv)
     }
 
-    fn record(&self, entry: &Value) -> Result<()> {
+    fn entry(&self) -> Entry {
+        Entry {
+            at: now(),
+            turn: self.number,
+            prompt: self.prompt.to_string(),
+            ..Entry::default()
+        }
+    }
+
+    fn record(&self, entry: Entry) -> Result<()> {
+        let line = serde_json::to_string(&entry)
+            .map_err(|why| self.unwritable(&format!("entry: {why}")))?;
         if let Some(dir) = self.log.parent() {
             fs::create_dir_all(dir).map_err(|why| self.unwritable(&why.to_string()))?;
         }
@@ -94,7 +120,7 @@ impl Turn<'_> {
             .append(true)
             .open(self.log)
             .map_err(|why| self.unwritable(&why.to_string()))?;
-        writeln!(file, "{entry}").map_err(|why| self.unwritable(&why.to_string()))
+        writeln!(file, "{line}").map_err(|why| self.unwritable(&why.to_string()))
     }
 
     fn unwritable(&self, why: &str) -> Error {

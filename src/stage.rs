@@ -23,10 +23,11 @@ pub fn run(slot: &Slot, config: &Config, row: &Row, number: usize, log: &Path) -
         session: None,
     };
     for (index, template) in stage.turns.iter().enumerate() {
+        let number = index + 1;
         if template == COMMIT_TURN {
-            run.commit(index)?;
+            run.commit(number)?;
         } else {
-            run.turn(&template.replace(TASK_SLOT, &row.task), index)?;
+            run.turn(&template.replace(TASK_SLOT, &row.task), number)?;
         }
     }
     Ok(())
@@ -44,7 +45,7 @@ struct StageRun<'a> {
 }
 
 impl StageRun<'_> {
-    fn turn(&mut self, prompt: &str, index: usize) -> Result<String> {
+    fn turn(&mut self, prompt: &str, turn: usize) -> Result<String> {
         let reply = Turn {
             agent: self.agent,
             container: self.slot.container(),
@@ -52,7 +53,7 @@ impl StageRun<'_> {
             prompt,
             dir: self.slot.path(),
             log: self.log,
-            index,
+            number: turn,
         }
         .run()?;
         if reply.session.is_some() {
@@ -62,10 +63,10 @@ impl StageRun<'_> {
     }
 
     /// Ask agent for message, commit on host with stage trailers.
-    fn commit(&mut self, index: usize) -> Result<()> {
+    fn commit(&mut self, turn: usize) -> Result<()> {
         let (number, total) = (self.number, self.total);
         loop {
-            let reply = self.turn(COMMIT_PROMPT, index)?;
+            let reply = self.turn(COMMIT_PROMPT, turn)?;
             let message = reply.trim();
             if message.is_empty() {
                 thread::sleep(RETRY_WAIT);

@@ -16,7 +16,7 @@ pub struct Board {
     rows: Vec<Row>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Row {
     pub task: String,
     /// Row indices this row waits for, resolved at parse time.

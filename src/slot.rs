@@ -7,7 +7,8 @@ use crate::podman::Container;
 
 const WORKTREE_LINK: &str = ".git";
 
-/// Worker slot: worktree outside the project checkout, container over that worktree.
+/// Worker slot: worktree outside project checkout, container over it.
+/// An open slot is idle, so it holds no branch: a crash leaves one checked out.
 pub struct Slot {
     git: Git,
     path: PathBuf,
@@ -26,11 +27,13 @@ impl Slot {
         if !path.join(WORKTREE_LINK).exists() {
             repo.worktree_add(&path, base)?;
         }
-        Ok(Self {
+        let slot = Self {
             git: Git::at(path.clone()),
             path,
             container: Container::slot(project, index, env),
-        })
+        };
+        slot.release()?;
+        Ok(slot)
     }
 
     pub fn path(&self) -> &Path {
@@ -41,12 +44,29 @@ impl Slot {
         &self.container
     }
 
-    /// Put `branch` in the worktree at its tip, work tree clean of the last run.
-    pub fn checkout(&self, branch: &str, base: &str) -> Result<()> {
-        if !self.git.branch_exists(branch)? {
-            self.git.branch_create(branch, base)?;
+    /// Put `branch` in worktree at tip, tree clean. New branch: `base` plus merge of `stack`.
+    pub fn checkout(&self, branch: &str, base: &str, stack: &[String]) -> Result<()> {
+        if self.git.branch_exists(branch)? {
+            return self.git.checkout(branch);
         }
-        self.git.checkout(branch)
+        self.git.branch_create(branch, base)?;
+        self.git.checkout(branch)?;
+        if let Err(why) = stack.iter().try_for_each(|parent| self.git.merge(parent)) {
+            self.unmake(branch)?;
+            return Err(why);
+        }
+        Ok(())
+    }
+
+    /// Half-stacked branch hides a missing parent. Drop it: next try starts over.
+    fn unmake(&self, branch: &str) -> Result<()> {
+        self.git.merge_abort()?;
+        self.git.detach()?;
+        self.git.branch_delete(branch)
+    }
+
+    pub fn release(&self) -> Result<()> {
+        self.git.detach()
     }
 
     pub fn commit(&self, message: &str, trailers: &[(&str, String)]) -> Result<String> {

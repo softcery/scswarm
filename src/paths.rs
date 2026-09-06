@@ -1,5 +1,6 @@
 use std::env;
 use std::ffi::OsStr;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
@@ -7,6 +8,7 @@ use crate::error::{Error, Result};
 const SWARM_DIR: &str = "swarm";
 const SLOT_DIR: &str = "slot";
 const LOG_DIR: &str = "log";
+const LOG_EXT: &str = "jsonl";
 const REPO_SUFFIX: &str = ".git";
 const HOME_PREFIX: &str = "~/";
 
@@ -29,18 +31,34 @@ pub fn repo(project: &str) -> Result<PathBuf> {
 }
 
 pub fn slot(project: &str, index: usize) -> Result<PathBuf> {
-    Ok(swarm()?
-        .join(SLOT_DIR)
-        .join(project)
-        .join(index.to_string()))
+    Ok(slots(project)?.join(index.to_string()))
+}
+
+/// Slot number of a worktree path. `None` when the path is no slot of this project.
+pub fn slot_index(project: &str, path: &Path) -> Result<Option<usize>> {
+    let slots = real(&slots(project)?);
+    let path = real(path);
+    Ok(path
+        .parent()
+        .filter(|parent| *parent == slots)
+        .and_then(|_| path.file_name()?.to_str()?.parse().ok()))
+}
+
+/// Every transcript of one task, one file per stage.
+pub fn transcripts(project: &str, id: &str) -> Result<PathBuf> {
+    Ok(swarm()?.join(LOG_DIR).join(project).join(id))
 }
 
 pub fn transcript(project: &str, id: &str, stage: usize) -> Result<PathBuf> {
-    Ok(swarm()?
-        .join(LOG_DIR)
-        .join(project)
-        .join(id)
-        .join(format!("{stage}.jsonl")))
+    Ok(transcripts(project, id)?.join(format!("{stage}.{LOG_EXT}")))
+}
+
+/// Stage number of a transcript path. `None` when the file is no transcript.
+pub fn transcript_stage(path: &Path) -> Option<usize> {
+    if path.extension().and_then(OsStr::to_str)? != LOG_EXT {
+        return None;
+    }
+    path.file_stem()?.to_str()?.parse().ok()
 }
 
 /// Path as a command argument.
@@ -56,6 +74,15 @@ pub fn expand(path: &str) -> Result<String> {
         Some(rest) => arg(&home()?.join(rest)),
         None => Ok(path.to_string()),
     }
+}
+
+/// git reports worktree paths with every symlink resolved. Compare resolved.
+fn real(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn slots(project: &str) -> Result<PathBuf> {
+    Ok(swarm()?.join(SLOT_DIR).join(project))
 }
 
 fn swarm() -> Result<PathBuf> {

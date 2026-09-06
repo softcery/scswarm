@@ -29,9 +29,11 @@ sercswarm reset ID  drop branch of task and dependants
 
 `cargo build --release`, `cargo install --path .`. Lint: `make lint`.
 
+Run under systemd: copy [systemd/sercswarm.service](systemd/sercswarm.service) to `~/.config/systemd/user/`, set `WorkingDirectory` to the project checkout, then `systemctl --user enable --now sercswarm`.
+
 ## Limits
 
 - Reads the board from `main` only.
 - Needs rootless podman. `init` replaces every slot container, so stop `serve` first.
-- A task stacked on a rejected parent needs `reset`.
+- A task stacked on a rejected parent needs `reset`. Stop `serve` first.
 - Agent process errors retry without cap. Expired credentials stall every worker until renewed.

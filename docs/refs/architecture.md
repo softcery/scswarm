@@ -17,14 +17,16 @@ Job queue, worker pool, explicit outcome states, persisted state. Queue = board 
 - **Host owns git.** Agents see gitdir read-only. Every commit runs on the host with the agent's message. Chokepoint: `git` module, sole caller of `git commit`. Violation: agent rewrites history or lands a half-stage.
 - **Stage is atomic.** Restart resets the worktree to the last stage commit and reruns the next stage in a fresh session. Chokepoint: worker start reads `Swarm-Stage` trailer. Violation: half-edited worktree continues with lost context.
 - **Container is the boundary.** Agent permission checks off, container mounts fixed. One rule for every agent. Chokepoint: `podman` module builds every `run` and `exec`. Violation: two sandbox semantics, one agent escapes.
+- **One row, one slot.** The scheduler hands a row to a single slot and skips it until that slot reports back. Chokepoint: `pool` holds the row id per slot; `status` reads the same fact from worktree checkouts. Violation: two containers commit one branch.
 - **Tool knows no project.** Dir names, ids, prompts, image, mounts come from the project files. Chokepoint: `config` module is the only reader of project files. Violation: second project needs a code change.
 
 ## Loop
 
 1. Fetch `main` into bare repo. Parse board and config from `main`.
 2. Derive state per row.
-3. For each idle worker and ready row, in board order: create branch, run stages, land.
-4. Sleep, repeat.
+3. For each idle slot and open row, in board order: create branch on base, run stages, land. Slots run at once, one row each.
+4. Slot detaches its worktree at the end, and at open. Git allows one worktree per branch, so a held branch blocks every other slot.
+5. Sleep, repeat.
 
 ## Turn
 
@@ -34,6 +36,9 @@ Job queue, worker pool, explicit outcome states, persisted state. Queue = board 
 
 - One model executes and audits when only one agent is configured.
 - Stacked branch on a rejected parent needs `reset`.
+- Two landed parents that conflict: the branch is dropped and retried every cycle until a human merges `main`.
+- `reset` during `serve` races the worker holding that branch.
+- Two `serve` processes on one project share the slot worktrees. Nothing locks them.
 - Board on `main` only.
 - Worker count times cargo jobs must fit the core count; set `CARGO_BUILD_JOBS` in the image.
 - Credential expiry stalls every worker.

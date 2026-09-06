@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -10,6 +11,11 @@ const BIN: &str = "git";
 
 const ORIGIN_URL: &str = "remote.origin.url";
 const ORIGIN_FETCH: &str = "remote.origin.fetch";
+
+const HEADS: &str = "refs/heads/";
+const MERGE_HEAD: &str = "MERGE_HEAD";
+const WORKTREE_FIELD: &str = "worktree ";
+const BRANCH_FIELD: &str = "branch ";
 
 /// Sole caller of `git`.
 pub struct Git {
@@ -105,13 +111,48 @@ impl Git {
     }
 
     pub fn branch_create(&self, branch: &str, base: &str) -> Result<()> {
-        run(&self.root, &["branch", branch, &head_ref(base)]).map(drop)
+        run(
+            &self.root,
+            &["branch", "--no-track", branch, &head_ref(base)],
+        )
+        .map(drop)
+    }
+
+    pub fn branch_delete(&self, branch: &str) -> Result<()> {
+        run(&self.root, &["branch", "--delete", "--force", branch]).map(drop)
     }
 
     /// Drop every local change, then put `branch` in the worktree.
     pub fn checkout(&self, branch: &str) -> Result<()> {
         run(&self.root, &["checkout", "--force", branch])?;
         run(&self.root, &["clean", "--force", "-d"]).map(drop)
+    }
+
+    /// Leave the branch behind at the same commit, so another worktree can take it.
+    pub fn detach(&self) -> Result<()> {
+        run(&self.root, &["checkout", "--detach"]).map(drop)
+    }
+
+    /// Merge `branch` into the checked-out branch. Fast-forward when it can.
+    pub fn merge(&self, branch: &str) -> Result<()> {
+        run(&self.root, &["merge", "--no-edit", &head_ref(branch)]).map(drop)
+    }
+
+    /// Undo a conflicted merge. Does nothing when no merge is in flight.
+    pub fn merge_abort(&self) -> Result<()> {
+        if !probe(
+            &self.root,
+            &["rev-parse", "--verify", "--quiet", MERGE_HEAD],
+        )? {
+            return Ok(());
+        }
+        run(&self.root, &["merge", "--abort"]).map(drop)
+    }
+
+    /// Worktree path holding each checked-out branch. Detached worktrees hold none.
+    pub fn checkouts(&self) -> Result<BTreeMap<String, PathBuf>> {
+        let listing = run(&self.root, &["worktree", "list", "--porcelain"])?;
+        Ok(parse_checkouts(&listing))
     }
 
     pub fn worktree_add(&self, path: &Path, rev: &str) -> Result<()> {
@@ -144,7 +185,24 @@ impl Git {
 
 /// Full ref name: a branch name alone can also read as a path.
 fn head_ref(branch: &str) -> String {
-    format!("refs/heads/{branch}")
+    format!("{HEADS}{branch}")
+}
+
+/// Porcelain worktree list: `worktree <path>` opens a block, `branch <ref>` names its branch.
+fn parse_checkouts(listing: &str) -> BTreeMap<String, PathBuf> {
+    let mut checkouts = BTreeMap::new();
+    let mut path = None;
+    for line in listing.lines() {
+        if let Some(rest) = line.strip_prefix(WORKTREE_FIELD) {
+            path = Some(PathBuf::from(rest));
+        } else if let Some(rest) = line.strip_prefix(BRANCH_FIELD) {
+            let branch = rest.strip_prefix(HEADS).unwrap_or(rest);
+            if let Some(path) = path.clone() {
+                checkouts.insert(branch.to_string(), path);
+            }
+        }
+    }
+    checkouts
 }
 
 fn trailer_format(key: &str) -> String {

@@ -8,4 +8,9 @@ RUN npm install -g @anthropic-ai/claude-code && npm cache clean --force
 
 RUN useradd --uid 1001 --create-home dev
 USER dev
+
+# Agent runs unattended: no trust prompt, no onboarding prompt. Paths are the
+# bare repo and the slot worktrees the swarm mounts.
+RUN printf '%s' '{"hasCompletedOnboarding":true,"bypassPermissionsModeAccepted":true,"projects":{"/home/dev/swarm/sercswarm.git":{"hasTrustDialogAccepted":true},"/home/dev/swarm/slot/sercswarm/0":{"hasTrustDialogAccepted":true},"/home/dev/swarm/slot/sercswarm/1":{"hasTrustDialogAccepted":true}}}' > /home/dev/.claude.json
+
 ENV CARGO_BUILD_JOBS=4

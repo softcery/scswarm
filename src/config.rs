@@ -20,10 +20,46 @@ pub struct Config {
     pub workers: usize,
     pub image: String,
     #[serde(default)]
-    pub mounts: Vec<String>,
+    pub mounts: Vec<Mount>,
+    /// Host environment variables the containers get. Credentials ride here.
+    #[serde(default)]
+    pub env: Vec<String>,
     pub default_agent: String,
     pub agents: BTreeMap<String, Agent>,
     pub stages: Vec<Stage>,
+}
+
+/// One bind: absolute host path, absolute container path. Both sides rw.
+#[derive(Debug, Deserialize)]
+#[serde(try_from = "String")]
+pub struct Mount {
+    pub host: String,
+    pub guest: String,
+}
+
+impl TryFrom<String> for Mount {
+    type Error = String;
+
+    fn try_from(raw: String) -> std::result::Result<Self, String> {
+        let parts: Vec<&str> = raw.split(':').collect();
+        let [host, guest] = parts[..] else {
+            return Err(shaped(&format!("{} parts", parts.len())));
+        };
+        if !host.starts_with('/') && !host.starts_with("~/") {
+            return Err(shaped("a host side neither absolute nor under `~/`"));
+        }
+        if !guest.starts_with('/') {
+            return Err(shaped("a container side not absolute"));
+        }
+        Ok(Self {
+            host: host.to_string(),
+            guest: guest.to_string(),
+        })
+    }
+}
+
+fn shaped(got: &str) -> String {
+    format!("field `mounts` entry must read `/host:/container`: got {got}")
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,19 +112,17 @@ impl Config {
                 "field `image` must name a Containerfile path or an image",
             ));
         }
-        self.check_mounts()?;
+        self.check_env()?;
         self.check_agents()?;
         self.check_stages()
     }
 
-    fn check_mounts(&self) -> Result<()> {
-        for (index, mount) in self.mounts.iter().enumerate() {
-            let paired = mount
-                .split_once(':')
-                .is_some_and(|(host, guest)| !host.is_empty() && !guest.is_empty());
-            if !paired {
+    fn check_env(&self) -> Result<()> {
+        for (index, name) in self.env.iter().enumerate() {
+            let plain = |letter: char| letter.is_ascii_alphanumeric() || letter == '_';
+            if name.is_empty() || !name.chars().all(plain) {
                 return Err(invalid(&format!(
-                    "field `mounts` entry {} must read `host:container`",
+                    "field `env` entry {} must name a host environment variable",
                     index + 1
                 )));
             }
@@ -166,6 +200,7 @@ mod tests {
   workers: 3,
   image: "Containerfile.swarm",
   mounts: ["~/alpha/records:/records"],
+  env: ["ANTHROPIC_API_KEY"],
   default_agent: "claude",
   agents: {
     "claude": (
@@ -184,7 +219,9 @@ mod tests {
     fn parses_contract_example() {
         let config = Config::parse(EXAMPLE).expect("example must parse");
         assert_eq!(config.workers, 3);
-        assert_eq!(config.mounts, ["~/alpha/records:/records"]);
+        assert_eq!(config.mounts[0].host, "~/alpha/records");
+        assert_eq!(config.mounts[0].guest, "/records");
+        assert_eq!(config.env, ["ANTHROPIC_API_KEY"]);
         assert_eq!(config.stages.len(), 2);
         assert_eq!(config.stages[0].agent, None);
         assert_eq!(config.stages[1].agent.as_deref(), Some("claude"));

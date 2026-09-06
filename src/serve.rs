@@ -13,21 +13,22 @@ const POLL: Duration = Duration::from_secs(5);
 const SLOT: usize = 0;
 
 /// Fetch, derive, run the first open row to its last stage, sleep. Until killed.
-pub fn serve(git: &Git) -> Result<()> {
-    let project = paths::project(git.root())?;
-    let slot = Slot::open(git, paths::slot(&project, SLOT)?, git::MAIN)?;
+pub fn serve(repo: &Git, project: &str) -> Result<()> {
+    let config = Config::from_main(repo)?;
+    let slot = Slot::open(repo, project, SLOT, git::MAIN, &config.env)?;
+    slot.container().start()?;
     loop {
-        cycle(git, &slot, &project)?;
+        cycle(repo, &slot, project)?;
         thread::sleep(POLL);
     }
 }
 
-fn cycle(git: &Git, slot: &Slot, project: &str) -> Result<()> {
-    git.fetch()?;
-    let config = Config::from_main(git)?;
-    let board = Board::from_main(git, &config)?;
+fn cycle(repo: &Git, slot: &Slot, project: &str) -> Result<()> {
+    repo.fetch()?;
+    let config = Config::from_main(repo)?;
+    let board = Board::from_main(repo, &config)?;
     let total = config.stages.len();
-    let states = state::derive(&board, total, git)?;
+    let states = state::derive(&board, total, repo)?;
     let Some(index) = states.iter().position(pending) else {
         return Ok(());
     };

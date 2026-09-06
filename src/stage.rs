@@ -47,6 +47,7 @@ impl StageRun<'_> {
     fn turn(&mut self, prompt: &str, index: usize) -> Result<String> {
         let reply = Turn {
             agent: self.agent,
+            container: self.slot.container(),
             session: self.session.as_deref(),
             prompt,
             dir: self.slot.path(),

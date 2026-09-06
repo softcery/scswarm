@@ -1,9 +1,15 @@
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 
 use crate::error::{Error, Result};
+use crate::{paths, proc};
 
 pub const MAIN: &str = "main";
+
+const BIN: &str = "git";
+
+const ORIGIN_URL: &str = "remote.origin.url";
+const ORIGIN_FETCH: &str = "remote.origin.fetch";
 
 /// Sole caller of `git`.
 pub struct Git {
@@ -18,8 +24,22 @@ pub struct Trailer {
 
 impl Git {
     pub fn discover() -> Result<Self> {
-        let root = run(Path::new("."), &["rev-parse", "--show-toplevel"])?;
+        Self::discover_at(Path::new("."))
+    }
+
+    /// Repo that holds `dir`.
+    pub fn discover_at(dir: &Path) -> Result<Self> {
+        let root = run(dir, &["rev-parse", "--show-toplevel"])?;
         Ok(Self::at(PathBuf::from(root.trim())))
+    }
+
+    /// Create the bare repo at `path`, parents and all.
+    pub fn init_bare(path: &Path) -> Result<Self> {
+        let parent = path.parent().unwrap_or(Path::new("."));
+        fs::create_dir_all(parent)
+            .map_err(|why| Error::Failed(format!("directory {}: {why}", parent.display())))?;
+        run(parent, &["init", "--bare", "--quiet", &paths::arg(path)?])?;
+        Ok(Self::at(path.to_path_buf()))
     }
 
     pub fn at(root: PathBuf) -> Self {
@@ -28,6 +48,13 @@ impl Git {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Point `origin` at the project checkout and take `main` from it alone.
+    pub fn set_origin(&self, url: &Path) -> Result<()> {
+        run(&self.root, &["config", ORIGIN_URL, &paths::arg(url)?])?;
+        let refspec = format!("+{0}:{0}", head_ref(MAIN));
+        run(&self.root, &["config", ORIGIN_FETCH, &refspec]).map(drop)
     }
 
     pub fn fetch(&self) -> Result<()> {
@@ -89,7 +116,7 @@ impl Git {
 
     pub fn worktree_add(&self, path: &Path, rev: &str) -> Result<()> {
         run(&self.root, &["worktree", "prune"])?;
-        let path = path_arg(path)?;
+        let path = paths::arg(path)?;
         run(
             &self.root,
             &["worktree", "add", "--detach", &path, &head_ref(rev)],
@@ -135,46 +162,14 @@ fn parse_trailer(line: &str, value: &str) -> Option<Trailer> {
     })
 }
 
-fn path_arg(path: &Path) -> Result<String> {
-    path.to_str()
-        .map(str::to_string)
-        .ok_or_else(|| Error::Failed(format!("path must be utf-8: {}", path.display())))
-}
-
 fn borrow(args: &[String]) -> Vec<&str> {
     args.iter().map(String::as_str).collect()
 }
 
 fn run(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = output(dir, args)?;
-    if !out.status.success() {
-        return Err(failed(args, text(&out.stderr).trim()));
-    }
-    Ok(text(&out.stdout))
+    proc::run(BIN, dir, args)
 }
 
-/// Exit 0 = yes, exit 1 = no, rest = failure.
 fn probe(dir: &Path, args: &[&str]) -> Result<bool> {
-    let out = output(dir, args)?;
-    match out.status.code() {
-        Some(0) => Ok(true),
-        Some(1) => Ok(false),
-        _ => Err(failed(args, text(&out.stderr).trim())),
-    }
-}
-
-fn output(dir: &Path, args: &[&str]) -> Result<Output> {
-    Command::new("git")
-        .current_dir(dir)
-        .args(args)
-        .output()
-        .map_err(|why| failed(args, &why.to_string()))
-}
-
-fn failed(args: &[&str], why: &str) -> Error {
-    Error::Failed(format!("git {}: {why}", args.join(" ")))
-}
-
-fn text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
+    proc::probe(BIN, dir, args)
 }

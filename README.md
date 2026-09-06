@@ -12,13 +12,13 @@ Autonomous task swarm for any git project. One binary on a workstation. You push
 ## Files
 
 - `SWARM.md`: board. Contract in [docs/spec/contract.md](docs/spec/contract.md).
-- `sercswarm.ron`: workers, image, mounts, agents, stages. Same doc.
+- `sercswarm.ron`: workers, image, mounts, env, agents, stages. Same doc.
 - State: git branches and commit trailers only. Design in [docs/refs/architecture.md](docs/refs/architecture.md).
 
 ## Commands
 
 ```
-sercswarm init      bare repo, slots, image
+sercswarm init      bare repo, image, slot worktrees and containers
 sercswarm serve     scheduler and workers, foreground
 sercswarm status    board rows with derived state
 sercswarm log ID    transcript of one task
@@ -32,5 +32,6 @@ sercswarm reset ID  drop branch of task and dependants
 ## Limits
 
 - Reads the board from `main` only.
+- Needs rootless podman. `init` replaces every slot container, so stop `serve` first.
 - A task stacked on a rejected parent needs `reset`.
 - Agent process errors retry without cap. Expired credentials stall every worker until renewed.

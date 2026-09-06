@@ -9,14 +9,19 @@ use serde_json::{json, Value};
 
 use crate::config::{Agent, SESSION_SLOT};
 use crate::error::{Error, Result};
+use crate::podman::Container;
 
 /// Wait before a turn runs again. Doubles up to the cap while agent keeps failing.
 pub const RETRY_WAIT: Duration = Duration::from_secs(1);
 const RETRY_WAIT_MAX: Duration = Duration::from_secs(60);
+const SHELL: &str = "sh";
+/// Shell `$0`, so prompt stays `$1`.
+const ARGV0: &str = "sercswarm";
 
 /// One prompt for one agent, sent again after every failing exit.
 pub struct Turn<'a> {
     pub agent: &'a Agent,
+    pub container: &'a Container,
     pub session: Option<&'a str>,
     pub prompt: &'a str,
     pub dir: &'a Path,
@@ -33,7 +38,7 @@ impl Turn<'_> {
     pub fn run(&self) -> Result<Reply> {
         let mut wait = RETRY_WAIT;
         loop {
-            let out = self.command().output().map_err(|why| {
+            let out = self.command()?.output().map_err(|why| {
                 Error::Failed(format!("agent command `{}`: {why}", self.agent.exec))
             })?;
             let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -62,22 +67,22 @@ impl Turn<'_> {
     }
 
     /// `sh -c '<exec> "$@"' sercswarm [<resume>] <prompt>`: agent text never reaches the shell.
-    fn command(&self) -> Command {
-        let mut command = Command::new("sh");
-        command
-            .arg("-c")
-            .arg(format!("{} \"$@\"", self.agent.exec))
-            .arg("sercswarm")
-            .current_dir(self.dir);
+    fn command(&self) -> Result<Command> {
+        let mut argv = vec![
+            SHELL.to_string(),
+            "-c".to_string(),
+            format!("{} \"$@\"", self.agent.exec),
+            ARGV0.to_string(),
+        ];
         if let (Some(session), Some(resume)) = (self.session, self.agent.resume.as_deref()) {
-            command.args(
+            argv.extend(
                 resume
                     .split_whitespace()
                     .map(|token| token.replace(SESSION_SLOT, session)),
             );
         }
-        command.arg(self.prompt);
-        command
+        argv.push(self.prompt.to_string());
+        self.container.exec(self.dir, &argv)
     }
 
     fn record(&self, entry: &Value) -> Result<()> {

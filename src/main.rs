@@ -2,19 +2,23 @@ mod board;
 mod config;
 mod error;
 mod git;
+mod init;
 mod paths;
+mod podman;
+mod proc;
 mod serve;
 mod slot;
 mod stage;
 mod state;
 mod turn;
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 use crate::board::{Board, Row};
 use crate::config::Config;
 use crate::error::Result;
-use crate::git::Git;
 use crate::state::State;
 
 const HEADER: [&str; 5] = ["id", "state", "branch", "stage", "worker"];
@@ -30,6 +34,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(about = "Create bare repo, slot worktrees, image and containers")]
+    Init {
+        #[arg(long, value_name = "DIR", default_value = ".")]
+        root: PathBuf,
+    },
     #[command(about = "Run scheduler and worker until stopped")]
     Serve,
     #[command(about = "Print board rows with state derived from git")]
@@ -46,17 +55,21 @@ fn main() {
 
 fn dispatch(command: Command) -> Result<()> {
     match command {
-        Command::Serve => serve::serve(&Git::discover()?),
+        Command::Init { root } => init::init(&root),
+        Command::Serve => {
+            let (project, repo) = init::open()?;
+            serve::serve(&repo, &project)
+        }
         Command::Status => status(),
     }
 }
 
 fn status() -> Result<()> {
-    let git = Git::discover()?;
-    let config = Config::from_main(&git)?;
-    let board = Board::from_main(&git, &config)?;
+    let (_, repo) = init::open()?;
+    let config = Config::from_main(&repo)?;
+    let board = Board::from_main(&repo, &config)?;
     let total = config.stages.len();
-    let states = state::derive(&board, total, &git)?;
+    let states = state::derive(&board, total, &repo)?;
     print!("{}", render(&board, &states, total));
     Ok(())
 }

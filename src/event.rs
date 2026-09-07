@@ -21,6 +21,13 @@ pub fn assign(at: &At, slot: usize) {
     );
 }
 
+pub fn merge(at: &At, parent: &str) {
+    println!(
+        "merge task={} parent={parent} stage={}/{}",
+        at.id, at.stage, at.total
+    );
+}
+
 pub fn turn(at: &At, number: usize) {
     println!(
         "turn task={} stage={}/{} turn={number}",

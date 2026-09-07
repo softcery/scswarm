@@ -2,37 +2,55 @@ use std::path::Path;
 use std::thread;
 
 use crate::board::Row;
-use crate::config::{self, Agent, Config, COMMIT_TURN, TASK_SLOT};
+use crate::config::{self, Agent, Config, COMMIT_TURN, PARENT_SLOT, TASK_SLOT};
 use crate::error::{Error, Result};
 use crate::event;
 use crate::slot::Slot;
 use crate::state::{STAGE_TRAILER, TASK_TRAILER};
-use crate::turn::{Turn, RETRY_WAIT};
+use crate::turn::{Turn, ATTEMPTS, RETRY_WAIT};
 
 const COMMIT_PROMPT: &str =
     "Reply with the commit message for the work in this session. Message only.";
 
-/// Send every turn of one stage in one session, commit the worktree on `{commit}`.
+/// Merge session number. Runs before stage 1, commits merge.
+pub const MERGE: usize = 0;
+
+/// Send every turn of one stage in one session, commit worktree on `{commit}`.
 pub fn run(slot: &Slot, config: &Config, row: &Row, number: usize, log: &Path) -> Result<()> {
     let stage = &config.stages[number - 1];
-    let mut run = StageRun {
+    StageRun {
         slot,
         agent: agent(config, row, stage)?,
         row,
         number,
         total: config.stages.len(),
         log,
+        parent: None,
         session: None,
-    };
-    for (index, template) in stage.turns.iter().enumerate() {
-        let number = index + 1;
-        if template == COMMIT_TURN {
-            run.commit(number)?;
-        } else {
-            run.turn(&template.replace(TASK_SLOT, &row.task), number)?;
-        }
     }
-    Ok(())
+    .play(stage)
+}
+
+/// Hand conflicted worktree to project merge turns.
+/// `false` when project sets none: caller keeps git error.
+pub fn resolve(slot: &Slot, config: &Config, row: &Row, parent: &str, log: &Path) -> Result<bool> {
+    let Some(stage) = config.merge.as_ref() else {
+        return Ok(false);
+    };
+    let total = config.stages.len();
+    event::merge(&at(row, MERGE, total), parent);
+    StageRun {
+        slot,
+        agent: agent(config, row, stage)?,
+        row,
+        number: MERGE,
+        total,
+        log,
+        parent: Some(parent),
+        session: None,
+    }
+    .play(stage)?;
+    Ok(true)
 }
 
 struct StageRun<'a> {
@@ -42,17 +60,35 @@ struct StageRun<'a> {
     number: usize,
     total: usize,
     log: &'a Path,
+    /// Branch merged in this session. `None` off merge.
+    parent: Option<&'a str>,
     /// Session id of the agent, known from its first reply on.
     session: Option<String>,
 }
 
 impl StageRun<'_> {
-    fn at(&self) -> event::At<'_> {
-        event::At {
-            id: self.row.id(),
-            stage: self.number,
-            total: self.total,
+    fn play(&mut self, stage: &config::Stage) -> Result<()> {
+        for (index, template) in stage.turns.iter().enumerate() {
+            let number = index + 1;
+            if template == COMMIT_TURN {
+                self.commit(number)?;
+            } else {
+                self.turn(&self.fill(template), number)?;
+            }
         }
+        Ok(())
+    }
+
+    fn fill(&self, template: &str) -> String {
+        let prompt = template.replace(TASK_SLOT, &self.row.task);
+        match self.parent {
+            Some(parent) => prompt.replace(PARENT_SLOT, parent),
+            None => prompt,
+        }
+    }
+
+    fn at(&self) -> event::At<'_> {
+        at(self.row, self.number, self.total)
     }
 
     fn turn(&mut self, prompt: &str, turn: usize) -> Result<String> {
@@ -76,11 +112,13 @@ impl StageRun<'_> {
     /// Ask agent for message, commit on host with stage trailers.
     fn commit(&mut self, turn: usize) -> Result<()> {
         let (number, total) = (self.number, self.total);
-        loop {
+        for attempt in 1..=ATTEMPTS {
             let reply = self.turn(COMMIT_PROMPT, turn)?;
             let message = reply.trim();
             if message.is_empty() {
-                thread::sleep(RETRY_WAIT);
+                if attempt < ATTEMPTS {
+                    thread::sleep(RETRY_WAIT);
+                }
                 continue;
             }
             let trailers = [
@@ -91,6 +129,17 @@ impl StageRun<'_> {
             event::commit(&self.at(), &commit);
             return Ok(());
         }
+        Err(Error::Failed(format!(
+            "agent must reply a commit message of one line or more: {ATTEMPTS} tries, each blank"
+        )))
+    }
+}
+
+fn at<'a>(row: &'a Row, number: usize, total: usize) -> event::At<'a> {
+    event::At {
+        id: row.id(),
+        stage: number,
+        total,
     }
 }
 

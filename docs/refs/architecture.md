@@ -13,9 +13,11 @@ Job queue, worker pool, explicit outcome states, persisted state. Queue = board 
 ## Invariants
 
 - **Board is input only.** Tool reads `SWARM.md`, writes no file in the project. Chokepoint: `board` module has no write path. Violation: three branches edit one file, merges conflict.
-- **State derives from git.** Ready, running, landed, done come from branch existence and trailer commits. Chokepoint: `state` module reads git only. Violation: a crash leaves a database and a repo that disagree.
+- **State derives from git.** Ready, running, failed, landed, done come from branch existence, trailer commits and the fail mark ref. Chokepoint: `state` module reads git only. Violation: a crash leaves a database and a repo that disagree.
 - **Host owns git.** Agents see gitdir read-only. Every commit runs on the host with the agent's message. Chokepoint: `git` module, sole caller of `git commit`. Violation: agent rewrites history or lands a half-stage.
 - **Stage is atomic.** Restart resets the worktree to the last stage commit and reruns the next stage in a fresh session. Chokepoint: worker start reads `Swarm-Stage` trailer. Violation: half-edited worktree continues with lost context.
+- **Spend is bounded.** Every turn caps its tries, and a failed attempt marks the `main` tip it ran against, so the row waits for new input. Chokepoint: `turn::ATTEMPTS`, fail mark written in `pool`, read in `state`. Violation: one broken agent burns budget every 5 seconds forever.
+- **Branch names finished work.** The stack merges on a detached head; the ref appears once every parent is in. Chokepoint: `slot::checkout` names the branch last. Violation: a crash mid-merge leaves a branch that skips its parents on the next cycle.
 - **Container is the boundary.** Agent permission checks off, container mounts fixed. One rule for every agent. Chokepoint: `podman` module builds every `run` and `exec`. Violation: two sandbox semantics, one agent escapes.
 - **One row, one slot.** The scheduler hands a row to a single slot and skips it until that slot reports back. Chokepoint: `pool` holds the row id per slot; `status` reads the same fact from worktree checkouts. Violation: two containers commit one branch.
 - **Tool knows no project.** Dir names, ids, prompts, image, mounts come from the project files. Chokepoint: `config` module is the only reader of project files. Violation: second project needs a code change.
@@ -24,7 +26,7 @@ Job queue, worker pool, explicit outcome states, persisted state. Queue = board 
 
 1. Fetch `main` into bare repo. Parse board and config from `main`.
 2. Derive state per row.
-3. For each idle slot and open row, in board order: create branch on base, run stages, land. Slots run at once, one row each.
+3. For each idle slot and open row, in board order: create branch on base, resolve a conflicted parent merge with the `merge` turns, run stages, land. Slots run at once, one row each.
 4. Slot detaches its worktree at the end, and at open. Git allows one worktree per branch, so a held branch blocks every other slot.
 5. Sleep, repeat.
 
@@ -36,12 +38,12 @@ Job queue, worker pool, explicit outcome states, persisted state. Queue = board 
 
 - One model executes and audits when only one agent is configured.
 - Stacked branch on a rejected parent needs `reset`.
-- Two landed parents that conflict: the branch is dropped and retried every cycle until a human merges `main`.
+- Two landed parents that conflict: the `merge` turns get one try, then the row is marked failed and waits for a new `main` tip.
 - `reset` during `serve` races the worker holding that branch.
 - Two `serve` processes on one project share the slot worktrees. Nothing locks them.
 - Board on `main` only.
 - Worker count times cargo jobs must fit the core count; set `CARGO_BUILD_JOBS` in the image.
-- Credential expiry stalls every worker.
+- Credential expiry fails every row it touches after 3 tries. Fix the credential, then `reset` each marked row or push `main`.
 
 ## Smells
 

@@ -4,13 +4,21 @@ use crate::error::{Error, Result};
 use crate::git::Git;
 use crate::state;
 
-/// Delete the branch of `id` and of every row that waits on it, straight or through others.
+/// Delete the branch and fail mark of `id` and of every row that waits on it,
+/// straight or through others.
 pub fn reset(repo: &Git, id: &str) -> Result<()> {
     let config = Config::from_main(repo)?;
     let board = Board::from_main(repo, &config)?;
     let checkouts = repo.checkouts()?;
     let mut dropped = 0;
-    for branch in branches(&board, id) {
+    for task in targets(&board, id) {
+        let mark = state::fail_ref(&task);
+        if repo.ref_commit(&mark)?.is_some() {
+            repo.ref_delete(&mark)?;
+            println!("cleared fail mark {task}");
+            dropped += 1;
+        }
+        let branch = state::branch(&task);
         if !repo.branch_exists(&branch)? {
             continue;
         }
@@ -23,19 +31,19 @@ pub fn reset(repo: &Git, id: &str) -> Result<()> {
     }
     if dropped == 0 {
         return Err(Error::Invalid(format!(
-            "id `{id}` must name a task with a branch: none of `{}` or its dependants exists",
+            "id `{id}` must name a task with a branch or fail mark: none of `{}` or its dependants has one",
             state::branch(id)
         )));
     }
     Ok(())
 }
 
-/// Branch of `id`, then of every dependant. An id off the board stands alone:
-/// no row can name it, or the board would not parse.
-fn branches(board: &Board, id: &str) -> Vec<String> {
+/// `id`, then every dependant. Id off the board stands alone:
+/// no row can name it, or the board fails to parse.
+fn targets(board: &Board, id: &str) -> Vec<String> {
     let rows = board.rows();
     let Some(root) = rows.iter().position(|row| row.id() == id) else {
-        return vec![state::branch(id)];
+        return vec![id.to_string()];
     };
     let mut marked = vec![false; rows.len()];
     marked[root] = true;
@@ -53,7 +61,7 @@ fn branches(board: &Board, id: &str) -> Vec<String> {
     rows.iter()
         .zip(marked)
         .filter(|(_, hit)| *hit)
-        .map(|(row, _)| state::branch(row.id()))
+        .map(|(row, _)| row.id().to_string())
         .collect()
 }
 
@@ -85,11 +93,8 @@ mod tests {
     fn walks_dependants() {
         let config = Config::parse(CONFIG).expect("test config must parse");
         let board = Board::parse(BOARD, &config).expect("test board must parse");
-        assert_eq!(
-            branches(&board, "one"),
-            ["swarm/one", "swarm/two", "swarm/three"]
-        );
-        assert_eq!(branches(&board, "four"), ["swarm/four"]);
-        assert_eq!(branches(&board, "gone"), ["swarm/gone"]);
+        assert_eq!(targets(&board, "one"), ["one", "two", "three"]);
+        assert_eq!(targets(&board, "four"), ["four"]);
+        assert_eq!(targets(&board, "gone"), ["gone"]);
     }
 }

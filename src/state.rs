@@ -7,12 +7,15 @@ use crate::git::{self, Git};
 pub const TASK_TRAILER: &str = "Swarm-Task";
 pub const STAGE_TRAILER: &str = "Swarm-Stage";
 
-/// Row standing. Read from git, never stored.
+const FAIL_REFS: &str = "refs/swarm-fail/";
+
+/// Row standing. Read from git, never stored. `Failed` stage 0 = parent merge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     Blocked,
     Ready,
     Running { stage: usize },
+    Failed { stage: usize },
     Landed,
     Done,
 }
@@ -21,26 +24,46 @@ pub fn branch(id: &str) -> String {
     format!("swarm/{id}")
 }
 
+/// Ref that marks the `main` tip a row last failed against. Outside `refs/heads/`,
+/// so it lists as no branch and pushes with none.
+pub fn fail_ref(id: &str) -> String {
+    format!("{FAIL_REFS}{id}")
+}
+
 pub fn derive(board: &Board, total: usize, git: &Git) -> Result<Vec<State>> {
+    let base = git.branch_commit(git::MAIN)?;
     let progress = board
         .rows()
         .iter()
         .map(|row| row_progress(git, row.id(), total))
         .collect::<Result<Vec<Progress>>>()?;
+    let failed = board
+        .rows()
+        .iter()
+        .map(|row| row_failed(git, row.id(), &base))
+        .collect::<Result<Vec<bool>>>()?;
     Ok(board
         .rows()
         .iter()
         .zip(&progress)
-        .map(|(row, own)| match own {
+        .zip(&failed)
+        .map(|((row, own), &failed)| match own {
+            Progress::Landed => State::Landed,
+            Progress::Done => State::Done,
+            Progress::Absent if failed => State::Failed { stage: 0 },
+            Progress::Stage(done) if failed => State::Failed { stage: done + 1 },
             Progress::Absent if row.after.iter().all(|&dep| progress[dep].settled()) => {
                 State::Ready
             }
             Progress::Absent => State::Blocked,
             Progress::Stage(done) => State::Running { stage: done + 1 },
-            Progress::Landed => State::Landed,
-            Progress::Done => State::Done,
         })
         .collect())
+}
+
+/// Failed while `main` stood where it stands now. A moved `main` frees the row.
+fn row_failed(git: &Git, id: &str, base: &str) -> Result<bool> {
+    Ok(git.ref_commit(&fail_ref(id))?.as_deref() == Some(base))
 }
 
 impl fmt::Display for State {
@@ -49,6 +72,7 @@ impl fmt::Display for State {
             State::Blocked => "blocked",
             State::Ready => "ready",
             State::Running { .. } => "running",
+            State::Failed { .. } => "failed",
             State::Landed => "landed",
             State::Done => "done",
         })

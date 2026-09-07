@@ -10,6 +10,7 @@ pub const FILE: &str = "sercswarm.ron";
 
 /// Turn text the tool fills in or acts on.
 pub const TASK_SLOT: &str = "{task}";
+pub const PARENT_SLOT: &str = "{parent}";
 pub const SESSION_SLOT: &str = "{session}";
 pub const COMMIT_TURN: &str = "{commit}";
 
@@ -27,6 +28,9 @@ pub struct Config {
     pub default_agent: String,
     pub agents: BTreeMap<String, Agent>,
     pub stages: Vec<Stage>,
+    /// Turns that resolve conflicted parent merge. Absent: conflict drops branch.
+    #[serde(default)]
+    pub merge: Option<Stage>,
 }
 
 /// One bind: absolute host path, absolute container path. Both sides rw.
@@ -161,27 +165,34 @@ impl Config {
             return Err(invalid("field `stages` must hold one stage or more"));
         }
         for (index, stage) in self.stages.iter().enumerate() {
-            let number = index + 1;
-            if stage.turns.is_empty() {
-                return Err(invalid(&format!(
-                    "stage {number} field `turns` must hold one turn or more"
-                )));
-            }
-            if !stage.turns.iter().any(|turn| turn == COMMIT_TURN) {
-                return Err(invalid(&format!(
-                    "stage {number} field `turns` must hold the turn `{COMMIT_TURN}`, the one commit of the stage"
-                )));
-            }
-            if stage
-                .agent
-                .as_deref()
-                .is_some_and(|key| !self.knows_agent(key))
-            {
-                return Err(invalid(&format!(
-                    "stage {number} field `agent` must name a key of `agents`: {}",
-                    self.agent_keys()
-                )));
-            }
+            self.check_stage(&format!("stage {}", index + 1), stage)?;
+        }
+        match &self.merge {
+            Some(stage) => self.check_stage("field `merge`", stage),
+            None => Ok(()),
+        }
+    }
+
+    fn check_stage(&self, label: &str, stage: &Stage) -> Result<()> {
+        if stage.turns.is_empty() {
+            return Err(invalid(&format!(
+                "{label} field `turns` must hold one turn or more"
+            )));
+        }
+        if !stage.turns.iter().any(|turn| turn == COMMIT_TURN) {
+            return Err(invalid(&format!(
+                "{label} field `turns` must hold the turn `{COMMIT_TURN}`, its one commit"
+            )));
+        }
+        if stage
+            .agent
+            .as_deref()
+            .is_some_and(|key| !self.knows_agent(key))
+        {
+            return Err(invalid(&format!(
+                "{label} field `agent` must name a key of `agents`: {}",
+                self.agent_keys()
+            )));
         }
         Ok(())
     }
@@ -212,6 +223,7 @@ mod tests {
     (turns: ["/execute {task}", "{commit}"]),
     (agent: "claude", turns: ["/audit {task}", "{commit}"]),
   ],
+  merge: (turns: ["Resolve the conflicts of {parent}.", "{commit}"]),
 )
 "#;
 
@@ -225,6 +237,7 @@ mod tests {
         assert_eq!(config.stages.len(), 2);
         assert_eq!(config.stages[0].agent, None);
         assert_eq!(config.stages[1].agent.as_deref(), Some("claude"));
+        assert_eq!(config.merge.expect("merge must parse").turns.len(), 2);
         assert_eq!(
             config.agents["claude"].resume.as_deref(),
             Some("--resume {session}")

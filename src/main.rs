@@ -48,7 +48,7 @@ enum Command {
         #[arg(long, value_name = "N")]
         stage: Option<usize>,
     },
-    #[command(about = "Delete the branch of one task and of every dependant")]
+    #[command(about = "Delete the branch and fail mark of one task and of every dependant")]
     Reset {
         #[arg(value_name = "ID")]
         id: String,

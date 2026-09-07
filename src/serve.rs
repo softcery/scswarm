@@ -31,7 +31,7 @@ fn cycle(repo: &Git, pool: &mut Pool, head: &mut String) -> Result<()> {
     let sha = repo.branch_commit(git::MAIN)?;
     if sha != *head {
         event::fetch(&sha);
-        *head = sha;
+        head.clone_from(&sha);
     }
     let config = Arc::new(Config::from_main(repo)?);
     let board = Board::from_main(repo, &config)?;
@@ -43,7 +43,7 @@ fn cycle(repo: &Git, pool: &mut Pool, head: &mut String) -> Result<()> {
         let Some(slot) = pool.idle() else {
             return Ok(());
         };
-        pool.assign(slot, job(&board, &states, index, &config))?;
+        pool.assign(slot, job(&board, &states, index, &config, &sha))?;
     }
     Ok(())
 }
@@ -53,7 +53,7 @@ fn pending(state: &State) -> bool {
     matches!(*state, State::Ready | State::Running { .. })
 }
 
-fn job(board: &Board, states: &[State], index: usize, config: &Arc<Config>) -> Job {
+fn job(board: &Board, states: &[State], index: usize, config: &Arc<Config>, base: &str) -> Job {
     let row = &board.rows()[index];
     Job {
         row: row.clone(),
@@ -63,6 +63,7 @@ fn job(board: &Board, states: &[State], index: usize, config: &Arc<Config>) -> J
             State::Running { stage } => stage,
             _ => FIRST_STAGE,
         },
+        base: base.to_string(),
     }
 }
 

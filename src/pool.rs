@@ -20,6 +20,8 @@ pub struct Job {
     pub config: Arc<Config>,
     pub stack: Vec<String>,
     pub from: usize,
+    /// `main` tip this attempt runs against. Failure marks it, so the row waits for a new tip.
+    pub base: String,
 }
 
 /// Slot threads and what each holds. The assignment rule lives in the caller.
@@ -96,7 +98,8 @@ fn spawn(
     slot.container().start()?;
     let (jobs, queue) = mpsc::channel();
     let project = project.to_string();
-    let thread = thread::spawn(move || work(&slot, &project, index, &queue, &done));
+    let own = Git::at(repo.root().to_path_buf());
+    let thread = thread::spawn(move || work(&slot, &own, &project, index, &queue, &done));
     Ok(Worker {
         jobs,
         thread,
@@ -108,25 +111,44 @@ fn stopped(index: usize) -> Error {
     Error::Failed(format!("slot {index} stopped: restart `sercswarm serve`"))
 }
 
-/// Release always runs, so a held branch never blocks another slot.
-/// Release failing panics the thread; `collect()` turns that into `stopped`.
-fn work(slot: &Slot, project: &str, index: usize, queue: &Receiver<Job>, done: &Sender<usize>) {
+/// Release runs first, so no panic below leaves a branch held. Marking runs next:
+/// a spent attempt must never repeat free. Either failing panics the thread;
+/// `collect()` turns that into `stopped`.
+fn work(
+    slot: &Slot,
+    repo: &Git,
+    project: &str,
+    index: usize,
+    queue: &Receiver<Job>,
+    done: &Sender<usize>,
+) {
     for job in queue {
         let id = job.row.id().to_string();
         let total = job.config.stages.len();
-        match stages(slot, project, &job) {
-            Ok(()) => event::land(&id),
-            Err((stage, why)) => event::fail(
-                &event::At {
-                    id: &id,
-                    stage,
-                    total,
-                },
-                &why,
-            ),
-        }
+        let outcome = stages(slot, project, &job);
         if let Err(why) = slot.release() {
             panic!("slot {index} must detach its worktree after a task: {why}");
+        }
+        let mark = state::fail_ref(&id);
+        let recorded = match outcome {
+            Ok(()) => {
+                event::land(&id);
+                repo.ref_delete(&mark)
+            }
+            Err((stage, why)) => {
+                event::fail(
+                    &event::At {
+                        id: &id,
+                        stage,
+                        total,
+                    },
+                    &why,
+                );
+                repo.ref_set(&mark, &job.base)
+            }
+        };
+        if let Err(why) = recorded {
+            panic!("slot {index} must record the outcome of task {id}: {why}");
         }
         if done.send(index).is_err() {
             return;
@@ -136,7 +158,11 @@ fn work(slot: &Slot, project: &str, index: usize, queue: &Receiver<Job>, done: &
 
 fn stages(slot: &Slot, project: &str, job: &Job) -> Staged<()> {
     let id = job.row.id();
-    slot.checkout(&state::branch(id), git::MAIN, &job.stack)
+    let resolve = |parent: &str| {
+        let log = paths::transcript(project, id, stage::MERGE)?;
+        stage::resolve(slot, &job.config, &job.row, parent, &log)
+    };
+    slot.checkout(&state::branch(id), git::MAIN, &job.stack, &resolve)
         .map_err(|why| (job.from, why))?;
     let total = job.config.stages.len();
     for number in job.from..=total {

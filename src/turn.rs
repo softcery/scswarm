@@ -16,6 +16,8 @@ use crate::podman::Container;
 /// Wait before a turn runs again. Doubles up to the cap while agent keeps failing.
 pub const RETRY_WAIT: Duration = Duration::from_secs(1);
 const RETRY_WAIT_MAX: Duration = Duration::from_secs(60);
+/// Tries per turn. Every try spends agent budget, so a stuck agent must stop the row.
+pub const ATTEMPTS: usize = 3;
 const SHELL: &str = "sh";
 /// Shell `$0`, so prompt stays `$1`.
 const ARGV0: &str = "sercswarm";
@@ -60,8 +62,8 @@ impl Turn<'_> {
     pub fn run(&self) -> Result<Reply> {
         event::turn(&self.at, self.number);
         let mut wait = RETRY_WAIT;
-        let mut attempt = 1;
-        loop {
+        let mut last = None;
+        for attempt in 1..=ATTEMPTS {
             let out = self.command()?.output().map_err(|why| {
                 Error::Failed(format!("agent command `{}`: {why}", self.agent.exec))
             })?;
@@ -75,17 +77,24 @@ impl Turn<'_> {
                 })?;
                 return Ok(reply);
             }
-            event::retry(&self.at, self.number, attempt, out.status.code());
+            last = out.status.code();
+            event::retry(&self.at, self.number, attempt, last);
             self.record(Entry {
-                exit: out.status.code(),
+                exit: last,
                 stdout: Some(stdout.trim().to_string()),
                 error: Some(String::from_utf8_lossy(&out.stderr).trim().to_string()),
                 ..self.entry()
             })?;
-            thread::sleep(wait);
-            wait = (wait * 2).min(RETRY_WAIT_MAX);
-            attempt += 1;
+            if attempt < ATTEMPTS {
+                thread::sleep(wait);
+                wait = (wait * 2).min(RETRY_WAIT_MAX);
+            }
         }
+        Err(Error::Failed(format!(
+            "agent `{}` must exit zero: {ATTEMPTS} tries, last exit {}",
+            self.agent.exec,
+            last.map_or_else(|| "signal".to_string(), |code| code.to_string())
+        )))
     }
 
     /// `sh -c '<exec> "$@"' sercswarm [<resume>] <prompt>`: agent text never reaches the shell.

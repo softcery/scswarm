@@ -86,6 +86,23 @@ impl Git {
         run(&self.root, &["rev-parse", &head_ref(branch)]).map(|sha| sha.trim().to_string())
     }
 
+    /// Commit `name` points at. `None` when no such ref.
+    pub fn ref_commit(&self, name: &str) -> Result<Option<String>> {
+        if !probe(&self.root, &["show-ref", "--verify", "--quiet", name])? {
+            return Ok(None);
+        }
+        run(&self.root, &["rev-parse", name]).map(|sha| Some(sha.trim().to_string()))
+    }
+
+    pub fn ref_set(&self, name: &str, commit: &str) -> Result<()> {
+        run(&self.root, &["update-ref", name, commit]).map(drop)
+    }
+
+    /// Drop `name`. Does nothing when no such ref.
+    pub fn ref_delete(&self, name: &str) -> Result<()> {
+        run(&self.root, &["update-ref", "-d", name]).map(drop)
+    }
+
     /// Newest commit of `branch` with trailer `key` = `value`, plus its `want` trailer.
     pub fn trailer_commit(
         &self,
@@ -115,12 +132,9 @@ impl Git {
         run(&self.root, &["rev-parse", "HEAD"]).map(|sha| sha.trim().to_string())
     }
 
-    pub fn branch_create(&self, branch: &str, base: &str) -> Result<()> {
-        run(
-            &self.root,
-            &["branch", "--no-track", branch, &head_ref(base)],
-        )
-        .map(drop)
+    /// Name `commit` as `branch`.
+    pub fn branch_at(&self, branch: &str, commit: &str) -> Result<()> {
+        run(&self.root, &["branch", "--no-track", branch, commit]).map(drop)
     }
 
     pub fn branch_delete(&self, branch: &str) -> Result<()> {
@@ -138,17 +152,37 @@ impl Git {
         run(&self.root, &["checkout", "--detach"]).map(drop)
     }
 
-    /// Merge `branch` into the checked-out branch. Fast-forward when it can.
+    /// Drop every local change, then put `rev` in the worktree under no branch.
+    pub fn detach_at(&self, rev: &str) -> Result<()> {
+        run(
+            &self.root,
+            &["checkout", "--force", "--detach", &head_ref(rev)],
+        )?;
+        run(&self.root, &["clean", "--force", "-d"]).map(drop)
+    }
+
+    /// Merge `branch` into the worktree head. Fast-forward when it can.
+    /// Subject set here: a detached head writes `into HEAD` on its own.
     pub fn merge(&self, branch: &str) -> Result<()> {
-        run(&self.root, &["merge", "--no-edit", &head_ref(branch)]).map(drop)
+        let subject = format!("Merge {branch}");
+        run(
+            &self.root,
+            &["merge", "--no-edit", "-m", &subject, &head_ref(branch)],
+        )
+        .map(drop)
+    }
+
+    /// True until a merge is committed or aborted.
+    pub fn merging(&self) -> Result<bool> {
+        probe(
+            &self.root,
+            &["rev-parse", "--verify", "--quiet", MERGE_HEAD],
+        )
     }
 
     /// Undo a conflicted merge. Does nothing when no merge is in flight.
     pub fn merge_abort(&self) -> Result<()> {
-        if !probe(
-            &self.root,
-            &["rev-parse", "--verify", "--quiet", MERGE_HEAD],
-        )? {
+        if !self.merging()? {
             return Ok(());
         }
         run(&self.root, &["merge", "--abort"]).map(drop)

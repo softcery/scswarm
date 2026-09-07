@@ -7,8 +7,11 @@ use crate::podman::Container;
 
 const WORKTREE_LINK: &str = ".git";
 
+/// One try at conflicted merge. `false`: no try made.
+pub type Resolve<'a> = dyn Fn(&str) -> Result<bool> + 'a;
+
 /// Worker slot: worktree outside project checkout, container over it.
-/// An open slot is idle, so it holds no branch: a crash leaves one checked out.
+/// Open slot is idle, holds no branch. Crash leaves one checked out.
 pub struct Slot {
     git: Git,
     path: PathBuf,
@@ -44,25 +47,38 @@ impl Slot {
         &self.container
     }
 
-    /// Put `branch` in worktree at tip, tree clean. New branch: `base` plus merge of `stack`.
-    pub fn checkout(&self, branch: &str, base: &str, stack: &[String]) -> Result<()> {
+    /// Put `branch` in worktree at tip, tree clean. New branch: `base` plus merge
+    /// of `stack`, named last. Crash mid-merge leaves no branch.
+    pub fn checkout(
+        &self,
+        branch: &str,
+        base: &str,
+        stack: &[String],
+        resolve: &Resolve,
+    ) -> Result<()> {
         if self.git.branch_exists(branch)? {
             return self.git.checkout(branch);
         }
-        self.git.branch_create(branch, base)?;
-        self.git.checkout(branch)?;
-        if let Err(why) = stack.iter().try_for_each(|parent| self.git.merge(parent)) {
-            self.unmake(branch)?;
+        self.git.detach_at(base)?;
+        if let Err(why) = self.merge_stack(stack, resolve) {
+            self.git.merge_abort()?;
             return Err(why);
         }
-        Ok(())
+        self.git.branch_at(branch, &self.git.head()?)?;
+        self.git.checkout(branch)
     }
 
-    /// Half-stacked branch hides a missing parent. Drop it: next try starts over.
-    fn unmake(&self, branch: &str) -> Result<()> {
-        self.git.merge_abort()?;
-        self.git.detach()?;
-        self.git.branch_delete(branch)
+    /// Merge each parent. Conflict goes to `resolve` once, then stands.
+    fn merge_stack(&self, stack: &[String], resolve: &Resolve) -> Result<()> {
+        for parent in stack {
+            let Err(conflict) = self.git.merge(parent) else {
+                continue;
+            };
+            if !resolve(parent)? || self.git.merging()? {
+                return Err(conflict);
+            }
+        }
+        Ok(())
     }
 
     pub fn release(&self) -> Result<()> {

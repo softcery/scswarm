@@ -40,6 +40,7 @@ Project root. RON, `IMPLICIT_SOME`.
     (turns: ["/audit {task}", "Audited thoroughly, checked everything, no gaps? If any, close them.", "What's the plan to resolve all audit issues and make the implementation correct, clean, and beautiful - no compromises?", "Write the audit and the plan into that same original task file.", "{commit}"]),
     (turns: ["/execute {task}", "Correct, clean, beautiful?", "Mark the impl into the task file.", "{commit}"]),
   ],
+  merge: (turns: ["Resolve every conflict of the merge of {parent} into {task}.", "{commit}"]),
 )
 ```
 
@@ -51,18 +52,24 @@ Project root. RON, `IMPLICIT_SOME`.
 - `agents.*.resume`: arguments added from second turn on. `{session}` = id from first reply.
 - `stages[].turns`: sent in order, one session per stage. `{task}` substituted. `{commit}` = built-in turn: asks for a commit message, host commits with the reply.
 - `stages[].agent`: optional, overrides row and default for that stage.
+- `merge`: optional stage, same fields. Runs in the conflicted worktree when a parent merge conflicts. `{parent}` = branch merged in, `{task}` substituted as in a stage. Absent = no try, branch dropped.
 
 ## Git
 
 - Remote: bare repo `~/swarm/<project>.git`. Project pushes `main`.
 - `init` points the bare repo `origin` at the checkout it ran on, refspec `+refs/heads/main:refs/heads/main`. `serve` fetches `main` each cycle. `status` reads the last fetch.
 - Branch per task: `swarm/<id>`. Base: `main`, then a merge of every parent in `after` that is landed and unmerged. One such parent fast-forwards, so the branch equals `swarm/<parent>`.
-- Merge conflict on that base: the tool deletes the new branch and reports the parent and the files. The row starts over next cycle.
+- The stack merges on a detached head. The branch takes its name after the last merge, so a crash mid-merge leaves no branch and the next cycle starts over.
+- Merge conflict on that base: `merge` turns get one try in the conflicted worktree, host commits the merge with the agent's message and trailer `Swarm-Stage: 0/<total>`. Transcript: stage 0.
+- No `merge` block, a failed merge session, or a conflict left after it: the tool aborts the merge, names no branch, and reports the parent and the files. The row starts over next cycle.
 - Worktree per slot: `~/swarm/slot/<project>/<n>`. Never inside the project checkout.
 - A slot detaches its worktree when a task ends or fails, and again when `serve` opens it. A branch left checked out by a crash blocks every other slot.
 - Commit per stage, message from agent, trailers `Swarm-Task: <id>` and `Swarm-Stage: <n>/<total>`. A stage with no diff commits empty, so state still moves.
 - Stage restart resets the worktree to the last stage commit and drops untracked files. Ignored files stay, so build caches survive.
 - Landed: last stage committed. Done: that commit is ancestor of `main`. Ready: not started, every `after` done or landed.
+- Failed: ref `refs/swarm-fail/<id>` holds the `main` tip the last attempt ran against. `serve` skips the row while that tip stands, so a broken row costs one attempt per `main` tip, not one per cycle. The mark sits outside `refs/heads/`, so it lists as no branch and pushes with none.
+- A landed task clears its own mark. `reset <id>` clears the mark of the row and of every dependant, branch or no branch.
+- Turn tries: 3 per turn, waits 1s and 2s between. Third non-zero exit fails the stage and marks the row. Same cap on a blank commit message.
 
 ## CLI
 
@@ -70,8 +77,9 @@ Project root. RON, `IMPLICIT_SOME`.
 sercswarm init [--root DIR]   bare repo, image, slot worktrees and containers
 sercswarm serve               foreground loop; run under systemd
 sercswarm status              one line per row: id, state, branch, stage, worker
+                              state: blocked, ready, running, failed, landed, done
 sercswarm log ID [--stage N]  transcript, one block per turn: prompt, then reply or failure
-sercswarm reset ID            delete swarm/<id> and every dependant branch
+sercswarm reset ID            delete swarm/<id>, every dependant branch, their fail marks
 ```
 
 Exit codes: 0 ok, 1 input invalid (config, board, unknown id), 2 git or podman failure.
@@ -88,8 +96,11 @@ Image: `image` names a Containerfile in the checkout, built as `localhost/sercsw
 - `init` replaces every slot container. Stop `serve` first.
 - Mounts use the host path inside the container, so the podman machine must share that path.
 - `env` values come from the `serve` process. A refreshed credential needs a restart.
-- Turn retry has no cap. Stall shows in `status` as the stage that stopped moving.
+- A row that fails waits for a new `main` tip. A parent that lands while `main` stands still leaves it waiting: move `main` or run `reset`.
+- One agent call can still run without limit. The cap counts tries, not time or tokens.
+- A kill between the failure and the mark write loses the mark. The row runs once more.
 - Stop `serve` before `reset`. A worker running that task recreates the ref at its next commit.
 - One `serve` per project. Two share the slot worktrees and fight over the same branches.
-- A conflicting stack retries every cycle. State lives in git alone, so a conflict has nowhere to record.
+- A conflicting stack costs one merge session per `main` tip, then the row waits.
+- The merge check reads `MERGE_HEAD`. An agent that commits conflict markers passes it.
 - No per-turn budget. Agent flags in `exec` carry any cap.

@@ -54,16 +54,17 @@ fn render(
     table.iter().map(|row| line(row, &widths)).collect()
 }
 
+/// A merge that failed leaves no branch, so its cell stays empty.
 fn branch_cell(row: &Row, state: State) -> String {
     match state {
-        State::Ready | State::Blocked => NONE.to_string(),
+        State::Ready | State::Blocked | State::Failed { stage: 0 } => NONE.to_string(),
         _ => state::branch(row.id()),
     }
 }
 
 fn stage_cell(state: State, total: usize) -> String {
     match state {
-        State::Running { stage } => format!("{stage}/{total}"),
+        State::Running { stage } | State::Failed { stage } => format!("{stage}/{total}"),
         State::Landed | State::Done => format!("{total}/{total}"),
         State::Ready | State::Blocked => NONE.to_string(),
     }

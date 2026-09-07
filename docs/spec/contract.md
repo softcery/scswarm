@@ -31,7 +31,7 @@ Project root. RON, `IMPLICIT_SOME`.
   default_agent: "claude",
   agents: {
     "claude": (
-      exec: "claude --model opus --effort high --dangerously-skip-permissions -p --output-format json",
+      exec: "claude --model opus --effort high --dangerously-skip-permissions --disallowedTools Agent Skill SendMessage ListAgents RemoteTrigger PushNotification -p --output-format json",
       resume: "--resume {session}",
     ),
   },

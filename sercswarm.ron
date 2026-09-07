@@ -6,7 +6,7 @@
   default_agent: "claude",
   agents: {
     "claude": (
-      exec: "claude --dangerously-skip-permissions -p --output-format json",
+      exec: "claude --dangerously-skip-permissions --disallowedTools Agent Skill SendMessage ListAgents RemoteTrigger PushNotification -p --output-format json",
       resume: "--resume {session}",
     ),
   },

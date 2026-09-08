@@ -17,6 +17,8 @@ const SHARED: &str = "z";
 /// Container sleeps; work arrives through `exec`.
 const SLEEP: &str = "--entrypoint=sleep";
 const FOREVER: &str = "infinity";
+/// Reaping PID 1. `sleep` reaps none, so forks stay zombies.
+const INIT: &str = "--init";
 
 /// One long-lived container per slot. Sole owner of podman arguments.
 pub struct Container {
@@ -74,6 +76,7 @@ impl Container {
         let mut args = vec![
             "run".to_string(),
             "--detach".to_string(),
+            INIT.to_string(),
             format!("--name={}", self.name),
             "--userns=keep-id".to_string(),
             format!("--workdir={worktree}"),
@@ -157,7 +160,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn binds_worktree_rw_and_repo_ro() {
+    fn reaps_with_init_and_binds_worktree_rw_repo_ro() {
         let container = Container::slot("Alpha", 2, &[]);
         let mounts = [Mount {
             host: "/records".to_string(),
@@ -173,6 +176,7 @@ mod tests {
             .expect("utf-8 paths must build arguments");
         let holds = |arg: &str| args.iter().any(|held| held == arg);
         assert!(holds("--name=sercswarm-alpha-2"), "{args:?}");
+        assert!(holds(INIT), "{args:?}");
         assert!(holds("--volume=/slot/2:/slot/2:rw,z"), "{args:?}");
         assert!(holds("--volume=/repo.git:/repo.git:ro,z"), "{args:?}");
         assert!(holds("--volume=/records:/mnt:rw,z"), "{args:?}");

@@ -1,4 +1,4 @@
-# sercswarm
+# scswarm
 
 Autonomous task swarm for any git project. One binary on a workstation. You push `main`, workers do the rest, you merge.
 
@@ -12,24 +12,24 @@ Autonomous task swarm for any git project. One binary on a workstation. You push
 ## Files
 
 - `SWARM.md`: board. Contract in [docs/spec/contract.md](docs/spec/contract.md).
-- `sercswarm.ron`: workers, image, mounts, env, agents, stages. Same doc.
+- `scswarm.ron`: workers, image, mounts, env, agents, stages. Same doc.
 - State: git branches and commit trailers only. Design in [docs/refs/architecture.md](docs/refs/architecture.md).
 
 ## Commands
 
 ```
-sercswarm init      bare repo, image, slot worktrees and containers
-sercswarm serve     scheduler and workers, foreground
-sercswarm status    board rows with derived state
-sercswarm log ID    transcript of one task
-sercswarm reset ID  drop branch of task and dependants
+scswarm init      bare repo, image, slot worktrees and containers
+scswarm serve     scheduler and workers, foreground
+scswarm status    board rows with derived state
+scswarm log ID    transcript of one task
+scswarm reset ID  drop branch of task and dependants
 ```
 
 ## Build
 
 `cargo build --release`, `cargo install --path .`. Lint: `make lint`.
 
-Run under systemd: copy [systemd/sercswarm.service](systemd/sercswarm.service) to `~/.config/systemd/user/`, set `WorkingDirectory` to the project checkout, then `systemctl --user enable --now sercswarm`.
+Run under systemd: copy [systemd/scswarm.service](systemd/scswarm.service) to `~/.config/systemd/user/`, set `WorkingDirectory` to the project checkout, then `systemctl --user enable --now scswarm`.
 
 ## Limits
 

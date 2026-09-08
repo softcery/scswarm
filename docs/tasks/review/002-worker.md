@@ -40,7 +40,7 @@ Shape changes from the plan:
 - Config rejects a stage whose `turns` hold no `{commit}`. Without a commit the stage never
   advances and the loop reruns it forever.
 - Stage commits pass `--allow-empty`. A stage with no diff still moves the state.
-- Turn runs `sh -c '<exec> "$@"' sercswarm [<resume>] <prompt>`. The config author keeps quoting
+- Turn runs `sh -c '<exec> "$@"' scswarm [<resume>] <prompt>`. The config author keeps quoting
   in `exec`; prompt, resume tokens and session id stay argv.
 
 Open limits:

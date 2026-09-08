@@ -11,7 +11,7 @@
 - `serve.rs`: assignment over idle slots, base branch rule.
 - `reset.rs`: dependant walk over the board, branch delete, worktree reset.
 - `log.rs`: read transcript.
-- `systemd/sercswarm.service`: user unit, `Restart=always`.
+- `systemd/scswarm.service`: user unit, `Restart=always`.
 
 ## Plan
 
@@ -24,7 +24,7 @@
 
 Landed: `pool.rs` (slot threads, job queue, report channel), `serve.rs` (cycle, assignment,
 base rule), `status.rs` (table moved out of `main.rs`, worker column), `log.rs`, `reset.rs`,
-`systemd/sercswarm.service`. Git gained `branch_delete`, `detach`, `merge`, `merge_abort`,
+`systemd/scswarm.service`. Git gained `branch_delete`, `detach`, `merge`, `merge_abort`,
 `checkouts`. Slot gained `release` and a stacked `checkout`. Paths gained `slot_index`,
 `transcripts`, `transcript_stage`. `turn::Entry` replaced the `json!` transcript literals.
 1 test: dependant walk in `reset`.

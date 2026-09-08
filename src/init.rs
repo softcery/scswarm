@@ -36,7 +36,7 @@ pub fn open() -> Result<(String, Git)> {
     let path = paths::repo(&project)?;
     if !path.join(HEAD).is_file() {
         return Err(Error::Failed(format!(
-            "bare repo {} is absent: run `sercswarm init`",
+            "bare repo {} is absent: run `scswarm init`",
             path.display()
         )));
     }

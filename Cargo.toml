@@ -1,5 +1,5 @@
 [package]
-name = "sercswarm"
+name = "scswarm"
 version = "0.1.0"
 edition = "2021"
 description = "Autonomous task swarm: board in git, worker per worktree and container, agent sessions as scripted turns."
@@ -7,7 +7,7 @@ authors = ["Elijah Atamas"]
 publish = false
 
 [[bin]]
-name = "sercswarm"
+name = "scswarm"
 path = "src/main.rs"
 
 [dependencies]

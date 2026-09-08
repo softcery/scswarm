@@ -108,7 +108,7 @@ fn spawn(
 }
 
 fn stopped(index: usize) -> Error {
-    Error::Failed(format!("slot {index} stopped: restart `sercswarm serve`"))
+    Error::Failed(format!("slot {index} stopped: restart `scswarm serve`"))
 }
 
 /// Release runs first, so no panic below leaves a branch held. Marking runs next:

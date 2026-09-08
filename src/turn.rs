@@ -20,7 +20,7 @@ const RETRY_WAIT_MAX: Duration = Duration::from_secs(60);
 pub const ATTEMPTS: usize = 3;
 const SHELL: &str = "sh";
 /// Shell `$0`, so prompt stays `$1`.
-const ARGV0: &str = "sercswarm";
+const ARGV0: &str = "scswarm";
 
 /// One prompt for one agent, sent again after every failing exit.
 pub struct Turn<'a> {
@@ -97,7 +97,7 @@ impl Turn<'_> {
         )))
     }
 
-    /// `sh -c '<exec> "$@"' sercswarm [<resume>] <prompt>`: agent text never reaches the shell.
+    /// `sh -c '<exec> "$@"' scswarm [<resume>] <prompt>`: agent text never reaches the shell.
     fn command(&self) -> Result<Command> {
         let mut argv = vec![
             SHELL.to_string(),

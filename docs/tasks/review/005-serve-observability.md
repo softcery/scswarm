@@ -4,7 +4,7 @@
 
 **Why.** A 12 s `serve` run on an empty board printed 0 lines. Operator reads a stalled swarm only through `status` and `log`, and a stall inside a turn shows nowhere.
 
-**Done when.** `journalctl --user -u sercswarm` shows, in order: fetch of `main`, each row assigned with slot and stage, each turn, each stage commit with short sha, each landed task, every failure with cause and every retry with attempt number. `status` output unchanged.
+**Done when.** `journalctl --user -u scswarm` shows, in order: fetch of `main`, each row assigned with slot and stage, each turn, each stage commit with short sha, each landed task, every failure with cause and every retry with attempt number. `status` output unchanged.
 
 ## Shape
 
@@ -43,7 +43,7 @@ Line shape open: `key=value` pairs or plain words. Pick one, apply to every even
 
 - 🔴 `serve.rs:17-25` — `serve()` reads `head` before the loop, never calls `event::fetch` for it. `cycle()` only fires `fetch` when the polled sha differs from `head`. When `main` never moves during a run, no `fetch` line prints, ever, even with rows assigning and landing throughout. Breaks the Done-when's literal first line.
 - 🔴 `pool.rs:104-121` — `work()` picks `land` vs `fail` from `run()`, and `run()` is `stages(...).and(slot.release())`. `slot.release()` (`slot.rs:68-70`, `git checkout --detach`) runs regardless and its failure overrides a successful `stages()` result. A task with every stage committed (git already reports it `Landed`, `state.rs:86-90`) prints `fail` if `release` alone fails. Contract's own known limit (`architecture.md:41`, two `serve` processes share slot worktrees, nothing locks them) makes this reachable, not hypothetical.
-- 🟡 `event.rs:39-41` — `fail(id, why)` is the one event with no `stage=`/`total=` field. `assign`, `turn`, `retry`, `commit` all carry it. A failed multi-stage task's log line gives no stage, forcing a fallback to `sercswarm log ID --stage N` for exactly the context this task exists to put on stdout.
+- 🟡 `event.rs:39-41` — `fail(id, why)` is the one event with no `stage=`/`total=` field. `assign`, `turn`, `retry`, `commit` all carry it. A failed multi-stage task's log line gives no stage, forcing a fallback to `scswarm log ID --stage N` for exactly the context this task exists to put on stdout.
 - 🟡 `event.rs:3` — doc comment claims "sole writer of operator lines." False: `init.rs:19,28` and `reset.rs:21` `println!` directly, `main.rs:61` `eprintln!` directly. None route through `event`.
 - 🟢 Done-when (line 7) lists fetch, assign, commit, land, failure, retry — omits `turn`, which Shape and Impl both add. Doc-only gap, no code fault.
 

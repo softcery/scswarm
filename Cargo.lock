@@ -211,7 +211,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sercswarm"
+name = "scswarm"
 version = "0.1.0"
 dependencies = [
  "clap",

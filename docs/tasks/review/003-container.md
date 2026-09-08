@@ -49,7 +49,7 @@ Review fixes:
 - `git.rs` and `podman.rs` each held spawn, exit code and error text. Both now call `proc.rs`; the
   two modules keep their arguments and nothing else. A missing binary reads `podman must sit on
   PATH`, not `os error 2`.
-- Built image tag is `localhost/sercswarm/<project>`. An unqualified tag can resolve to a remote
+- Built image tag is `localhost/scswarm/<project>`. An unqualified tag can resolve to a remote
   image of the same name.
 - `Mount` rejects a relative side at parse. podman refuses a relative bind with a message that
   names no field. Its error names the fault, not the part count alone.

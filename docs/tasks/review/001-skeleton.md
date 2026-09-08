@@ -1,6 +1,6 @@
 # 001 — skeleton: config, board, status
 
-**What.** `sercswarm status` on a project checkout: parse `sercswarm.ron` and `SWARM.md`, derive state from git, print one line per row.
+**What.** `scswarm status` on a project checkout: parse `scswarm.ron` and `SWARM.md`, derive state from git, print one line per row.
 
 **Why.** Every later step reads the same three modules. Status proves them without a worker.
 

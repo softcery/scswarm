@@ -14,11 +14,11 @@ Markdown table at project root. Header row, separator row, one row per task. Too
 
 - `task`: any text. Substituted as `{task}` in turns. Id = file stem when text is a path, else the text.
 - `after`: comma list of ids. Empty = none.
-- `agent`: key in `sercswarm.ron` `agents`. Empty = `default_agent`.
+- `agent`: key in `scswarm.ron` `agents`. Empty = `default_agent`.
 - Unknown id in `after`, duplicate id, unknown agent: `serve` and `status` exit non-zero, name the row.
 - Row removed = task gone from swarm. Branch stays until `reset`.
 
-## `sercswarm.ron`
+## `scswarm.ron`
 
 Project root. RON, `IMPLICIT_SOME`.
 
@@ -74,21 +74,21 @@ Project root. RON, `IMPLICIT_SOME`.
 ## CLI
 
 ```
-sercswarm init [--root DIR]   bare repo, image, slot worktrees and containers
-sercswarm serve               foreground loop; run under systemd
-sercswarm status              one line per row: id, state, branch, stage, worker
+scswarm init [--root DIR]   bare repo, image, slot worktrees and containers
+scswarm serve               foreground loop; run under systemd
+scswarm status              one line per row: id, state, branch, stage, worker
                               state: blocked, ready, running, failed, landed, done
-sercswarm log ID [--stage N]  transcript, one block per turn: prompt, then reply or failure
-sercswarm reset ID            delete swarm/<id>, every dependant branch, their fail marks
+scswarm log ID [--stage N]  transcript, one block per turn: prompt, then reply or failure
+scswarm reset ID            delete swarm/<id>, every dependant branch, their fail marks
 ```
 
 Exit codes: 0 ok, 1 input invalid (config, board, unknown id), 2 git or podman failure.
 
 ## Container
 
-Rootless podman, `--userns=keep-id`, one long-lived container per slot, named `sercswarm-<project>-<n>`. It sleeps; every turn is one `podman exec`. Mounts: slot worktree rw at same path, bare repo ro at same path, `mounts` rw. Every bind carries the `z` flag, so an SELinux host relabels it shared. Credentials arrive as `env` names. Network on. Agent runs with its own permission checks off.
+Rootless podman, `--userns=keep-id`, one long-lived container per slot, named `scswarm-<project>-<n>`. It sleeps; every turn is one `podman exec`. Mounts: slot worktree rw at same path, bare repo ro at same path, `mounts` rw. Every bind carries the `z` flag, so an SELinux host relabels it shared. Credentials arrive as `env` names. Network on. Agent runs with its own permission checks off.
 
-Image: `image` names a Containerfile in the checkout, built as `localhost/sercswarm/<project>`, or an image podman resolves.
+Image: `image` names a Containerfile in the checkout, built as `localhost/scswarm/<project>`, or an image podman resolves.
 
 ## Limits
 

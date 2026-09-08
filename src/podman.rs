@@ -7,7 +7,7 @@ use crate::error::{Error, Result};
 use crate::{paths, proc};
 
 const BIN: &str = "podman";
-const NAME: &str = "sercswarm";
+const NAME: &str = "scswarm";
 /// Host image store. Keeps built image apart from remote image of same name.
 const LOCAL: &str = "localhost";
 const READ: &str = "ro";
@@ -62,7 +62,7 @@ impl Container {
         ])?;
         if !exists {
             return Err(Error::Failed(format!(
-                "container {} is absent: run `sercswarm init`",
+                "container {} is absent: run `scswarm init`",
                 self.name
             )));
         }
@@ -175,7 +175,7 @@ mod tests {
             })
             .expect("utf-8 paths must build arguments");
         let holds = |arg: &str| args.iter().any(|held| held == arg);
-        assert!(holds("--name=sercswarm-alpha-2"), "{args:?}");
+        assert!(holds("--name=scswarm-alpha-2"), "{args:?}");
         assert!(holds(INIT), "{args:?}");
         assert!(holds("--volume=/slot/2:/slot/2:rw,z"), "{args:?}");
         assert!(holds("--volume=/repo.git:/repo.git:ro,z"), "{args:?}");

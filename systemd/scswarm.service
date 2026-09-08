@@ -1,14 +1,14 @@
 [Unit]
-Description=sercswarm autonomous task swarm
+Description=scswarm autonomous task swarm
 After=default.target
 
 [Service]
 Type=simple
 # Project checkout. serve reads the project name from it.
 WorkingDirectory=%h/CHANGE/ME
-ExecStart=%h/.cargo/bin/sercswarm serve
-# Credentials named in sercswarm.ron field `env`, one KEY=VALUE per line.
-EnvironmentFile=-%h/.config/sercswarm/env
+ExecStart=%h/.cargo/bin/scswarm serve
+# Credentials named in scswarm.ron field `env`, one KEY=VALUE per line.
+EnvironmentFile=-%h/.config/scswarm/env
 Restart=always
 RestartSec=5
 

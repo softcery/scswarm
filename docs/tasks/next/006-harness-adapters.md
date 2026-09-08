@@ -1,6 +1,6 @@
 # 006 — harness adapters
 
-**What.** Agent gains `command` and `reply` templates, stage turns become `Text` | `Command` | `Commit`. Any agent harness runs from `sercswarm.ron` with no code change.
+**What.** Agent gains `command` and `reply` templates, stage turns become `Text` | `Command` | `Commit`. Any agent harness runs from `scswarm.ron` with no code change.
 
 **Why.** Tool fits one harness today.
 
@@ -8,7 +8,7 @@
 - `turn.rs:92` builds `sh -c '<exec> "$@"'` with the prompt last. opencode `run.ts` has no slash parsing: a command needs `--command <name>` with the message as arguments. So `/execute {task}` arrives as chat text and `.claude/commands/execute.md` never loads.
 - `stage.rs:13` `COMMIT_PROMPT` and `config.rs:14` `COMMIT_TURN` put prompt text and a prompt convention in `src/`. Invariant `architecture.md:21` bars both.
 
-**Done when.** One board runs rows with `agent` `claude` and `agent` `opencode` at once, each lands its task, and `sercswarm log ID` shows one session per stage for both plus a commit message with no event noise. `grep -ri 'claude\|opencode\|codex' src/` returns nothing.
+**Done when.** One board runs rows with `agent` `claude` and `agent` `opencode` at once, each lands its task, and `scswarm log ID` shows one session per stage for both plus a commit message with no event noise. `grep -ri 'claude\|opencode\|codex' src/` returns nothing.
 
 ## Shape
 
@@ -61,7 +61,7 @@ Checks in `config.rs`:
 
 ## Rules
 
-- Tool learns no harness name and no dialect. Every dialect lives in `sercswarm.ron`.
+- Tool learns no harness name and no dialect. Every dialect lives in `scswarm.ron`.
 - Keep no back-compat. The `{commit}` string form and the plain `turns: ["text"]` form die with this change.
 - No new dependency.
 
@@ -70,7 +70,7 @@ Checks in `config.rs`:
 1. `config.rs`: add `Turn`, `Command`, `ReplyPath`; extend `Agent`; drop `COMMIT_TURN`; write the five checks; update the module test to the new form.
 2. `turn.rs`: rename `Turn` to `Call`, take command argv, rewrite `parse()` to the pointer rule.
 3. `stage.rs`: render the three turn kinds, drop `COMMIT_PROMPT`.
-4. `sercswarm.ron`: turns in enum form, `opencode` agent, mount `~/.local/share/opencode/auth.json:/home/dev/.local/share/opencode/auth.json`. Bind the file, never the directory: the directory holds session storage and two slots would write one index.
+4. `scswarm.ron`: turns in enum form, `opencode` agent, mount `~/.local/share/opencode/auth.json:/home/dev/.local/share/opencode/auth.json`. Bind the file, never the directory: the directory holds session storage and two slots would write one index.
 5. `Containerfile.swarm`: `npm install -g opencode-ai`.
 6. Symlink `.opencode/commands` to `.claude/commands`. Formats match: frontmatter plus `$ARGUMENTS` body (`.claude/commands/execute.md:1-5`). Single source, no copies.
 7. `docs/spec/contract.md`: rewrite the `agents.*` and `stages[].turns` bullets, add the limits below. `docs/refs/architecture.md:33`: new argv order and parse rule.

@@ -6,7 +6,7 @@ use serde::Deserialize;
 use crate::error::{Error, Result};
 use crate::git::{self, Git};
 
-pub const FILE: &str = "sercswarm.ron";
+pub const FILE: &str = "scswarm.ron";
 
 /// Turn text the tool fills in or acts on.
 pub const TASK_SLOT: &str = "{task}";
@@ -14,7 +14,7 @@ pub const PARENT_SLOT: &str = "{parent}";
 pub const SESSION_SLOT: &str = "{session}";
 pub const COMMIT_TURN: &str = "{commit}";
 
-/// Project settings. Only reader of `sercswarm.ron`.
+/// Project settings. Only reader of `scswarm.ron`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {

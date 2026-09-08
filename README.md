@@ -1,19 +1,44 @@
 # scswarm
 
-Autonomous task swarm for any git project. One binary on a workstation. You push `main`, workers do the rest, you merge.
+Runs coding agents on a task board with no human at the keyboard. One binary, one workstation. You push `main`, workers land a branch per task, you review and merge.
 
-## Flow
+## What it does
 
-1. Add a row to `SWARM.md`: task, dependencies, agent.
-2. `git push` `main` to the swarm remote.
-3. Swarm picks every ready row: branch `swarm/<id>`, own worktree, own container, stages of scripted agent turns, host commit per stage.
-4. `git fetch`, review branch, merge, delete row.
+You write tasks, list them in `SWARM.md` with dependencies, push `main`. Every 5 seconds the loop:
 
-## Files
+1. Picks every row whose dependencies are done.
+2. Gives each row a slot: own git worktree, own podman container.
+3. Runs the agent as scripted turns, grouped in stages. Example stage set: execute, audit, execute again.
+4. Commits on the host after each stage, message written by the agent.
+5. Leaves branch `swarm/<id>` for you.
 
-- `SWARM.md`: board. Contract in [docs/spec/contract.md](docs/spec/contract.md).
-- `scswarm.ron`: workers, image, mounts, env, agents, stages. Same doc.
-- State: git branches and commit trailers only. Design in [docs/refs/architecture.md](docs/refs/architecture.md).
+Rows stack. A task whose parent is landed but unmerged branches off that parent, so a chain builds on itself while you sleep.
+
+## Why it exists
+
+Agent CLIs run one session, in one directory, while you watch. Three costs follow.
+
+- **You are the scheduler.** Nobody starts task 7 when task 3 lands at 03:00. The board holds the dependency graph, the loop runs it.
+- **One directory, one task.** Parallel work needs separate checkouts, containers, branches. A slot is all three.
+- **Session state dies with the terminal.** State here sits in git branches and commit trailers only. No database, no state file. Kill the process, restart, every row state rebuilds from the repo.
+
+Design: [docs/refs/architecture.md](docs/refs/architecture.md).
+
+## Why the constraints
+
+- **Host owns git.** Agents get the gitdir read-only. Every commit runs outside the container with the agent's message. An agent cannot rewrite history or land half a stage.
+- **Container per slot.** Agent permission checks run off inside. The container is the only boundary, so one rule covers every agent.
+- **Board is input only.** The tool writes no file under the project root. Three branches editing one board file conflict on every merge.
+- **Spend is bounded.** 3 tries per turn. A failed row records the `main` tip it ran against and waits for a new one, so a broken row costs one attempt per push, not one per cycle.
+- **Tool knows no project.** Task dir names, id patterns, prompts, image, mounts come from the project's own files. A second project needs no code change.
+
+## Files in your project
+
+- `SWARM.md`: board. Markdown table, one row per task: task, after, agent.
+- `scswarm.ron`: workers, image, mounts, env, agents, stages, merge turns.
+- `Containerfile.swarm`: image with the agent CLI and your build tools.
+
+Both formats bind: [docs/spec/contract.md](docs/spec/contract.md).
 
 ## Commands
 
@@ -27,13 +52,17 @@ scswarm reset ID  drop branch of task and dependants
 
 ## Build
 
-`cargo build --release`, `cargo install --path .`. Lint: `make lint`.
+`cargo build --release`, then `cargo install --path .`. Lint: `make lint`.
 
 Run under systemd: copy [systemd/scswarm.service](systemd/scswarm.service) to `~/.config/systemd/user/`, set `WorkingDirectory` to the project checkout, then `systemctl --user enable --now scswarm`.
 
 ## Limits
 
-- Reads the board from `main` only.
+- Reads the board from `main` only. A row on a feature branch stays invisible.
 - Needs rootless podman. `init` replaces every slot container, so stop `serve` first.
+- One `serve` per project. Two share the slot worktrees and fight over the same branches. Nothing locks them.
 - A task stacked on a rejected parent needs `reset`. Stop `serve` first.
-- Agent process errors retry without cap. Expired credentials stall every worker until renewed.
+- One configured agent means one model both writes and audits the work.
+- Credentials come from the `serve` environment. A refreshed token needs a restart, then `reset` on each row that failed against the old one.
+- Worker count times cargo jobs must fit the core count. Set `CARGO_BUILD_JOBS` in the image.
+- No per-turn token or time budget. Agent flags in `exec` carry any cap.

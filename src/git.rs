@@ -5,13 +5,16 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Result};
 use crate::{paths, proc};
 
-pub const MAIN: &str = "main";
+/// Trunk tip, fetched from the branch the host file declares. The tool holds this
+/// ref, never a branch name.
+pub const TRUNK: &str = "refs/swarm/trunk";
 
 const BIN: &str = "git";
 
 const ORIGIN_URL: &str = "remote.origin.url";
 const ORIGIN_FETCH: &str = "remote.origin.fetch";
 
+const REFS: &str = "refs/";
 const HEADS: &str = "refs/heads/";
 const MERGE_HEAD: &str = "MERGE_HEAD";
 const WORKTREE_FIELD: &str = "worktree ";
@@ -29,10 +32,6 @@ pub struct Trailer {
 }
 
 impl Git {
-    pub fn discover() -> Result<Self> {
-        Self::discover_at(Path::new("."))
-    }
-
     /// Repo that holds `dir`.
     pub fn discover_at(dir: &Path) -> Result<Self> {
         let root = run(dir, &["rev-parse", "--show-toplevel"])?;
@@ -56,10 +55,11 @@ impl Git {
         &self.root
     }
 
-    /// Point `origin` at the project checkout and take `main` from it alone.
-    pub fn set_origin(&self, url: &Path) -> Result<()> {
+    /// Point `origin` at the project checkout and take `trunk` from it alone.
+    /// Idempotent: the caller runs it every cycle, so a hand-edited repo heals.
+    pub fn set_origin(&self, url: &Path, trunk: &str) -> Result<()> {
         run(&self.root, &["config", ORIGIN_URL, &paths::arg(url)?])?;
-        let refspec = format!("+{0}:{0}", head_ref(MAIN));
+        let refspec = format!("+{}:{TRUNK}", refname(trunk));
         run(&self.root, &["config", ORIGIN_FETCH, &refspec]).map(drop)
     }
 
@@ -69,7 +69,7 @@ impl Git {
 
     /// File content at a revision. `None` when the revision holds no such path.
     pub fn show(&self, rev: &str, path: &str) -> Result<Option<String>> {
-        let listing = run(&self.root, &["ls-tree", &head_ref(rev), "--", path])?;
+        let listing = run(&self.root, &["ls-tree", &refname(rev), "--", path])?;
         if listing.trim().is_empty() {
             return Ok(None);
         }
@@ -77,13 +77,13 @@ impl Git {
     }
 
     pub fn branch_exists(&self, branch: &str) -> Result<bool> {
-        let refname = head_ref(branch);
-        probe(&self.root, &["show-ref", "--verify", "--quiet", &refname])
+        let full = refname(branch);
+        probe(&self.root, &["show-ref", "--verify", "--quiet", &full])
     }
 
-    /// Commit sha at the tip of `branch`.
-    pub fn branch_commit(&self, branch: &str) -> Result<String> {
-        run(&self.root, &["rev-parse", &head_ref(branch)]).map(|sha| sha.trim().to_string())
+    /// Commit sha `rev` points at. Errors when no such ref.
+    pub fn tip(&self, rev: &str) -> Result<String> {
+        run(&self.root, &["rev-parse", &refname(rev)]).map(|sha| sha.trim().to_string())
     }
 
     /// Commit `name` points at. `None` when no such ref.
@@ -116,15 +116,15 @@ impl Git {
             trailer_format(key),
             trailer_format(want)
         );
-        let log = run(&self.root, &["log", &format, &head_ref(branch), "--"])?;
+        let log = run(&self.root, &["log", &format, &refname(branch), "--"])?;
         Ok(log.lines().find_map(|line| parse_trailer(line, value)))
     }
 
-    pub fn is_ancestor(&self, commit: &str, branch: &str) -> Result<bool> {
-        let refname = head_ref(branch);
+    pub fn is_ancestor(&self, commit: &str, rev: &str) -> Result<bool> {
+        let ancestor = refname(rev);
         probe(
             &self.root,
-            &["merge-base", "--is-ancestor", commit, &refname],
+            &["merge-base", "--is-ancestor", commit, &ancestor],
         )
     }
 
@@ -156,7 +156,7 @@ impl Git {
     pub fn detach_at(&self, rev: &str) -> Result<()> {
         run(
             &self.root,
-            &["checkout", "--force", "--detach", &head_ref(rev)],
+            &["checkout", "--force", "--detach", &refname(rev)],
         )?;
         run(&self.root, &["clean", "--force", "-d"]).map(drop)
     }
@@ -167,7 +167,7 @@ impl Git {
         let subject = format!("Merge {branch}");
         run(
             &self.root,
-            &["merge", "--no-edit", "-m", &subject, &head_ref(branch)],
+            &["merge", "--no-edit", "-m", &subject, &refname(branch)],
         )
         .map(drop)
     }
@@ -199,7 +199,7 @@ impl Git {
         let path = paths::arg(path)?;
         run(
             &self.root,
-            &["worktree", "add", "--detach", &path, &head_ref(rev)],
+            &["worktree", "add", "--detach", &path, &refname(rev)],
         )
         .map(drop)
     }
@@ -222,9 +222,13 @@ impl Git {
     }
 }
 
-/// Full ref name: a branch name alone can also read as a path.
-fn head_ref(branch: &str) -> String {
-    format!("{HEADS}{branch}")
+/// Full ref name: a branch name alone can also read as a path. A name that
+/// already starts with `refs/` stands, the rule git itself resolves by.
+fn refname(rev: &str) -> String {
+    match rev.starts_with(REFS) {
+        true => rev.to_string(),
+        false => format!("{HEADS}{rev}"),
+    }
 }
 
 /// Porcelain worktree list: `worktree <path>` opens a block, `branch <ref>` names its branch.

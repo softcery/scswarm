@@ -2,8 +2,8 @@ use std::env;
 use std::path::Path;
 use std::process::Command;
 
-use crate::config::{self, Mount};
 use crate::error::{Error, Result};
+use crate::host::Mount;
 use crate::{paths, proc};
 
 const BIN: &str = "podman";
@@ -127,8 +127,7 @@ pub fn tag(project: &str) -> String {
 fn present(name: &str) -> Result<()> {
     if env::var_os(name).is_none() {
         return Err(Error::Failed(format!(
-            "environment variable {name}, named in {} field `env`, must hold a value",
-            config::FILE
+            "environment variable {name}, named in the host file field `env`, must hold a value"
         )));
     }
     Ok(())

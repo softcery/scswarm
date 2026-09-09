@@ -7,8 +7,8 @@ use crate::state;
 /// Delete the branch and fail mark of `id` and of every row that waits on it,
 /// straight or through others.
 pub fn reset(repo: &Git, id: &str) -> Result<()> {
-    let config = Config::from_main(repo)?;
-    let board = Board::from_main(repo, &config)?;
+    let config = Config::from_trunk(repo)?;
+    let board = Board::from_trunk(repo, &config)?;
     let checkouts = repo.checkouts()?;
     let mut dropped = 0;
     for task in targets(&board, id) {
@@ -71,7 +71,6 @@ mod tests {
 
     const CONFIG: &str = r#"
 (
-  workers: 1,
   image: "Containerfile.swarm",
   default_agent: "claude",
   agents: {"claude": (exec: "claude -p")},

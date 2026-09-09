@@ -1,10 +1,10 @@
 # scswarm
 
-Runs coding agents on a task board with no human at the keyboard. One binary, one workstation. You push `main`, workers land a branch per task, you review and merge.
+Runs coding agents on a task board with no human at the keyboard. One binary, one workstation. You push your trunk branch, workers land a branch per task, you review and merge.
 
 ## What it does
 
-You write tasks, list them in `SWARM.md` with dependencies, push `main`. Every 5 seconds the loop:
+You write tasks, list them in `SWARM.md` with dependencies, push the trunk. Every 5 seconds the loop:
 
 1. Picks every row whose dependencies are done.
 2. Gives each row a slot: own git worktree, own podman container.
@@ -29,36 +29,43 @@ Design: [docs/refs/architecture.md](docs/refs/architecture.md).
 - **Host owns git.** Agents get the gitdir read-only. Every commit runs outside the container with the agent's message. An agent cannot rewrite history or land half a stage.
 - **Container per slot.** Agent permission checks run off inside. The container is the only boundary, so one rule covers every agent.
 - **Board is input only.** The tool writes no file under the project root. Three branches editing one board file conflict on every merge.
-- **Spend is bounded.** 3 tries per turn. A failed row records the `main` tip it ran against and waits for a new one, so a broken row costs one attempt per push, not one per cycle.
-- **Tool knows no project.** Task dir names, id patterns, prompts, image, mounts come from the project's own files. A second project needs no code change.
+- **Spend is bounded.** 3 tries per turn. A failed row records the trunk tip it ran against and waits for a new one, so a broken row costs one attempt per push, not one per cycle.
+- **Tool knows no project.** Task dir names, id patterns, prompts and image come from the project's own files; checkout path, trunk branch, workers, mounts and credentials from a host file. A second project needs no code change.
 
-## Files in your project
+## Files
+
+In your project:
 
 - `SWARM.md`: board. Markdown table, one row per task: task, after, agent.
-- `scswarm.ron`: workers, image, mounts, env, agents, stages, merge turns.
+- `scswarm.ron`: image, agents, stages, merge turns.
 - `Containerfile.swarm`: image with the agent CLI and your build tools.
 
-Both formats bind: [docs/spec/contract.md](docs/spec/contract.md).
+On the host, `~/.config/scswarm/<project>.ron`: checkout path, trunk branch, workers, mounts, env.
+
+Every format binds: [docs/spec/contract.md](docs/spec/contract.md).
 
 ## Commands
 
+`PROJECT` is the stem of the host file.
+
 ```
-scswarm init      bare repo, image, slot worktrees and containers
-scswarm serve     scheduler and workers, foreground
-scswarm status    board rows with derived state
-scswarm log ID    transcript of one task
-scswarm reset ID  drop branch of task and dependants
+scswarm init PROJECT      bare repo, image, slot worktrees and containers
+scswarm serve PROJECT     scheduler and workers, foreground
+scswarm status PROJECT    board rows with derived state
+scswarm log PROJECT ID    transcript of one task
+scswarm reset PROJECT ID  drop branch of task and dependants
 ```
 
 ## Build
 
 `cargo build --release`, then `cargo install --path .`. Lint: `make lint`.
 
-Run under systemd: copy [systemd/scswarm.service](systemd/scswarm.service) to `~/.config/systemd/user/`, set `WorkingDirectory` to the project checkout, then `systemctl --user enable --now scswarm`.
+Run under systemd: copy the template unit [systemd/scswarm@.service](systemd/scswarm@.service) to `~/.config/systemd/user/`, then `systemctl --user enable --now scswarm@<project>`.
 
 ## Limits
 
-- Reads the board from `main` only. A row on a feature branch stays invisible.
+- Reads the board from the trunk branch only. A row on any other branch stays invisible.
+- Trunk and checkout path reload each cycle. Worker count, mounts and env are baked into the containers, so they need `init`.
 - Needs rootless podman. `init` replaces every slot container, so stop `serve` first.
 - One `serve` per project. Two share the slot worktrees and fight over the same branches. Nothing locks them.
 - A task stacked on a rejected parent needs `reset`. Stop `serve` first.

@@ -7,7 +7,7 @@ use crate::git::{self, Git};
 pub const TASK_TRAILER: &str = "Swarm-Task";
 pub const STAGE_TRAILER: &str = "Swarm-Stage";
 
-const FAIL_REFS: &str = "refs/swarm-fail/";
+const FAIL_REFS: &str = "refs/swarm/fail/";
 
 /// Row standing. Read from git, never stored. `Failed` stage 0 = parent merge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,14 +24,14 @@ pub fn branch(id: &str) -> String {
     format!("swarm/{id}")
 }
 
-/// Ref that marks the `main` tip a row last failed against. Outside `refs/heads/`,
+/// Ref that marks the trunk tip a row last failed against. Outside `refs/heads/`,
 /// so it lists as no branch and pushes with none.
 pub fn fail_ref(id: &str) -> String {
     format!("{FAIL_REFS}{id}")
 }
 
 pub fn derive(board: &Board, total: usize, git: &Git) -> Result<Vec<State>> {
-    let base = git.branch_commit(git::MAIN)?;
+    let base = git.tip(git::TRUNK)?;
     let progress = board
         .rows()
         .iter()
@@ -61,7 +61,7 @@ pub fn derive(board: &Board, total: usize, git: &Git) -> Result<Vec<State>> {
         .collect())
 }
 
-/// Failed while `main` stood where it stands now. A moved `main` frees the row.
+/// Failed while the trunk stood where it stands now. A moved trunk frees the row.
 fn row_failed(git: &Git, id: &str, base: &str) -> Result<bool> {
     Ok(git.ref_commit(&fail_ref(id))?.as_deref() == Some(base))
 }
@@ -107,7 +107,7 @@ fn row_progress(git: &Git, id: &str, total: usize) -> Result<Progress> {
     if done < total {
         return Ok(Progress::Stage(done));
     }
-    if git.is_ancestor(&trailer.commit, git::MAIN)? {
+    if git.is_ancestor(&trailer.commit, git::TRUNK)? {
         Ok(Progress::Done)
     } else {
         Ok(Progress::Landed)

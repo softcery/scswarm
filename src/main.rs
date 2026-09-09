@@ -3,6 +3,7 @@ mod config;
 mod error;
 mod event;
 mod git;
+mod host;
 mod init;
 mod log;
 mod paths;
@@ -16,8 +17,6 @@ mod stage;
 mod state;
 mod status;
 mod turn;
-
-use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
@@ -33,26 +32,20 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     #[command(about = "Create bare repo, slot worktrees, image and containers")]
-    Init {
-        #[arg(long, value_name = "DIR", default_value = ".")]
-        root: PathBuf,
-    },
+    Init { project: String },
     #[command(about = "Run scheduler and workers until stopped")]
-    Serve,
+    Serve { project: String },
     #[command(about = "Print board rows with state derived from git")]
-    Status,
+    Status { project: String },
     #[command(about = "Print the agent transcript of one task")]
     Log {
-        #[arg(value_name = "ID")]
+        project: String,
         id: String,
         #[arg(long, value_name = "N")]
         stage: Option<usize>,
     },
     #[command(about = "Delete the branch and fail mark of one task and of every dependant")]
-    Reset {
-        #[arg(value_name = "ID")]
-        id: String,
-    },
+    Reset { project: String, id: String },
 }
 
 fn main() {
@@ -63,24 +56,22 @@ fn main() {
     }
 }
 
+/// Every command names a project: the stem of its host file. The working
+/// directory carries no meaning.
 fn dispatch(command: Command) -> Result<()> {
     match command {
-        Command::Init { root } => init::init(&root),
-        Command::Serve => {
-            let (project, repo) = init::open()?;
-            serve::serve(&repo, &project)
+        Command::Init { project } => init::init(&paths::project(&project)?),
+        Command::Serve { project } => {
+            let project = paths::project(&project)?;
+            serve::serve(&init::open(&project)?, &project)
         }
-        Command::Status => {
-            let (project, repo) = init::open()?;
-            status::status(&repo, &project)
+        Command::Status { project } => {
+            let project = paths::project(&project)?;
+            status::status(&init::open(&project)?, &project)
         }
-        Command::Log { id, stage } => {
-            let (project, _) = init::open()?;
-            log::log(&project, &id, stage)
-        }
-        Command::Reset { id } => {
-            let (_, repo) = init::open()?;
-            reset::reset(&repo, &id)
+        Command::Log { project, id, stage } => log::log(&paths::project(&project)?, &id, stage),
+        Command::Reset { project, id } => {
+            reset::reset(&init::open(&paths::project(&project)?)?, &id)
         }
     }
 }

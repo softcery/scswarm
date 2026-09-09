@@ -25,10 +25,10 @@ pub struct Row {
 }
 
 impl Board {
-    pub fn from_main(git: &Git, config: &Config) -> Result<Self> {
+    pub fn from_trunk(git: &Git, config: &Config) -> Result<Self> {
         let text = git
-            .show(git::MAIN, FILE)?
-            .ok_or_else(|| Error::Invalid(format!("{FILE}: absent from branch {}", git::MAIN)))?;
+            .show(git::TRUNK, FILE)?
+            .ok_or_else(|| Error::Invalid(format!("{FILE}: absent from the trunk branch")))?;
         Self::parse(&text, config)
     }
 
@@ -196,7 +196,6 @@ mod tests {
 
     const CONFIG: &str = r#"
 (
-  workers: 1,
   image: "Containerfile.swarm",
   default_agent: "claude",
   agents: {

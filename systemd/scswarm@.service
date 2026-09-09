@@ -1,0 +1,15 @@
+[Unit]
+Description=scswarm autonomous task swarm for %i
+After=default.target
+
+[Service]
+Type=simple
+# Host file: %h/.config/scswarm/%i.ron
+ExecStart=%h/.cargo/bin/scswarm serve %i
+# Credentials named in the host file field `env`, one KEY=VALUE per line.
+EnvironmentFile=-%h/.config/scswarm/env
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

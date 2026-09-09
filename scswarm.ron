@@ -1,8 +1,5 @@
 (
-  workers: 2,
   image: "Containerfile.swarm",
-  mounts: [],
-  env: ["CLAUDE_CODE_OAUTH_TOKEN"],
   default_agent: "claude",
   agents: {
     "claude": (

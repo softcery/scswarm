@@ -7,6 +7,7 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::event;
 use crate::git::{self, Git};
+use crate::host::Host;
 use crate::slot::Slot;
 use crate::state;
 use crate::{paths, stage};
@@ -20,7 +21,7 @@ pub struct Job {
     pub config: Arc<Config>,
     pub stack: Vec<String>,
     pub from: usize,
-    /// `main` tip this attempt runs against. Failure marks it, so the row waits for a new tip.
+    /// Trunk tip this attempt runs against. Failure marks it, so the row waits for a new tip.
     pub base: String,
 }
 
@@ -39,10 +40,10 @@ struct Worker {
 
 impl Pool {
     /// One worktree, container and thread per configured worker.
-    pub fn open(repo: &Git, project: &str, config: &Config) -> Result<Self> {
+    pub fn open(repo: &Git, project: &str, host: &Host) -> Result<Self> {
         let (done, reports) = mpsc::channel();
-        let workers = (0..config.workers)
-            .map(|index| spawn(repo, project, index, config, done.clone()))
+        let workers = (0..host.workers)
+            .map(|index| spawn(repo, project, index, host, done.clone()))
             .collect::<Result<Vec<Worker>>>()?;
         Ok(Self { workers, reports })
     }
@@ -91,10 +92,10 @@ fn spawn(
     repo: &Git,
     project: &str,
     index: usize,
-    config: &Config,
+    host: &Host,
     done: Sender<usize>,
 ) -> Result<Worker> {
-    let slot = Slot::open(repo, project, index, git::MAIN, &config.env)?;
+    let slot = Slot::open(repo, project, index, git::TRUNK, &host.env)?;
     slot.container().start()?;
     let (jobs, queue) = mpsc::channel();
     let project = project.to_string();
@@ -162,7 +163,7 @@ fn stages(slot: &Slot, project: &str, job: &Job) -> Staged<()> {
         let log = paths::transcript(project, id, stage::MERGE)?;
         stage::resolve(slot, &job.config, &job.row, parent, &log)
     };
-    slot.checkout(&state::branch(id), git::MAIN, &job.stack, &resolve)
+    slot.checkout(&state::branch(id), git::TRUNK, &job.stack, &resolve)
         .map_err(|why| (job.from, why))?;
     let total = job.config.stages.len();
     for number in job.from..=total {

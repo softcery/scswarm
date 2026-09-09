@@ -18,52 +18,13 @@ pub const COMMIT_TURN: &str = "{commit}";
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    pub workers: usize,
     pub image: String,
-    #[serde(default)]
-    pub mounts: Vec<Mount>,
-    /// Host environment variables the containers get. Credentials ride here.
-    #[serde(default)]
-    pub env: Vec<String>,
     pub default_agent: String,
     pub agents: BTreeMap<String, Agent>,
     pub stages: Vec<Stage>,
     /// Turns that resolve conflicted parent merge. Absent: conflict drops branch.
     #[serde(default)]
     pub merge: Option<Stage>,
-}
-
-/// One bind: absolute host path, absolute container path. Both sides rw.
-#[derive(Debug, Deserialize)]
-#[serde(try_from = "String")]
-pub struct Mount {
-    pub host: String,
-    pub guest: String,
-}
-
-impl TryFrom<String> for Mount {
-    type Error = String;
-
-    fn try_from(raw: String) -> std::result::Result<Self, String> {
-        let parts: Vec<&str> = raw.split(':').collect();
-        let [host, guest] = parts[..] else {
-            return Err(shaped(&format!("{} parts", parts.len())));
-        };
-        if !host.starts_with('/') && !host.starts_with("~/") {
-            return Err(shaped("a host side neither absolute nor under `~/`"));
-        }
-        if !guest.starts_with('/') {
-            return Err(shaped("a container side not absolute"));
-        }
-        Ok(Self {
-            host: host.to_string(),
-            guest: guest.to_string(),
-        })
-    }
-}
-
-fn shaped(got: &str) -> String {
-    format!("field `mounts` entry must read `/host:/container`: got {got}")
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,10 +44,10 @@ pub struct Stage {
 }
 
 impl Config {
-    pub fn from_main(git: &Git) -> Result<Self> {
+    pub fn from_trunk(git: &Git) -> Result<Self> {
         let text = git
-            .show(git::MAIN, FILE)?
-            .ok_or_else(|| invalid(&format!("absent from branch {}", git::MAIN)))?;
+            .show(git::TRUNK, FILE)?
+            .ok_or_else(|| invalid("absent from the trunk branch"))?;
         Self::parse(&text)
     }
 
@@ -108,30 +69,13 @@ impl Config {
     }
 
     fn check(&self) -> Result<()> {
-        if self.workers == 0 {
-            return Err(invalid("field `workers` must be a count of 1 or more"));
-        }
         if self.image.trim().is_empty() {
             return Err(invalid(
                 "field `image` must name a Containerfile path or an image",
             ));
         }
-        self.check_env()?;
         self.check_agents()?;
         self.check_stages()
-    }
-
-    fn check_env(&self) -> Result<()> {
-        for (index, name) in self.env.iter().enumerate() {
-            let plain = |letter: char| letter.is_ascii_alphanumeric() || letter == '_';
-            if name.is_empty() || !name.chars().all(plain) {
-                return Err(invalid(&format!(
-                    "field `env` entry {} must name a host environment variable",
-                    index + 1
-                )));
-            }
-        }
-        Ok(())
     }
 
     fn check_agents(&self) -> Result<()> {
@@ -208,10 +152,7 @@ mod tests {
 
     const EXAMPLE: &str = r#"
 (
-  workers: 3,
   image: "Containerfile.swarm",
-  mounts: ["~/alpha/records:/records"],
-  env: ["ANTHROPIC_API_KEY"],
   default_agent: "claude",
   agents: {
     "claude": (
@@ -230,10 +171,7 @@ mod tests {
     #[test]
     fn parses_contract_example() {
         let config = Config::parse(EXAMPLE).expect("example must parse");
-        assert_eq!(config.workers, 3);
-        assert_eq!(config.mounts[0].host, "~/alpha/records");
-        assert_eq!(config.mounts[0].guest, "/records");
-        assert_eq!(config.env, ["ANTHROPIC_API_KEY"]);
+        assert_eq!(config.image, "Containerfile.swarm");
         assert_eq!(config.stages.len(), 2);
         assert_eq!(config.stages[0].agent, None);
         assert_eq!(config.stages[1].agent.as_deref(), Some("claude"));

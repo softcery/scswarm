@@ -13,8 +13,8 @@ const NONE: &str = "-";
 
 /// One line per board row. Every cell derives from git.
 pub fn status(repo: &Git, project: &str) -> Result<()> {
-    let config = Config::from_main(repo)?;
-    let board = Board::from_main(repo, &config)?;
+    let config = Config::from_trunk(repo)?;
+    let board = Board::from_trunk(repo, &config)?;
     let total = config.stages.len();
     let states = state::derive(&board, total, repo)?;
     let slots = slots(repo, project)?;

@@ -3,7 +3,7 @@ use crate::error::Error;
 /// Sole writer of `serve` loop lines. Progress on stdout, faults on stderr.
 /// journald stamps each line, so none carries a time field.
 pub fn fetch(sha: &str) {
-    println!("fetch main={}", short(sha));
+    println!("fetch trunk={}", short(sha));
 }
 
 /// Task and stage a line names.
@@ -53,6 +53,16 @@ pub fn commit(at: &At, sha: &str) {
         at.total,
         short(sha)
     );
+}
+
+/// Cycle passed over: git refused the trunk.
+pub fn skip(why: &Error) {
+    eprintln!("skip cause={why}");
+}
+
+/// Host file unreadable. The loop runs on the last good copy.
+pub fn stale(why: &Error) {
+    eprintln!("stale cause={why}");
 }
 
 pub fn land(id: &str) {

@@ -13,6 +13,7 @@ Markdown table at project root. Header row, separator row, one row per task. Too
 ```
 
 - `task`: any text. Substituted as `{task}` in turns. Id = file stem when text is a path, else the text.
+- Id becomes branch `swarm/<id>`, so it must pass `git check-ref-format`: no space, `..`, `~^:?*[`, control character, leading `-`, or `.lock` end. A row that fails it exits 1 naming the line.
 - `after`: comma list of ids. Empty = none.
 - `agent`: key in `scswarm.ron` `agents`. Empty = `default_agent`.
 - Unknown id in `after`, duplicate id, unknown agent: `serve` and `status` exit non-zero, name the row.
@@ -33,13 +34,14 @@ Host file, one per project, at `${XDG_CONFIG_HOME:-~/.config}/scswarm/<project>.
 )
 ```
 
-- `path`: project checkout the bare repo fetches from. Absolute, or under `~/`.
-- `trunk`: branch of that checkout every task branch starts from. Any name.
+- `path`: root of the project checkout the bare repo fetches from. Absolute, or under `~/`. A path inside the checkout is not a repo and fetch refuses it.
+- `trunk`: branch of that checkout every task branch starts from. Any name git takes as a ref.
 - `workers`: slot count. One worktree, one container each.
 - `mounts`: extra `host:container` binds, rw. Both sides absolute; host side takes `~/` for home. Build caches ride here.
 - `env`: host environment variable names forwarded into every container. Credentials ride here. Value never reaches an argument list.
 - These fields cannot sit in `scswarm.ron`: `trunk` names the branch that file is read from, and the rest changes with the machine.
-- `path` and `trunk` take effect on the next cycle. `workers`, `mounts` and `env` are baked into the containers, so they need `init`.
+- `path` and `trunk` reload on the next cycle. `workers`, `mounts` and `env` are immutable while `serve` runs: containers bake them, so `init` replaces them.
+- Reality differing from those three fields is drift. `serve` verifies at start and after every reload, then exits 2 naming the field. `serve` writes no container, ever.
 - Absent or unparsable at start: exit 1. Unparsable later: `serve` reports `stale`, keeps the last good copy, keeps running.
 
 ## `scswarm.ron`
@@ -65,7 +67,7 @@ Project root, read from the trunk branch. RON, `IMPLICIT_SOME`.
 )
 ```
 
-- `image`: Containerfile path relative to root, or image name. Must hold every tool the agents and the project build need.
+- `image`: Containerfile path relative to root, or image name. Must hold every tool the agents and the project build need. `init` builds it from a throwaway worktree of the trunk ref, so untracked and ignored files stay out of the build context.
 - `agents.*.exec`: command run inside the container. Prompt appended as last argument. Must print JSON with `session_id` and `result` on stdout, or plain text as `result`.
 - `agents.*.resume`: arguments added from second turn on. `{session}` = id from first reply.
 - `stages[].turns`: sent in order, one session per stage. `{task}` substituted. `{commit}` = built-in turn: asks for a commit message, host commits with the reply.
@@ -75,7 +77,7 @@ Project root, read from the trunk branch. RON, `IMPLICIT_SOME`.
 ## Git
 
 - Remote: bare repo `~/swarm/<project>.git`. Project pushes the trunk branch.
-- `init` and every `serve` cycle write the bare repo `origin` from the host file: url `path`, refspec `+refs/heads/<trunk>:refs/swarm/trunk`. A hand-edited bare repo heals on the next cycle. `status` reads the last fetch.
+- `init` writes the bare repo `origin` from the host file: url `path`, refspec `+refs/heads/<trunk>:refs/swarm/trunk`. `serve` writes it when the two fields change, and again after a failed fetch, so a hand-edited bare repo heals. `status` reads the last fetch.
 - The tool reads the trunk tip at ref `refs/swarm/trunk` and holds no branch name. A failed fetch reports `skip` and costs one cycle.
 - Branch per task: `swarm/<id>`. Base: `refs/swarm/trunk`, then a merge of every parent in `after` that is landed and unmerged. One such parent fast-forwards, so the branch equals `swarm/<parent>`.
 - The stack merges on a detached head. The branch takes its name after the last merge, so a crash mid-merge leaves no branch and the next cycle starts over.
@@ -103,18 +105,20 @@ scswarm log PROJECT ID [--stage N]  transcript, one block per turn: prompt, then
 scswarm reset PROJECT ID            delete swarm/<id>, every dependant branch, their fail marks
 ```
 
-Exit codes: 0 ok, 1 input invalid (config, board, unknown id), 2 git or podman failure.
+Exit codes: 0 ok, 1 input invalid (config, board, unknown id), 2 git or podman failure. Drift between the host file and the slot set exits 2: the file parses and the machine is intact, and the fix is `init`.
 
 ## Container
 
 Rootless podman, `--userns=keep-id`, one long-lived container per slot, named `scswarm-<project>-<n>`. It sleeps; every turn is one `podman exec`. Mounts: slot worktree rw at same path, bare repo ro at same path, `mounts` rw. Every bind carries the `z` flag, so an SELinux host relabels it shared. Credentials arrive as `env` names. Network on. Agent runs with its own permission checks off.
 
-Image: `image` names a Containerfile in the checkout, built as `localhost/scswarm/<project>`, or an image podman resolves.
+Image: `image` names a Containerfile on the trunk, built as `localhost/scswarm/<project>:latest`, or an image podman resolves. An untagged name reads as `:latest`, the form podman reports.
 
 ## Limits
 
 - Board read from the trunk branch only.
-- `init` replaces every slot container. Stop `serve` first.
+- `init` replaces every slot container and drops every slot at or above `workers`. Stop `serve` first.
+- The image build context is the trunk ref. A build that reads an untracked or ignored file fails after that file leaves the ref.
+- Containers carry the `mounts` and `env` they baked as labels. A release that changes that text reads as drift until `init` runs again.
 - A trunk change leaves running rows on their old base. A trunk without a row's landed commit reads that row as `landed` again, not `done`.
 - Mounts use the host path inside the container, so the podman machine must share that path.
 - `env` values come from the `serve` process. A refreshed credential needs a restart.

@@ -4,7 +4,7 @@ use crate::board::{Board, Row};
 use crate::config::Config;
 use crate::error::Result;
 use crate::git::Git;
-use crate::paths;
+use crate::paths::{self, Project};
 use crate::state::{self, State};
 
 const HEADER: [&str; 5] = ["id", "state", "branch", "stage", "worker"];
@@ -12,7 +12,7 @@ const GAP: &str = "  ";
 const NONE: &str = "-";
 
 /// One line per board row. Every cell derives from git.
-pub fn status(repo: &Git, project: &str) -> Result<()> {
+pub fn status(repo: &Git, project: &Project) -> Result<()> {
     let config = Config::from_trunk(repo)?;
     let board = Board::from_trunk(repo, &config)?;
     let total = config.stages.len();
@@ -24,7 +24,7 @@ pub fn status(repo: &Git, project: &str) -> Result<()> {
 
 /// Slot number holding each branch. A worktree checked out on a branch is that
 /// branch's worker, so the running slot needs no stored state.
-fn slots(repo: &Git, project: &str) -> Result<BTreeMap<String, usize>> {
+fn slots(repo: &Git, project: &Project) -> Result<BTreeMap<String, usize>> {
     let mut slots = BTreeMap::new();
     for (branch, path) in repo.checkouts()? {
         if let Some(index) = paths::slot_index(project, &path)? {

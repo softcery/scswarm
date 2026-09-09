@@ -114,3 +114,237 @@ Live, git side, on a scratch project whose branch is `blahblah`, with `HOME` and
 Fetch with `--prune` keeps `refs/swarm/trunk` when the declared branch vanishes: git fails with `couldn't find remote ref` before pruning. Measured in a scratch repo. So a lost trunk skips cycles and never deletes the last tip.
 
 Open check: container path. `serve`, slot containers, mounts and `env` forwarding need podman, absent here.
+
+## Audit
+
+Findings measured in scratch repos, 2026-09-09. `cargo test` 9 pass, `make lint` exit 0,
+`grep -rn '"main"' src/` empty: the done-when of this task holds.
+
+### Bugs
+
+- `git.rs:60` — `set_origin` writes `git config <key> <value>`. A multi-valued
+  `remote.origin.fetch` makes git exit 5: `cannot overwrite multiple values with a single
+  value`. `contract.md:78` claims a hand-edited bare repo heals. It stops the cycle.
+- `init.rs:16` and `serve.rs:79` — two origin urls from one field. `init` writes
+  `rev-parse --show-toplevel`, `serve` writes `path` raw. A `path` inside the checkout
+  passes `init`, then every fetch fails: `does not appear to be a git repository`.
+- `board.rs:65` — id comes from task text, which `contract.md:15` leaves free. Text with a
+  space gives `git branch` fatal 128, then the fail mark gives `update-ref` fatal 128,
+  then `pool.rs:152` panics, `collect()` reports `stopped`, `serve` exits 2.
+
+### Architecture
+
+- `host.rs:66` — trunk check is one word, no leading dash. `a..b`, `x^`, `feat.lock` and
+  `HEAD` pass it and git rejects each. Fetch fails every cycle with no start-time error.
+- `init.rs:19` — image builds from the host working tree while config comes from
+  `refs/swarm/trunk`. A dirty checkout bakes content no commit records.
+- `init.rs:21` — `init` creates `0..workers` and prunes nothing. `workers` 3 to 2 leaves
+  worktree 2 registered and container 2 running. An orphan worktree holding a branch
+  blocks every live slot (`architecture.md:31`), and `status.rs:27` prints its index.
+
+### Friction
+
+- `serve.rs:20,25` — the pool opens once, then each cycle drops `workers`, `mounts` and
+  `env` in silence. Raise `workers` and restart: `podman.rs:64` exits 2 and leaves new
+  worktree directories. Lower it: silent leak. Edit mid-run: nothing. Three answers.
+- `serve.rs:78` — both origin keys rewritten every cycle, 2 git processes per 5 s.
+- `git.rs:72,76` — `show` resolves `refname(rev)` for `ls-tree`, raw `rev` for `show`.
+- `podman.rs:65` — error omits `PROJECT`, which the CLI now requires. `init.rs:39` has it.
+- `podman.rs:145` and `paths.rs:22` — `slug` lowercases, the name check allows uppercase.
+  `Hex` and `hex` share one container name and one image tag; `init` on one removes the
+  other's containers.
+- `main.rs:63-75` — `paths::project` at 4 arms, result stays `String`.
+- `host.rs:15`, `paths.rs:30`, `host.rs:32` — "host" names a type, a file path and a bind
+  side.
+- `serve.rs:72` — `skip` reports every cycle, `fetch` only on change.
+- `log.rs:69` — an IO fault maps to `Invalid`, exit 1. `contract.md:106` reserves 1 for
+  invalid input.
+- `make lint` warns on files this task wrote: `host.rs:10`, `serve.rs` 19.0% prose,
+  `main.rs:59`, `git.rs:8,225`.
+
+### Notes
+
+- `contract.md:36` does not say `path` must be the repo root.
+- `systemd/scswarm@.service:7` comment hardcodes `~/.config`, ignoring `XDG_CONFIG_HOME`.
+- `host.rs:72` bounds `workers` below only; `architecture.md:46` ties it to core count.
+- `docs/tasks/next/007-turn-checkpoints.md:15` still reads `git log main..branch`.
+- Unmeasured: `fetch --prune` races worker ref writes over `packed-refs`. Test before act.
+
+## Plan
+
+Three decisions rule the rest.
+
+- **One project source.** Everything the tool reads from the project comes from
+  `refs/swarm/trunk`. The working tree read dies, and with it `Git::discover_at`.
+- **One creator, one verifier.** `init` writes the slot set, `serve` verifies it. Any
+  drift exits 2 naming the field and `scswarm init <project>`. `serve` builds nothing.
+- **Standard words.** `Remote { path, trunk }` reloads each cycle, since those two fields
+  are `remote.origin.url` and `remote.origin.fetch`. `Slots { workers, mounts, env }` is
+  immutable at runtime. A mismatch is drift. "Hot" and "cold" die.
+
+### 1. Ref name gate
+
+- `git.rs`: `valid_ref(name)`, full rule set of `git check-ref-format`: no space, no `..`,
+  none of `~^:?*[`, no backslash, no control character, no DEL, no leading `-`, no `.lock`
+  end, no `@{`, not the single `@`, no empty segment, no `//`, no trailing `/`, no trailing
+  `.`, not `HEAD`. A partial gate promises safety it cannot give, so the list is complete
+  or the step is not done.
+- `host.rs:66`: `trunk` check calls it, word count rule goes.
+- `board.rs`: reject a row whose `swarm/<id>` fails it, `Invalid`, names the line.
+- No subprocess: a 20-row board parses every 5 s, `state::derive` already spends 3 git
+  calls per row.
+
+### 2. Origin
+
+- `git.rs:60`: both `config` calls take `--replace-all`.
+- `serve.rs`: write origin when the `Remote` differs from the one last applied, or after a
+  failed fetch, then retry once. Self-heal stays, 2 processes per cycle go.
+- `path` means the repo root. Both callers pass it raw.
+
+### 3. Image from the trunk ref
+
+- `init`: `worktree add --detach ~/swarm/build/<project> refs/swarm/trunk`, build, remove.
+  Removal is explicit on both paths, no `Drop` guard swallowing the error.
+- `git.rs`: add `worktree_remove`. `discover_at` dies with its last caller.
+- `paths.rs`: `build(project)`.
+
+### 4. Slot set
+
+- `podman.rs`: `slots(project)` runs one `podman ps --all --format json`, then keeps names
+  with the literal prefix `scswarm-<project>-` and returns index, image and label per
+  container. `serde_json` already parses turns. No `--filter name=`: podman reads that
+  value as a regex, so a project named `a.b` would also match containers of `axb` and
+  prune could destroy another project's containers.
+- `init`: create `0..workers`, then remove every worktree and container above it. Stamp
+  each container `--label scswarm.slots=<ron of mounts and env>`.
+- `slot.rs`: `Slot::open` splits. `create` makes worktree and container, `init` alone calls
+  it. `attach` binds to both and errors when either is absent, `serve` alone calls it.
+
+### 5. Startup verify
+
+- `serve` order: host file, bare repo, origin, fetch, config, verify, pool, loop. Config
+  precedes the check because the image tag lives in `scswarm.ron`.
+- Verify from the one podman reply plus one `read_dir`: index count against `workers`,
+  worktree directory present, image present, label equal to the file's `Slots`.
+- Drift exits 2 naming the field. Mid-run: a readable file with a changed `Slots` exits;
+  an unreadable file keeps the last good copy and reports `stale`, as today.
+- Exit 2 needs a contract line. `contract.md:106` reserves 2 for a git or podman failure,
+  and drift is neither: the file parses and the machine is intact. It sits at 2 because
+  the fix is `init`, a podman and git act. Without that line the code contradicts the doc.
+
+### 6. Types
+
+- `host.rs`: `Host { remote: Remote, slots: Slots }`, one parse, two views.
+- `serve` holds `Remote` per cycle and the opening `Slots`. `init` and `Pool::open` read
+  `Slots` alone.
+
+### 7. Project newtype
+
+- `paths.rs`: `Project`, `TryFrom<&str>` carrying the charset check, uppercase rejected.
+- `main.rs`: `Command::project()` accessor, `dispatch` converts once before it matches. No
+  clap `value_parser`: clap rejects a bad value with its own exit code 2, and
+  `contract.md:106` gives invalid input exit 1.
+- `podman::slug` dies: a lowercase name is already a container name.
+
+### 8. Small
+
+- `git.rs:72,76`: one full ref name, used twice.
+- `podman.rs:65`: message names the project.
+- `serve.rs:72`: hold the last skip cause, report a repeat once.
+- `log.rs:69`: IO fault to `Failed`, exit 2.
+- `/deslop` on `host.rs:10`, `serve.rs:54,66,103`, `main.rs:59`, `git.rs:8,225`.
+
+### 9. Docs
+
+- `contract.md`: `path` is the repo root; image builds from the trunk ref; `init` prunes
+  above `workers`; a row id must pass the ref gate; reload versus immutable replaces the
+  hot and cold wording; the crash loop a bad `scswarm.ron` causes under systemd.
+- `architecture.md`: gate joins the trunk invariant chokepoint; smells gain "user text used
+  as a ref name without the gate".
+- `docs/tasks/next/007-turn-checkpoints.md:15`: `refs/swarm/trunk..branch`.
+
+### Tests and verify
+
+- `valid_ref` table: `a..b`, `x^`, `feat.lock`, `HEAD`, `my task`, `ok/name`.
+- One board test: a bad id names its line. Nothing else.
+- `cargo test`, `make lint`, then a scratch run over a multivar refspec, a bad id,
+  `workers` 3 to 2, a `mounts` edit mid-run, and a trunk edit mid-run.
+
+### New limits
+
+Each one goes in `contract.md` with the change that causes it.
+
+- Build context comes from a ref, so untracked and ignored files leave it. A project whose
+  image build reads a gitignored blob or a local `.env` builds today and fails after this
+  change. Commit the file or drop it from the build.
+- The `scswarm.slots` label is RON text this binary writes. A release that changes that
+  text makes every project drift at the next `serve` start until a human runs `init`.
+- A container that dies mid-run is still caught by the turn failing, not by the startup
+  check. Per-cycle probing is a separate decision, not this task.
+- `init` now destroys slots above `workers`, so running it against a live `serve` kills
+  more than before. `contract.md:117` already says to stop `serve` first.
+
+### Out of scope
+
+- No migration for old bare repos. No back-compat, per `CLAUDE.md`.
+- No lock for two `serve` processes. Documented limit.
+- The `packed-refs` race stays an open check. Measure first.
+
+## Plan impl
+
+- `src/git.rs` — `valid_ref` holds the full `check-ref-format` rule set plus the two branch
+  rules. `set_origin` writes through `--replace-all`. `worktree_remove` drops directory then
+  registration. `has_path` splits out of `show`, which now resolves one full ref name for
+  both calls. `discover_at` deleted.
+- `src/host.rs` — `Written` parses the file, then splits into `Remote { path, trunk }` and
+  `Slots { workers, mounts, env }`. Home paths resolve at parse. `Stamp` carries image,
+  mounts and env as text; `drift` on both types names the first field that differs.
+- `src/board.rs` — a row id that fails `valid_ref` exits 1 naming the line.
+- `src/paths.rs` — `Project` newtype, lowercase only, `TryFrom<&str>`. `host_file`, `build`
+  and `slot_dirs` added.
+- `src/podman.rs` — `slots(project)` reads one `podman ps --all --format json` and matches
+  names as text. Containers carry labels `scswarm.mounts` and `scswarm.env`. `remove`,
+  `image_exists`, `image_ref` added; `slug` deleted.
+- `src/slot.rs` — `open` split into `create` (init) and `attach` (serve). `verify` checks
+  slot numbers, image and both labels. `prune` drops every slot at or above `workers`.
+- `src/init.rs` — image builds from a throwaway worktree of the trunk ref, removed on both
+  paths. `init` ends with `prune`.
+- `src/config.rs` — `image_name` and `builds_image`: one resolver for the image, called by
+  `init` and by `serve`, so neither module reaches into the other.
+- `src/serve.rs` — `Server` holds pool, host, opened slot set, applied remote, last head and
+  last skip cause. Startup order: host file, origin, fetch, config, verify, pool. Origin
+  writes on change or after a failed fetch. Cold drift exits 2.
+- `src/main.rs` — `Command::project()`, one conversion in `dispatch`, exit 1 on a bad name.
+- `src/log.rs` — absent transcript exits 1, any other IO fault exits 2.
+- Docs — contract, architecture and README carry the repo-root rule, the trunk-ref build,
+  the prune, the id gate, reload against immutable, and drift at exit 2.
+
+**Verified.** `cargo test` 13 pass, `make lint` exit 0, `cargo clippy -D warnings` clean.
+
+Live, git side, scratch `HOME` and `XDG_CONFIG_HOME`, project on branch `blahblah`:
+
+- `init proj` wrote `+refs/heads/blahblah:refs/swarm/trunk`, fetched, built the trunk
+  worktree, removed it, then stopped at `podman must sit on PATH`, exit 2. Build directory
+  gone, `worktree list` back to one entry.
+- A second fetch refspec added by hand: `init` healed it to one value, so `--replace-all`
+  holds.
+- Board row `one two`: `status` exit 1 naming line 3. Row `notes.lock.md`: same. Before this
+  change the first row killed `serve`.
+- `status Proj` exit 1, `status ghost` exit 2, `trunk: "a..b"` exit 1, `path: "relative"`
+  exit 1, each naming its field.
+- `serve proj` reached the slot check and stopped there, so verify runs before any worker.
+
+Measured on the podman host, no state touched: `podman ps --all --format json` carries
+`Names`, `Image`, `Labels`; `image exists` exits 1 when absent; `ps` reports images tag
+qualified, for example `localhost/sercswarm/alpha:latest`. That last fact forced
+`image_ref`: an untagged name reads as `:latest` on both sides of the stamp, or every start
+would read as drift.
+
+Second pass over the diff caught five more, all fixed: an unnormalized image name on the
+remote-image branch of `init`, a home-path fault re-typed from exit 2 to exit 1 in
+`Written::split`, a host test that had drifted off the contract example, `serve` reaching
+into `init` for the image name, and the ref rule written out twice. `git::REF_RULE` now
+holds that sentence once.
+
+**Open check:** container path. `serve` past the slot check, label round trip, prune of a
+live container and drift on a `mounts` edit need podman, absent on this workstation.

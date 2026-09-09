@@ -1,8 +1,9 @@
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::paths;
+use crate::paths::{self, Project};
 use crate::turn::Entry;
 
 const PROMPT: &str = ">";
@@ -10,7 +11,7 @@ const REPLY: &str = "<";
 const FAULT: &str = "!";
 
 /// Print the transcript of one task: the named stage, or every stage in order.
-pub fn log(project: &str, id: &str, stage: Option<usize>) -> Result<()> {
+pub fn log(project: &Project, id: &str, stage: Option<usize>) -> Result<()> {
     let files = match stage {
         Some(number) => vec![(number, paths::transcript(project, id, number)?)],
         None => stages(&paths::transcripts(project, id)?)?,
@@ -23,7 +24,7 @@ pub fn log(project: &str, id: &str, stage: Option<usize>) -> Result<()> {
 
 /// Transcript files of one task, by stage number.
 fn stages(dir: &Path) -> Result<Vec<(usize, PathBuf)>> {
-    let listing = fs::read_dir(dir).map_err(|why| unreadable(dir, &why.to_string()))?;
+    let listing = fs::read_dir(dir).map_err(|why| unreadable(dir, &why))?;
     let mut found: Vec<(usize, PathBuf)> = listing
         .filter_map(|entry| {
             let path = entry.ok()?.path();
@@ -35,7 +36,7 @@ fn stages(dir: &Path) -> Result<Vec<(usize, PathBuf)>> {
 }
 
 fn read(path: &Path) -> Result<String> {
-    fs::read_to_string(path).map_err(|why| unreadable(path, &why.to_string()))
+    fs::read_to_string(path).map_err(|why| unreadable(path, &why))
 }
 
 fn render(stage: usize, transcript: &str) -> String {
@@ -65,6 +66,12 @@ fn entry(stage: usize, line: &str) -> String {
     lines.join("\n") + "\n"
 }
 
-fn unreadable(path: &Path, why: &str) -> Error {
-    Error::Invalid(format!("transcript {}: {why}", path.display()))
+/// Absent transcript names a task or stage that never ran: bad input. Any other
+/// fault is the filesystem refusing.
+fn unreadable(path: &Path, why: &io::Error) -> Error {
+    let what = format!("transcript {}: {why}", path.display());
+    match why.kind() {
+        io::ErrorKind::NotFound => Error::Invalid(what),
+        _ => Error::Failed(what),
+    }
 }

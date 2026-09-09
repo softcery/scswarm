@@ -7,7 +7,8 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::event;
 use crate::git::{self, Git};
-use crate::host::Host;
+use crate::host::Slots;
+use crate::paths::Project;
 use crate::slot::Slot;
 use crate::state;
 use crate::{paths, stage};
@@ -39,11 +40,11 @@ struct Worker {
 }
 
 impl Pool {
-    /// One worktree, container and thread per configured worker.
-    pub fn open(repo: &Git, project: &str, host: &Host) -> Result<Self> {
+    /// One thread per worker, each bound to the slot `init` made.
+    pub fn open(repo: &Git, project: &Project, slots: &Slots) -> Result<Self> {
         let (done, reports) = mpsc::channel();
-        let workers = (0..host.workers)
-            .map(|index| spawn(repo, project, index, host, done.clone()))
+        let workers = (0..slots.workers)
+            .map(|index| spawn(repo, project, index, &slots.env, done.clone()))
             .collect::<Result<Vec<Worker>>>()?;
         Ok(Self { workers, reports })
     }
@@ -90,15 +91,14 @@ impl Pool {
 
 fn spawn(
     repo: &Git,
-    project: &str,
+    project: &Project,
     index: usize,
-    host: &Host,
+    env: &[String],
     done: Sender<usize>,
 ) -> Result<Worker> {
-    let slot = Slot::open(repo, project, index, git::TRUNK, &host.env)?;
-    slot.container().start()?;
+    let slot = Slot::attach(project, index, env)?;
     let (jobs, queue) = mpsc::channel();
-    let project = project.to_string();
+    let project = project.clone();
     let own = Git::at(repo.root().to_path_buf());
     let thread = thread::spawn(move || work(&slot, &own, &project, index, &queue, &done));
     Ok(Worker {
@@ -112,13 +112,12 @@ fn stopped(index: usize) -> Error {
     Error::Failed(format!("slot {index} stopped: restart `scswarm serve`"))
 }
 
-/// Release runs first, so no panic below leaves a branch held. Marking runs next:
-/// a spent attempt must never repeat free. Either failing panics the thread;
-/// `collect()` turns that into `stopped`.
+/// Release first: no panic below leaves a branch held. Mark next: spent attempt
+/// must not repeat free. Either failure panics, `collect()` reads it as `stopped`.
 fn work(
     slot: &Slot,
     repo: &Git,
-    project: &str,
+    project: &Project,
     index: usize,
     queue: &Receiver<Job>,
     done: &Sender<usize>,
@@ -157,7 +156,7 @@ fn work(
     }
 }
 
-fn stages(slot: &Slot, project: &str, job: &Job) -> Staged<()> {
+fn stages(slot: &Slot, project: &Project, job: &Job) -> Staged<()> {
     let id = job.row.id();
     let resolve = |parent: &str| {
         let log = paths::transcript(project, id, stage::MERGE)?;

@@ -21,6 +21,7 @@ mod turn;
 use clap::{Parser, Subcommand};
 
 use crate::error::Result;
+use crate::paths::Project;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -56,22 +57,27 @@ fn main() {
     }
 }
 
-/// Every command names a project: the stem of its host file. The working
-/// directory carries no meaning.
+/// Every command names a project: stem of its host file. Working directory means
+/// nothing.
 fn dispatch(command: Command) -> Result<()> {
+    let project = Project::try_from(command.project())?;
     match command {
-        Command::Init { project } => init::init(&paths::project(&project)?),
-        Command::Serve { project } => {
-            let project = paths::project(&project)?;
-            serve::serve(&init::open(&project)?, &project)
-        }
-        Command::Status { project } => {
-            let project = paths::project(&project)?;
-            status::status(&init::open(&project)?, &project)
-        }
-        Command::Log { project, id, stage } => log::log(&paths::project(&project)?, &id, stage),
-        Command::Reset { project, id } => {
-            reset::reset(&init::open(&paths::project(&project)?)?, &id)
+        Command::Init { .. } => init::init(&project),
+        Command::Serve { .. } => serve::serve(&init::open(&project)?, &project),
+        Command::Status { .. } => status::status(&init::open(&project)?, &project),
+        Command::Log { id, stage, .. } => log::log(&project, &id, stage),
+        Command::Reset { id, .. } => reset::reset(&init::open(&project)?, &id),
+    }
+}
+
+impl Command {
+    fn project(&self) -> &str {
+        match self {
+            Command::Init { project }
+            | Command::Serve { project }
+            | Command::Status { project }
+            | Command::Log { project, .. }
+            | Command::Reset { project, .. } => project,
         }
     }
 }

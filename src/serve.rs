@@ -7,77 +7,138 @@ use crate::config::Config;
 use crate::error::Result;
 use crate::event;
 use crate::git::{self, Git};
-use crate::host::Host;
+use crate::host::{Host, Remote, Slots};
+use crate::paths::Project;
 use crate::pool::{Job, Pool};
+use crate::slot;
 use crate::state::{self, State};
 
 const POLL: Duration = Duration::from_secs(5);
 const FIRST_STAGE: usize = 1;
 
 /// Fetch, derive, fill idle slots with pending rows in board order, sleep. Until killed.
-pub fn serve(repo: &Git, project: &str) -> Result<()> {
-    let mut host = Host::load(project)?;
-    let mut pool = Pool::open(repo, project, &host)?;
-    let mut head = String::new();
-    loop {
-        cycle(repo, &mut pool, &host, &mut head)?;
-        thread::sleep(POLL);
-        host = reload(project, host);
-    }
+pub fn serve(repo: &Git, project: &Project) -> Result<()> {
+    Server::open(repo, project)?.run()
 }
 
-/// Report a fetch only when the trunk moved. Head starts empty, so cycle 1 reports.
-fn cycle(repo: &Git, pool: &mut Pool, host: &Host, head: &mut String) -> Result<()> {
-    pool.collect()?;
-    let Some(sha) = trunk(repo, host) else {
-        return Ok(());
-    };
-    if sha != *head {
-        event::fetch(&sha);
-        head.clone_from(&sha);
+struct Server<'a> {
+    repo: &'a Git,
+    project: &'a Project,
+    pool: Pool,
+    host: Host,
+    /// Slot set the pool opened with. Later edit of it is drift.
+    slots: Slots,
+    /// Remote last written to the bare repo.
+    origin: Option<Remote>,
+    /// Trunk tip last reported.
+    head: String,
+    /// Fetch fault last reported.
+    skipped: Option<String>,
+}
+
+impl<'a> Server<'a> {
+    /// Config precedes slot check: image name lives on trunk.
+    fn open(repo: &'a Git, project: &'a Project) -> Result<Self> {
+        let host = Host::load(project)?;
+        let mut origin = None;
+        sync(repo, &host.remote, &mut origin)?;
+        let config = Config::from_trunk(repo)?;
+        let stamp = host.slots.stamp(&config.image_name(repo, project)?)?;
+        slot::verify(project, &host.slots, &stamp)?;
+        let pool = Pool::open(repo, project, &host.slots)?;
+        let slots = host.slots.clone();
+        Ok(Self {
+            repo,
+            project,
+            pool,
+            host,
+            slots,
+            origin,
+            head: String::new(),
+            skipped: None,
+        })
     }
-    let config = Arc::new(Config::from_trunk(repo)?);
-    let board = Board::from_trunk(repo, &config)?;
-    let states = state::derive(&board, config.stages.len(), repo)?;
-    for (index, row) in board.rows().iter().enumerate() {
-        if !pending(&states[index]) || pool.holds(row.id()) {
-            continue;
+
+    fn run(mut self) -> Result<()> {
+        loop {
+            self.cycle()?;
+            thread::sleep(POLL);
+            self.reload()?;
         }
-        let Some(slot) = pool.idle() else {
+    }
+
+    fn cycle(&mut self) -> Result<()> {
+        self.pool.collect()?;
+        let Some(sha) = self.trunk() else {
             return Ok(());
         };
-        pool.assign(slot, job(&board, &states, index, &config, &sha))?;
+        if sha != self.head {
+            event::fetch(&sha);
+            self.head.clone_from(&sha);
+        }
+        let config = Arc::new(Config::from_trunk(self.repo)?);
+        let board = Board::from_trunk(self.repo, &config)?;
+        let states = state::derive(&board, config.stages.len(), self.repo)?;
+        for (index, row) in board.rows().iter().enumerate() {
+            if !pending(&states[index]) || self.pool.holds(row.id()) {
+                continue;
+            }
+            let Some(slot) = self.pool.idle() else {
+                return Ok(());
+            };
+            self.pool
+                .assign(slot, job(&board, &states, index, &config, &sha))?;
+        }
+        Ok(())
     }
-    Ok(())
-}
 
-/// Host file rules the wiring, so every cycle reads it again. A bad file keeps the
-/// last good copy: an editor mid-save must not stop the loop.
-fn reload(project: &str, last: Host) -> Host {
-    match Host::load(project) {
-        Ok(host) => host,
-        Err(why) => {
-            event::stale(&why);
-            last
+    /// Trunk tip after fetch. `None` when git refuses: absent branch or lost checkout
+    /// costs one cycle, not the loop. One report per cause.
+    fn trunk(&mut self) -> Option<String> {
+        match sync(self.repo, &self.host.remote, &mut self.origin) {
+            Ok(sha) => {
+                self.skipped = None;
+                Some(sha)
+            }
+            Err(why) => {
+                let cause = why.to_string();
+                if self.skipped.as_deref() != Some(&cause) {
+                    event::skip(&why);
+                    self.skipped = Some(cause);
+                }
+                None
+            }
         }
     }
-}
 
-/// Trunk tip after a fetch. `None` when git refuses: an absent branch or a lost
-/// checkout costs one cycle, not the loop.
-fn trunk(repo: &Git, host: &Host) -> Option<String> {
-    match sync(repo, host) {
-        Ok(sha) => Some(sha),
-        Err(why) => {
-            event::skip(&why);
-            None
+    /// Reread host file each cycle. Unreadable: keep last good copy, editor mid-save
+    /// must not stop the loop. Changed slot set: stop, `init` writes that set.
+    fn reload(&mut self) -> Result<()> {
+        let host = match Host::load(self.project) {
+            Ok(host) => host,
+            Err(why) => {
+                event::stale(&why);
+                return Ok(());
+            }
+        };
+        if let Some(field) = self.slots.drift(&host.slots) {
+            return Err(slot::drifted(self.project, field));
         }
+        self.host = host;
+        Ok(())
     }
 }
 
-fn sync(repo: &Git, host: &Host) -> Result<String> {
-    repo.set_origin(&host.checkout()?, &host.trunk)?;
-    repo.fetch()?;
+/// Write origin on change, fetch, heal hand-edited repo with one retry.
+fn sync(repo: &Git, remote: &Remote, origin: &mut Option<Remote>) -> Result<String> {
+    if origin.as_ref() != Some(remote) {
+        repo.set_origin(&remote.path, &remote.trunk)?;
+        *origin = Some(remote.clone());
+    }
+    if repo.fetch().is_err() {
+        repo.set_origin(&remote.path, &remote.trunk)?;
+        repo.fetch()?;
+    }
     repo.tip(git::TRUNK)
 }
 
@@ -100,8 +161,8 @@ fn job(board: &Board, states: &[State], index: usize, config: &Arc<Config>, base
     }
 }
 
-/// Base is the trunk. Every parent landed and unmerged rides in as a merge, so the
-/// branch starts with the work it waits on.
+/// Base is trunk. Each landed unmerged parent rides in as merge, so branch starts
+/// with work it waits on.
 fn stack(board: &Board, states: &[State], row: &Row) -> Vec<String> {
     row.after
         .iter()

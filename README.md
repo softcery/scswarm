@@ -65,8 +65,9 @@ Run under systemd: copy the template unit [systemd/scswarm@.service](systemd/scs
 ## Limits
 
 - Reads the board from the trunk branch only. A row on any other branch stays invisible.
-- Trunk and checkout path reload each cycle. Worker count, mounts and env are baked into the containers, so they need `init`.
-- Needs rootless podman. `init` replaces every slot container, so stop `serve` first.
+- Trunk and checkout path reload each cycle. Worker count, mounts and env are immutable while `serve` runs: it verifies them at start, and exits when they change. `init` applies them.
+- Needs rootless podman. `init` replaces every slot container and drops the slots above `workers`, so stop `serve` first.
+- The image builds from the trunk ref, so untracked and ignored files stay out of the build context.
 - One `serve` per project. Two share the slot worktrees and fight over the same branches. Nothing locks them.
 - A task stacked on a rejected parent needs `reset`. Stop `serve` first.
 - One configured agent means one model both writes and audits the work.

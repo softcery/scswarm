@@ -61,7 +61,7 @@ pub fn derive(board: &Board, total: usize, git: &Git) -> Result<Vec<State>> {
         .collect())
 }
 
-/// Failed while the trunk stood where it stands now. A moved trunk frees the row.
+/// Failed against trunk tip standing now. Moved trunk frees the row.
 fn row_failed(git: &Git, id: &str, base: &str) -> Result<bool> {
     Ok(git.ref_commit(&fail_ref(id))?.as_deref() == Some(base))
 }

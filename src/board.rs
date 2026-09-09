@@ -132,6 +132,15 @@ fn check_rows(entries: &[Entry], rows: &[Row], config: &Config) -> Result<()> {
         if row.task.is_empty() {
             return Err(bad_line(entry.line, "field `task` must not be empty"));
         }
+        if !git::valid_ref(row.id()) {
+            return Err(bad_line(
+                entry.line,
+                &format!(
+                    "field `task` must give an id git takes as a branch name: {}",
+                    git::REF_RULE
+                ),
+            ));
+        }
         if !config.knows_agent(&row.agent) {
             return Err(bad_line(
                 entry.line,
@@ -235,6 +244,16 @@ mod tests {
         let text = "| task | after | agent |\n|docs/tasks/next/a-one.md||codex|\n";
         let board = Board::parse(text, &config()).expect("tight cells must parse");
         assert_eq!(board.rows()[0].agent, "codex");
+    }
+
+    #[test]
+    fn names_a_row_whose_id_is_no_ref() {
+        let text = EXAMPLE.replace("parse-10-repair.md", "parse 10 repair.md");
+        let why = Board::parse(&text, &config())
+            .expect_err("an id with a space must fail")
+            .to_string();
+        assert!(why.contains("line 3"), "{why}");
+        assert!(why.contains("branch name"), "{why}");
     }
 
     #[test]

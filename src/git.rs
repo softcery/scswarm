@@ -16,7 +16,13 @@ const ORIGIN_FETCH: &str = "remote.origin.fetch";
 
 const REFS: &str = "refs/";
 const HEADS: &str = "refs/heads/";
+const HEAD: &str = "HEAD";
 const MERGE_HEAD: &str = "MERGE_HEAD";
+/// Every character `git check-ref-format` bars, control characters aside.
+const BARRED: &str = " ~^:?*[\\";
+/// What a name must avoid, for the caller that has to say so.
+pub const REF_RULE: &str =
+    "no space, `..`, `~^:?*[`, control character, leading `-`, or `.lock` end";
 const WORKTREE_FIELD: &str = "worktree ";
 const BRANCH_FIELD: &str = "branch ";
 
@@ -32,12 +38,6 @@ pub struct Trailer {
 }
 
 impl Git {
-    /// Repo that holds `dir`.
-    pub fn discover_at(dir: &Path) -> Result<Self> {
-        let root = run(dir, &["rev-parse", "--show-toplevel"])?;
-        Ok(Self::at(PathBuf::from(root.trim())))
-    }
-
     /// Create the bare repo at `path`, parents and all.
     pub fn init_bare(path: &Path) -> Result<Self> {
         let parent = path.parent().unwrap_or(Path::new("."));
@@ -55,25 +55,33 @@ impl Git {
         &self.root
     }
 
-    /// Point `origin` at the project checkout and take `trunk` from it alone.
-    /// Idempotent: the caller runs it every cycle, so a hand-edited repo heals.
+    /// Point `origin` at checkout, map `trunk` to `TRUNK`. Idempotent.
+    /// `--replace-all`: hand-edited key can hold many values, plain write fails on those.
     pub fn set_origin(&self, url: &Path, trunk: &str) -> Result<()> {
-        run(&self.root, &["config", ORIGIN_URL, &paths::arg(url)?])?;
-        let refspec = format!("+{}:{TRUNK}", refname(trunk));
-        run(&self.root, &["config", ORIGIN_FETCH, &refspec]).map(drop)
+        self.set_config(ORIGIN_URL, &paths::arg(url)?)?;
+        self.set_config(ORIGIN_FETCH, &format!("+{}:{TRUNK}", refname(trunk)))
+    }
+
+    fn set_config(&self, key: &str, value: &str) -> Result<()> {
+        run(&self.root, &["config", "--replace-all", key, value]).map(drop)
     }
 
     pub fn fetch(&self) -> Result<()> {
         run(&self.root, &["fetch", "--prune", "--quiet"]).map(drop)
     }
 
+    /// True when the revision holds `path`.
+    pub fn has_path(&self, rev: &str, path: &str) -> Result<bool> {
+        let listing = run(&self.root, &["ls-tree", &refname(rev), "--", path])?;
+        Ok(!listing.trim().is_empty())
+    }
+
     /// File content at a revision. `None` when the revision holds no such path.
     pub fn show(&self, rev: &str, path: &str) -> Result<Option<String>> {
-        let listing = run(&self.root, &["ls-tree", &refname(rev), "--", path])?;
-        if listing.trim().is_empty() {
+        if !self.has_path(rev, path)? {
             return Ok(None);
         }
-        run(&self.root, &["show", &format!("{rev}:{path}")]).map(Some)
+        run(&self.root, &["show", &format!("{}:{path}", refname(rev))]).map(Some)
     }
 
     pub fn branch_exists(&self, branch: &str) -> Result<bool> {
@@ -129,7 +137,7 @@ impl Git {
     }
 
     pub fn head(&self) -> Result<String> {
-        run(&self.root, &["rev-parse", "HEAD"]).map(|sha| sha.trim().to_string())
+        run(&self.root, &["rev-parse", HEAD]).map(|sha| sha.trim().to_string())
     }
 
     /// Name `commit` as `branch`.
@@ -204,6 +212,16 @@ impl Git {
         .map(drop)
     }
 
+    /// Drop worktree: directory, then registration. Prune reads registration, so
+    /// directory goes first.
+    pub fn worktree_remove(&self, path: &Path) -> Result<()> {
+        if path.exists() {
+            fs::remove_dir_all(path)
+                .map_err(|why| Error::Failed(format!("worktree {}: {why}", path.display())))?;
+        }
+        run(&self.root, &["worktree", "prune"]).map(drop)
+    }
+
     /// Stage every change and commit it: message from the agent, trailers from the host.
     pub fn commit(&self, message: &str, trailers: &[(&str, String)]) -> Result<String> {
         run(&self.root, &["add", "--all"])?;
@@ -220,6 +238,22 @@ impl Git {
         run(&self.root, &borrow(&args))?;
         self.head()
     }
+}
+
+/// Name git takes as ref. Rules of `git check-ref-format`, plus branch rules: no
+/// leading `-`, not `HEAD`. Board and host text pass here before becoming a ref.
+pub fn valid_ref(name: &str) -> bool {
+    let barred = |letter: char| letter.is_ascii_control() || BARRED.contains(letter);
+    let part = |part: &str| !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock");
+    !name.is_empty()
+        && name != HEAD
+        && name != "@"
+        && !name.starts_with('-')
+        && !name.ends_with('.')
+        && !name.contains("..")
+        && !name.contains("@{")
+        && !name.chars().any(barred)
+        && name.split('/').all(part)
 }
 
 /// Full ref name: a branch name alone can also read as a path. A name that
@@ -273,4 +307,36 @@ fn run(dir: &Path, args: &[&str]) -> Result<String> {
 
 fn probe(dir: &Path, args: &[&str]) -> Result<bool> {
     proc::probe(BIN, dir, args)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each name checked against `git check-ref-format --branch` before it landed here.
+    #[test]
+    fn takes_the_names_git_takes() {
+        for name in ["one", "swarm/one", "feature/a-b.c", "refs/swarm/trunk"] {
+            assert!(valid_ref(name), "{name}");
+        }
+        for name in [
+            "",
+            "HEAD",
+            "@",
+            "-x",
+            "a..b",
+            "x^",
+            "ho*t",
+            "a\\b",
+            "feat.lock",
+            "my task",
+            "a//b",
+            "a/",
+            "a.",
+            "a/.b",
+            "a@{0}",
+        ] {
+            assert!(!valid_ref(name), "{name}");
+        }
+    }
 }

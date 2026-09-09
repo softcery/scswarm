@@ -5,6 +5,8 @@ use serde::Deserialize;
 
 use crate::error::{Error, Result};
 use crate::git::{self, Git};
+use crate::paths::Project;
+use crate::podman;
 
 pub const FILE: &str = "scswarm.ron";
 
@@ -58,6 +60,19 @@ impl Config {
             .map_err(|why| Error::Invalid(format!("{FILE}: {why}")))?;
         config.check()?;
         Ok(config)
+    }
+
+    /// Image the slots run, in the form podman reports. `image` naming a file on
+    /// trunk is one `init` builds, anything else an image podman resolves.
+    pub fn image_name(&self, repo: &Git, project: &Project) -> Result<String> {
+        Ok(match repo.has_path(git::TRUNK, &self.image)? {
+            true => podman::tag(project),
+            false => podman::image_ref(&self.image),
+        })
+    }
+
+    pub fn builds_image(&self, repo: &Git) -> Result<bool> {
+        repo.has_path(git::TRUNK, &self.image)
     }
 
     pub fn knows_agent(&self, key: &str) -> bool {

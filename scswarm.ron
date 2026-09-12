@@ -8,9 +8,9 @@
     ),
   },
   stages: [
-    (turns: ["/execute {task}", "Correct, clean, beautiful?", "Mark the impl into the task file.", "{commit}"]),
-    (turns: ["/audit {task}", "Audited thoroughly, checked everything, no gaps? If any, close them.", "What is the plan to resolve all audit issues and make the implementation correct, clean, beautiful?", "Write the audit and the plan into that same original task file.", "{commit}"]),
-    (turns: ["/execute {task}", "Correct, clean, beautiful?", "Mark the impl into the task file.", "{commit}"]),
+    (turns: ["/execute {id}", "Correct, clean, beautiful?", "Mark the impl into the task file.", "{commit}"]),
+    (turns: ["/audit {id}", "Audited thoroughly, checked everything, no gaps? If any, close them.", "What is the plan to resolve all audit issues and make the implementation correct, clean, beautiful?", "Write the audit and the plan into that same original task file.", "{commit}"]),
+    (turns: ["/execute {id}", "Correct, clean, beautiful?", "Mark the impl into the task file.", "{commit}"]),
   ],
-  merge: (turns: ["This worktree holds a conflicted merge of branch {parent} into the branch of task {task}. Read both sides, resolve every conflict so both intents survive, run `make lint`.", "Conflict markers gone, build and lint clean?", "{commit}"]),
+  merge: (turns: ["This worktree holds a conflicted merge of branch {parent} into the branch of task {id}. Read both sides, resolve every conflict so both intents survive, run `make lint`.", "Conflict markers gone, build and lint clean?", "{commit}"]),
 )

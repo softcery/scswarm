@@ -35,12 +35,12 @@ pub fn derive(board: &Board, total: usize, git: &Git) -> Result<Vec<State>> {
     let progress = board
         .rows()
         .iter()
-        .map(|row| row_progress(git, row.id(), total))
+        .map(|row| row_progress(git, &row.id, total))
         .collect::<Result<Vec<Progress>>>()?;
     let failed = board
         .rows()
         .iter()
-        .map(|row| row_failed(git, row.id(), &base))
+        .map(|row| row_failed(git, &row.id, &base))
         .collect::<Result<Vec<bool>>>()?;
     Ok(board
         .rows()

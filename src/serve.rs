@@ -80,7 +80,7 @@ impl<'a> Server<'a> {
         let board = Board::from_trunk(self.repo, &config)?;
         let states = state::derive(&board, config.stages.len(), self.repo)?;
         for (index, row) in board.rows().iter().enumerate() {
-            if !pending(&states[index]) || self.pool.holds(row.id()) {
+            if !pending(&states[index]) || self.pool.holds(&row.id) {
                 continue;
             }
             let Some(slot) = self.pool.idle() else {
@@ -167,6 +167,6 @@ fn stack(board: &Board, states: &[State], row: &Row) -> Vec<String> {
     row.after
         .iter()
         .filter(|&&parent| states[parent] == State::Landed)
-        .map(|&parent| state::branch(board.rows()[parent].id()))
+        .map(|&parent| state::branch(&board.rows()[parent].id))
         .collect()
 }

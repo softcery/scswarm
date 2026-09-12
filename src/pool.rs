@@ -36,7 +36,7 @@ struct Worker {
     jobs: Sender<Job>,
     thread: JoinHandle<()>,
     /// Row id in flight. `None` while the slot waits for work.
-    task: Option<String>,
+    id: Option<String>,
 }
 
 impl Pool {
@@ -54,7 +54,7 @@ impl Pool {
     pub fn collect(&mut self) -> Result<()> {
         let Self { workers, reports } = self;
         for index in reports.try_iter() {
-            workers[index].task = None;
+            workers[index].id = None;
         }
         match workers
             .iter()
@@ -68,19 +68,19 @@ impl Pool {
     pub fn holds(&self, id: &str) -> bool {
         self.workers
             .iter()
-            .any(|worker| worker.task.as_deref() == Some(id))
+            .any(|worker| worker.id.as_deref() == Some(id))
     }
 
     pub fn idle(&self) -> Option<usize> {
-        self.workers.iter().position(|worker| worker.task.is_none())
+        self.workers.iter().position(|worker| worker.id.is_none())
     }
 
     /// Hand `job` to a slot. The slot counts busy until its thread reports back.
     pub fn assign(&mut self, index: usize, job: Job) -> Result<()> {
         let worker = &mut self.workers[index];
-        worker.task = Some(job.row.id().to_string());
+        worker.id = Some(job.row.id.clone());
         let at = event::At {
-            id: job.row.id(),
+            id: &job.row.id,
             stage: job.from,
             total: job.config.stages.len(),
         };
@@ -104,7 +104,7 @@ fn spawn(
     Ok(Worker {
         jobs,
         thread,
-        task: None,
+        id: None,
     })
 }
 
@@ -123,7 +123,7 @@ fn work(
     done: &Sender<usize>,
 ) {
     for job in queue {
-        let id = job.row.id().to_string();
+        let id = job.row.id.clone();
         let total = job.config.stages.len();
         let outcome = stages(slot, project, &job);
         if let Err(why) = slot.release() {
@@ -157,7 +157,7 @@ fn work(
 }
 
 fn stages(slot: &Slot, project: &Project, job: &Job) -> Staged<()> {
-    let id = job.row.id();
+    let id = job.row.id.as_str();
     let resolve = |parent: &str| {
         let log = paths::transcript(project, id, stage::MERGE)?;
         stage::resolve(slot, &job.config, &job.row, parent, &log)

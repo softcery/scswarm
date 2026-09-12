@@ -2,7 +2,7 @@ use std::path::Path;
 use std::thread;
 
 use crate::board::Row;
-use crate::config::{self, Agent, Config, COMMIT_TURN, PARENT_SLOT, TASK_SLOT};
+use crate::config::{self, Agent, Config, COMMIT_TURN, ID_SLOT, PARENT_SLOT, TASK_SLOT};
 use crate::error::{Error, Result};
 use crate::event;
 use crate::slot::Slot;
@@ -73,18 +73,19 @@ impl StageRun<'_> {
             if template == COMMIT_TURN {
                 self.commit(number)?;
             } else {
-                self.turn(&self.fill(template), number)?;
+                self.turn(&self.prompt(template), number)?;
             }
         }
         Ok(())
     }
 
-    fn fill(&self, template: &str) -> String {
-        let prompt = template.replace(TASK_SLOT, &self.row.task);
-        match self.parent {
-            Some(parent) => prompt.replace(PARENT_SLOT, parent),
-            None => prompt,
-        }
+    fn prompt(&self, template: &str) -> String {
+        let mut slots = vec![
+            (ID_SLOT, self.row.id.as_str()),
+            (TASK_SLOT, self.row.task.as_str()),
+        ];
+        slots.extend(self.parent.map(|parent| (PARENT_SLOT, parent)));
+        fill(template, &slots)
     }
 
     fn at(&self) -> event::At<'_> {
@@ -122,7 +123,7 @@ impl StageRun<'_> {
                 continue;
             }
             let trailers = [
-                (TASK_TRAILER, self.row.id().to_string()),
+                (TASK_TRAILER, self.row.id.clone()),
                 (STAGE_TRAILER, format!("{number}/{total}")),
             ];
             let commit = self.slot.commit(message, &trailers)?;
@@ -135,9 +136,34 @@ impl StageRun<'_> {
     }
 }
 
+/// Substitute in one pass: filled text never reads as template again.
+fn fill(template: &str, slots: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        rest = &rest[open..];
+        match slots
+            .iter()
+            .find_map(|(slot, value)| Some((rest.strip_prefix(slot)?, *value)))
+        {
+            Some((tail, value)) => {
+                out.push_str(value);
+                rest = tail;
+            }
+            None => {
+                out.push('{');
+                rest = &rest['{'.len_utf8()..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn at<'a>(row: &'a Row, number: usize, total: usize) -> event::At<'a> {
     event::At {
-        id: row.id(),
+        id: &row.id,
         stage: number,
         total,
     }
@@ -151,4 +177,18 @@ fn agent<'a>(config: &'a Config, row: &Row, stage: &config::Stage) -> Result<&'a
             config::FILE
         ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_no_filled_text_as_template() {
+        let filled = fill(
+            "/execute {id}: {task} {gone}",
+            &[("{id}", "search-01"), ("{task}", "Keep {id} literal.")],
+        );
+        assert_eq!(filled, "/execute search-01: Keep {id} literal. {gone}");
+    }
 }

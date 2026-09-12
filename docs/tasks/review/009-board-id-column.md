@@ -52,3 +52,14 @@ Board:
 
 - 006 rewrites `fill()` for `Turn` kinds. Land 009 first; the slot set is what 006 substitutes.
 - Projects with path cells rewrite them to ids. Their command files own the id-to-file lookup.
+
+## Impl
+
+Landed 2026-09-12.
+
+- `board.rs`: `COLUMNS` and `header()` name 4 cells, `Row { id, after, agent, task }`, `Row::id()` gone, `std::path` and `OsStr` imports gone. `check_rows` names `id` on empty and on failed `valid_ref`; `task` empty passes.
+- `config.rs`: `ID_SLOT` `{id}`.
+- `stage.rs`: `fill()` walks the template once, matches a slot at each `{`, copies the rest. `StageRun::prompt()` builds the slot list, parent included on merge only. Test: task text holding `{id}` stays literal.
+- `pool.rs`: `Worker.task` renamed `id`, the fact it holds.
+- `SWARM.md`, `scswarm.ron`, `docs/spec/contract.md`: 4 cells, prompts name `{id}`, contract states lowercase ASCII ids and the `|` limit.
+- Open check: live row. This workstation has no podman and no host file, so `serve` never ran.

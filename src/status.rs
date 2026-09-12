@@ -43,7 +43,7 @@ fn render(
     let mut table = vec![HEADER.map(str::to_string)];
     table.extend(board.rows().iter().zip(states).map(|(row, state)| {
         [
-            row.id().to_string(),
+            row.id.clone(),
             state.to_string(),
             branch_cell(row, *state),
             stage_cell(*state, total),
@@ -58,7 +58,7 @@ fn render(
 fn branch_cell(row: &Row, state: State) -> String {
     match state {
         State::Ready | State::Blocked | State::Failed { stage: 0 } => NONE.to_string(),
-        _ => state::branch(row.id()),
+        _ => state::branch(&row.id),
     }
 }
 
@@ -72,7 +72,7 @@ fn stage_cell(state: State, total: usize) -> String {
 
 fn worker_cell(row: &Row, slots: &BTreeMap<String, usize>) -> String {
     slots
-        .get(&state::branch(row.id()))
+        .get(&state::branch(&row.id))
         .map_or_else(|| NONE.to_string(), usize::to_string)
 }
 

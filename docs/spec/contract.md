@@ -7,16 +7,18 @@ What a project gives the swarm and what it gets back. Binding.
 Markdown table at project root. Header row, separator row, one row per task. Tool reads, never writes.
 
 ```
-| task | after | agent |
-| docs/tasks/next/trace-06-decode.md | trace-05-record | |
-| docs/tasks/next/parse-15-postures.md | parse-10-repair, trace-06-decode | codex |
+| id | after | agent | task |
+| --- | --- | --- | --- |
+| trace-06-decode | trace-05-record | | Decode traces. Spec in docs/spec/trace.md. |
+| parse-15-postures | parse-10-repair, trace-06-decode | codex | |
 ```
 
-- `task`: any text. Substituted as `{task}` in turns. Id = file stem when text is a path, else the text.
-- Id becomes branch `swarm/<id>`, so it must pass `git check-ref-format`: no space, `..`, `~^:?*[`, control character, leading `-`, or `.lock` end. A row that fails it exits 1 naming the line.
+- `id`: key of the row. Names branch `swarm/<id>`, fail mark, commit trailer, transcript dir, `log`, `reset`, `status` and `after`. Substituted as `{id}` in turns. Unique per board.
+- `id` becomes a ref, so it must pass `git check-ref-format`: no space, `..`, `~^:?*[`, control character, leading `-`, or `.lock` end. Write it lowercase ASCII: git refs are case-sensitive, the macOS default filesystem is not. A row that fails the check exits 1 naming the line.
 - `after`: comma list of ids. Empty = none.
 - `agent`: key in `scswarm.ron` `agents`. Empty = `default_agent`.
-- Unknown id in `after`, duplicate id, unknown agent: `serve` and `status` exit non-zero, name the row.
+- `task`: free text for the agent. Substituted as `{task}` in turns. Empty = turns name the id alone, and the project command resolves it.
+- Empty id, unknown id in `after`, duplicate id, unknown agent, a row of other than 4 cells: `serve` and `status` exit non-zero, name the row.
 - Row removed = task gone from swarm. Branch stays until `reset`.
 
 ## `<project>.ron`
@@ -59,20 +61,20 @@ Project root, read from the trunk branch. RON, `IMPLICIT_SOME`.
     ),
   },
   stages: [
-    (turns: ["/execute {task}", "Correct, clean, beautiful?", "Mark the impl into the task file.", "{commit}"]),
-    (turns: ["/audit {task}", "Audited thoroughly, checked everything, no gaps? If any, close them.", "What's the plan to resolve all audit issues and make the implementation correct, clean, and beautiful - no compromises?", "Write the audit and the plan into that same original task file.", "{commit}"]),
-    (turns: ["/execute {task}", "Correct, clean, beautiful?", "Mark the impl into the task file.", "{commit}"]),
+    (turns: ["/execute {id}", "Correct, clean, beautiful?", "Mark the impl into the task file.", "{commit}"]),
+    (turns: ["/audit {id}", "Audited thoroughly, checked everything, no gaps? If any, close them.", "What's the plan to resolve all audit issues and make the implementation correct, clean, and beautiful - no compromises?", "Write the audit and the plan into that same original task file.", "{commit}"]),
+    (turns: ["/execute {id}", "Correct, clean, beautiful?", "Mark the impl into the task file.", "{commit}"]),
   ],
-  merge: (turns: ["Resolve every conflict of the merge of {parent} into {task}.", "{commit}"]),
+  merge: (turns: ["Resolve every conflict of the merge of {parent} into {id}.", "{commit}"]),
 )
 ```
 
 - `image`: Containerfile path relative to root, or image name. Must hold every tool the agents and the project build need. `init` builds it from a throwaway worktree of the trunk ref, so untracked and ignored files stay out of the build context.
 - `agents.*.exec`: command run inside the container. Prompt appended as last argument. Must print JSON with `session_id` and `result` on stdout, or plain text as `result`.
 - `agents.*.resume`: arguments added from second turn on. `{session}` = id from first reply.
-- `stages[].turns`: sent in order, one session per stage. `{task}` substituted. `{commit}` = built-in turn: asks for a commit message, host commits with the reply.
+- `stages[].turns`: sent in order, one session per stage. `{id}` and `{task}` substituted in one pass, so filled text never reads as a template. `{commit}` = built-in turn: asks for a commit message, host commits with the reply.
 - `stages[].agent`: optional, overrides row and default for that stage.
-- `merge`: optional stage, same fields. Runs in the conflicted worktree when a parent merge conflicts. `{parent}` = branch merged in, `{task}` substituted as in a stage. Absent = no try, branch dropped.
+- `merge`: optional stage, same fields. Runs in the conflicted worktree when a parent merge conflicts. `{parent}` = branch merged in, `{id}` and `{task}` substituted as in a stage. Absent = no try, branch dropped.
 
 ## Git
 
@@ -118,6 +120,7 @@ Image: `image` names a Containerfile on the trunk, built as `localhost/scswarm/<
 ## Limits
 
 - Board read from the trunk branch only.
+- `task` holds no `|`: the cell ends there. Markdown table rule.
 - `init` replaces every slot container and drops every slot at or above `workers`. Stop `serve` first.
 - The image build context is the trunk ref. A build that reads an untracked or ignored file fails after that file leaves the ref.
 - Containers carry the `mounts` and `env` they baked as labels. A release that changes that text reads as drift until `init` runs again.

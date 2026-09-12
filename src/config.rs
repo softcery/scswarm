@@ -11,6 +11,7 @@ use crate::podman;
 pub const FILE: &str = "scswarm.ron";
 
 /// Turn text the tool fills in or acts on.
+pub const ID_SLOT: &str = "{id}";
 pub const TASK_SLOT: &str = "{task}";
 pub const PARENT_SLOT: &str = "{parent}";
 pub const SESSION_SLOT: &str = "{session}";
@@ -176,8 +177,8 @@ mod tests {
     ),
   },
   stages: [
-    (turns: ["/execute {task}", "{commit}"]),
-    (agent: "claude", turns: ["/audit {task}", "{commit}"]),
+    (turns: ["/execute {id}", "{commit}"]),
+    (agent: "claude", turns: ["/audit {id}", "{commit}"]),
   ],
   merge: (turns: ["Resolve the conflicts of {parent}.", "{commit}"]),
 )

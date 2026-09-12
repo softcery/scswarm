@@ -42,7 +42,7 @@ pub fn reset(repo: &Git, id: &str) -> Result<()> {
 /// no row can name it, or the board fails to parse.
 fn targets(board: &Board, id: &str) -> Vec<String> {
     let rows = board.rows();
-    let Some(root) = rows.iter().position(|row| row.id() == id) else {
+    let Some(root) = rows.iter().position(|row| row.id == id) else {
         return vec![id.to_string()];
     };
     let mut marked = vec![false; rows.len()];
@@ -61,7 +61,7 @@ fn targets(board: &Board, id: &str) -> Vec<String> {
     rows.iter()
         .zip(marked)
         .filter(|(_, hit)| *hit)
-        .map(|(row, _)| row.id().to_string())
+        .map(|(row, _)| row.id.clone())
         .collect()
 }
 
@@ -80,12 +80,12 @@ mod tests {
 
     /// Third row waits on the first through the second, fourth waits on nothing.
     const BOARD: &str = "\
-| task | after | agent |
-| --- | --- | --- |
-| one | | |
-| two | one | |
-| three | two | |
-| four | | |
+| id | after | agent | task |
+| --- | --- | --- | --- |
+| one | | | |
+| two | one | | |
+| three | two | | |
+| four | | | |
 ";
 
     #[test]

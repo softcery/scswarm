@@ -55,13 +55,21 @@ Board:
 
 ## Impl
 
-Landed 2026-09-12.
+Landed 2026-09-12. Commits `cd84287`, `1e1d43e`, `38bfc6d`, `6d291d2`.
 
-- `board.rs`: `COLUMNS` names 4 cells, `header()` and the row width both derive from it. `Row { id, after, agent, task }`, `Row::id()` gone, `std::path` and `OsStr` imports gone.
-- `board.rs`: `Draft` holds the line number and the 4 named cells, so column order lives in `Draft::read` alone. `entry.cells[1]` gone, and `entries`/`rows` no longer travel as parallel vectors. Pipeline: `read_drafts`, `index_ids`, `link_rows`. Checks name `id` on empty and on failed `valid_ref`; `task` empty passes.
+- `board.rs`: `COLUMNS` names 4 cells. `header()` text and the row width both derive from it. `Row { id, after, agent, task }`. `Row::id()`, the file-stem rule, `std::path` and `OsStr` gone.
+- `board.rs`: `Draft` holds the line number beside the 4 named cells, so column order lives in `Draft::read` alone. `entry.cells[1]` gone, and `entries`/`rows` stop travelling as parallel vectors.
+- `board.rs`: pipeline `read_drafts`, `index_ids`, `link_rows`, `check_loops`. Checks name `id` on empty and on failed `valid_ref`; `task` empty passes.
+- `board.rs`: `check_loops` walks `after` depth-first and names the ids of a loop. Found in review, outside this plan: `state.rs:55` readies a row when every parent settles, so a row inside a loop read `blocked` on every serve cycle and `serve` reported no error.
 - `config.rs`: `ID_SLOT` `{id}`.
-- `stage.rs`: `fill()` walks the template once, matches a slot at each `{`, copies the rest. `StageRun::prompt()` builds the slot list, parent included on merge only. Test: task text holding `{id}` stays literal.
+- `stage.rs`: `fill()` walks the template once and matches a slot at each `{`, so filled text never reads as a template. `StageRun::prompt()` builds the slot list, parent on merge only.
 - `pool.rs`: `Worker.task` renamed `id`, the fact it holds.
-- `SWARM.md`, `scswarm.ron`, `docs/spec/contract.md`: 4 cells, prompts name `{id}`, contract states lowercase ASCII ids and the `|` limit.
-- `board.rs`: `check_loops` walks `after` depth-first. A loop exits 1 naming the ids in order. Found while reviewing 009, outside its plan: `state.rs:55` settles a row only when every parent lands, so a row in a loop read `blocked` on every serve cycle with no error.
-- Open check: live row. This workstation has no podman and no host file, so `serve` never ran.
+- `SWARM.md`, `scswarm.ron`: 4 cells, prompts name `{id}`.
+- `docs/spec/contract.md`: board section on 4 cells, lowercase ASCII id rule, one-pass substitution, reject list, `|` limit. Example rewritten: the old one named id `trace-05-record` with no such row, so the tool exited 1 on it. It now equals `board.rs tests::parses_contract_example`.
+
+## Verify
+
+- `cargo test`: 17 pass.
+- `make lint`: clean, no warning in `board.rs` or `stage.rs`.
+- `grep -n 'Path\|file_stem' src/board.rs`: empty.
+- Open: live row. This workstation has no podman and no host file, so `serve` never ran. The path from a free-text `task` cell to branch `swarm/<id>` carries no test.

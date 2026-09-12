@@ -49,11 +49,10 @@ impl Board {
         }
 
         let entries: Vec<Entry> = table.collect();
-        let rows = read_rows(&entries, config)?;
-        check_rows(&entries, &rows, config)?;
-        let index = index_ids(&entries, &rows)?;
+        let drafts = read_drafts(&entries, config)?;
+        let index = index_ids(&drafts)?;
         Ok(Self {
-            rows: link_rows(&entries, rows, &index)?,
+            rows: link_rows(&drafts, &index)?,
         })
     }
 
@@ -97,95 +96,115 @@ fn is_separator(cells: &[String]) -> bool {
         .all(|cell| !cell.is_empty() && cell.chars().all(|c| c == '-' || c == ':'))
 }
 
-fn read_rows(entries: &[Entry], config: &Config) -> Result<Vec<Row>> {
-    entries
-        .iter()
-        .map(|entry| {
-            let [id, _, agent, task] =
-                <&[String; 4]>::try_from(entry.cells.as_slice()).map_err(|_| {
-                    bad_line(entry.line, "row must hold 4 cells: id, after, agent, task")
-                })?;
-            let agent = if agent.is_empty() {
-                &config.default_agent
-            } else {
-                agent
-            };
-            Ok(Row {
-                id: id.clone(),
-                after: Vec::new(),
-                agent: agent.clone(),
-                task: task.clone(),
-            })
+/// Cells of one row, named by `COLUMNS`, agent resolved.
+struct Draft<'a> {
+    line: usize,
+    id: &'a str,
+    after: &'a str,
+    agent: &'a str,
+    task: &'a str,
+}
+
+impl<'a> Draft<'a> {
+    fn read(entry: &'a Entry, config: &'a Config) -> Result<Self> {
+        let [id, after, agent, task] = <&[String; COLUMNS.len()]>::try_from(entry.cells.as_slice())
+            .map_err(|_| {
+                bad_line(
+                    entry.line,
+                    &format!(
+                        "row must hold {} cells: {}",
+                        COLUMNS.len(),
+                        COLUMNS.join(", ")
+                    ),
+                )
+            })?;
+        Ok(Self {
+            line: entry.line,
+            id,
+            after,
+            agent: match agent.is_empty() {
+                true => &config.default_agent,
+                false => agent,
+            },
+            task,
         })
-        .collect()
-}
-
-fn check_rows(entries: &[Entry], rows: &[Row], config: &Config) -> Result<()> {
-    for (row, entry) in rows.iter().zip(entries) {
-        if row.id.is_empty() {
-            return Err(bad_line(entry.line, "field `id` must not be empty"));
-        }
-        if !git::valid_ref(&row.id) {
-            return Err(bad_line(
-                entry.line,
-                &format!(
-                    "field `id` must hold a name git takes as a ref: {}",
-                    git::REF_RULE
-                ),
-            ));
-        }
-        if !config.knows_agent(&row.agent) {
-            return Err(bad_line(
-                entry.line,
-                &format!(
-                    "field `agent` must name a key of `agents` in {}: {}",
-                    crate::config::FILE,
-                    config.agent_keys()
-                ),
-            ));
-        }
     }
-    Ok(())
+
+    fn check(&self, config: &Config) -> Result<()> {
+        if self.id.is_empty() {
+            return Err(self.bad("field `id` must not be empty"));
+        }
+        if !git::valid_ref(self.id) {
+            return Err(self.bad(&format!(
+                "field `id` must hold a name git takes as a ref: {}",
+                git::REF_RULE
+            )));
+        }
+        if !config.knows_agent(self.agent) {
+            return Err(self.bad(&format!(
+                "field `agent` must name a key of `agents` in {}: {}",
+                crate::config::FILE,
+                config.agent_keys()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Resolve `after` against the board, own every cell.
+    fn row(&self, index: &BTreeMap<&str, usize>) -> Result<Row> {
+        let after = self
+            .after
+            .split(',')
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(|id| {
+                index.get(id).copied().ok_or_else(|| {
+                    self.bad(&format!(
+                        "field `after` names id `{id}`, absent from the board"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<usize>>>()?;
+        Ok(Row {
+            id: self.id.to_string(),
+            after,
+            agent: self.agent.to_string(),
+            task: self.task.to_string(),
+        })
+    }
+
+    fn bad(&self, what: &str) -> Error {
+        bad_line(self.line, what)
+    }
 }
 
-fn index_ids(entries: &[Entry], rows: &[Row]) -> Result<BTreeMap<String, usize>> {
+/// Cells to drafts, every draft checked on its own.
+fn read_drafts<'a>(entries: &'a [Entry], config: &'a Config) -> Result<Vec<Draft<'a>>> {
+    let drafts = entries
+        .iter()
+        .map(|entry| Draft::read(entry, config))
+        .collect::<Result<Vec<Draft>>>()?;
+    for draft in &drafts {
+        draft.check(config)?;
+    }
+    Ok(drafts)
+}
+
+fn index_ids<'a>(drafts: &[Draft<'a>]) -> Result<BTreeMap<&'a str, usize>> {
     let mut index = BTreeMap::new();
-    for (position, row) in rows.iter().enumerate() {
-        if let Some(first) = index.insert(row.id.clone(), position) {
-            let first_line = entries[first].line;
-            return Err(bad_line(
-                entries[position].line,
-                &format!("id `{}` already used on line {first_line}", row.id),
-            ));
+    for (position, draft) in drafts.iter().enumerate() {
+        if let Some(first) = index.insert(draft.id, position) {
+            return Err(draft.bad(&format!(
+                "id `{}` already used on line {}",
+                draft.id, drafts[first].line
+            )));
         }
     }
     Ok(index)
 }
 
-fn link_rows(
-    entries: &[Entry],
-    rows: Vec<Row>,
-    index: &BTreeMap<String, usize>,
-) -> Result<Vec<Row>> {
-    rows.into_iter()
-        .zip(entries)
-        .map(|(row, entry)| {
-            let after = entry.cells[1]
-                .split(',')
-                .map(str::trim)
-                .filter(|id| !id.is_empty())
-                .map(|id| {
-                    index.get(id).copied().ok_or_else(|| {
-                        bad_line(
-                            entry.line,
-                            &format!("field `after` names id `{id}`, absent from the board"),
-                        )
-                    })
-                })
-                .collect::<Result<Vec<usize>>>()?;
-            Ok(Row { after, ..row })
-        })
-        .collect()
+fn link_rows(drafts: &[Draft<'_>], index: &BTreeMap<&str, usize>) -> Result<Vec<Row>> {
+    drafts.iter().map(|draft| draft.row(index)).collect()
 }
 
 fn bad_line(line: usize, what: &str) -> Error {

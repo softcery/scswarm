@@ -57,7 +57,8 @@ Board:
 
 Landed 2026-09-12.
 
-- `board.rs`: `COLUMNS` and `header()` name 4 cells, `Row { id, after, agent, task }`, `Row::id()` gone, `std::path` and `OsStr` imports gone. `check_rows` names `id` on empty and on failed `valid_ref`; `task` empty passes.
+- `board.rs`: `COLUMNS` names 4 cells, `header()` and the row width both derive from it. `Row { id, after, agent, task }`, `Row::id()` gone, `std::path` and `OsStr` imports gone.
+- `board.rs`: `Draft` holds the line number and the 4 named cells, so column order lives in `Draft::read` alone. `entry.cells[1]` gone, and `entries`/`rows` no longer travel as parallel vectors. Pipeline: `read_drafts`, `index_ids`, `link_rows`. Checks name `id` on empty and on failed `valid_ref`; `task` empty passes.
 - `config.rs`: `ID_SLOT` `{id}`.
 - `stage.rs`: `fill()` walks the template once, matches a slot at each `{`, copies the rest. `StageRun::prompt()` builds the slot list, parent included on merge only. Test: task text holding `{id}` stays literal.
 - `pool.rs`: `Worker.task` renamed `id`, the fact it holds.

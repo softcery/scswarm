@@ -9,6 +9,9 @@ use crate::slot::Slot;
 use crate::state::{STAGE_TRAILER, TASK_TRAILER};
 use crate::turn::{Turn, ATTEMPTS, RETRY_WAIT};
 
+/// First character of every slot name.
+const SLOT_OPEN: char = '{';
+
 const COMMIT_PROMPT: &str =
     "Reply with the commit message for the work in this session. Message only.";
 
@@ -140,7 +143,7 @@ impl StageRun<'_> {
 fn fill(template: &str, slots: &[(&str, &str)]) -> String {
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
-    while let Some(open) = rest.find('{') {
+    while let Some(open) = rest.find(SLOT_OPEN) {
         out.push_str(&rest[..open]);
         rest = &rest[open..];
         match slots
@@ -152,8 +155,8 @@ fn fill(template: &str, slots: &[(&str, &str)]) -> String {
                 rest = tail;
             }
             None => {
-                out.push('{');
-                rest = &rest['{'.len_utf8()..];
+                out.push(SLOT_OPEN);
+                rest = &rest[SLOT_OPEN.len_utf8()..];
             }
         }
     }

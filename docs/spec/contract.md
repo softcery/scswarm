@@ -9,8 +9,9 @@ Markdown table at project root. Header row, separator row, one row per task. Too
 ```
 | id | after | agent | task |
 | --- | --- | --- | --- |
-| trace-06-decode | trace-05-record | | Decode traces. Spec in docs/spec/trace.md. |
-| parse-15-postures | parse-10-repair, trace-06-decode | codex | |
+| parse-10-repair | | | Repair the parser. Spec in docs/spec/parser.md. |
+| trace-06-decode | | | |
+| parse-15-postures | parse-10-repair, trace-06-decode | codex | Postures. |
 ```
 
 - `id`: key of the row. Names branch `swarm/<id>`, fail mark, commit trailer, transcript dir, `log`, `reset`, `status` and `after`. Substituted as `{id}` in turns. Unique per board.

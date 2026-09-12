@@ -19,7 +19,12 @@ Markdown table at project root. Header row, separator row, one row per task. Too
 - `after`: comma list of ids. Empty = none.
 - `agent`: key in `scswarm.ron` `agents`. Empty = `default_agent`.
 - `task`: free text for the agent. Substituted as `{task}` in turns. Empty = turns name the id alone, and the project command resolves it.
-- Empty id, unknown id in `after`, duplicate id, unknown agent, a row of other than 4 cells: `serve` and `status` exit non-zero, name the row.
+- `serve` and `status` exit non-zero and name the row on any of:
+  - empty `id`, or one git refuses as a ref
+  - duplicate `id`
+  - unknown id in `after`, or a loop of ids through `after`
+  - unknown `agent`
+  - a row of other than 4 cells
 - Row removed = task gone from swarm. Branch stays until `reset`.
 
 ## `<project>.ron`

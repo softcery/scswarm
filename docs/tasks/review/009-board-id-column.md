@@ -63,4 +63,5 @@ Landed 2026-09-12.
 - `stage.rs`: `fill()` walks the template once, matches a slot at each `{`, copies the rest. `StageRun::prompt()` builds the slot list, parent included on merge only. Test: task text holding `{id}` stays literal.
 - `pool.rs`: `Worker.task` renamed `id`, the fact it holds.
 - `SWARM.md`, `scswarm.ron`, `docs/spec/contract.md`: 4 cells, prompts name `{id}`, contract states lowercase ASCII ids and the `|` limit.
+- `board.rs`: `check_loops` walks `after` depth-first. A loop exits 1 naming the ids in order. Found while reviewing 009, outside its plan: `state.rs:55` settles a row only when every parent lands, so a row in a loop read `blocked` on every serve cycle with no error.
 - Open check: live row. This workstation has no podman and no host file, so `serve` never ran.

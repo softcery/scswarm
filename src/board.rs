@@ -51,9 +51,9 @@ impl Board {
         let entries: Vec<Entry> = table.collect();
         let drafts = read_drafts(&entries, config)?;
         let index = index_ids(&drafts)?;
-        Ok(Self {
-            rows: link_rows(&drafts, &index)?,
-        })
+        let rows = link_rows(&drafts, &index)?;
+        check_loops(&rows)?;
+        Ok(Self { rows })
     }
 
     pub fn rows(&self) -> &[Row] {
@@ -207,6 +207,58 @@ fn link_rows(drafts: &[Draft<'_>], index: &BTreeMap<&str, usize>) -> Result<Vec<
     drafts.iter().map(|draft| draft.row(index)).collect()
 }
 
+/// Row on the walk path twice = loop. Such a row never settles, so every row
+/// behind it reads `blocked` for good.
+fn check_loops(rows: &[Row]) -> Result<()> {
+    let mut marks = vec![Mark::Fresh; rows.len()];
+    let mut path = Vec::new();
+    for start in 0..rows.len() {
+        walk(rows, start, &mut marks, &mut path)?;
+    }
+    Ok(())
+}
+
+/// Depth-first walk of `after`.
+#[derive(Clone, Copy, PartialEq)]
+enum Mark {
+    Fresh,
+    OnPath,
+    Walked,
+}
+
+fn walk(rows: &[Row], at: usize, marks: &mut [Mark], path: &mut Vec<usize>) -> Result<()> {
+    match marks[at] {
+        Mark::Walked => return Ok(()),
+        Mark::OnPath => return Err(loop_error(rows, path, at)),
+        Mark::Fresh => {}
+    }
+    marks[at] = Mark::OnPath;
+    path.push(at);
+    for &parent in &rows[at].after {
+        walk(rows, parent, marks, path)?;
+    }
+    path.pop();
+    marks[at] = Mark::Walked;
+    Ok(())
+}
+
+/// Ids from where the loop opens, closing id last.
+fn loop_error(rows: &[Row], path: &[usize], closes: usize) -> Error {
+    let open = path
+        .iter()
+        .position(|&at| at == closes)
+        .expect("a row marked `OnPath` must sit on the path");
+    let ids: Vec<&str> = path[open..]
+        .iter()
+        .chain([&closes])
+        .map(|&at| rows[at].id.as_str())
+        .collect();
+    Error::Invalid(format!(
+        "{FILE}: field `after` must name no loop: {}",
+        ids.join(" -> ")
+    ))
+}
+
 fn bad_line(line: usize, what: &str) -> Error {
     Error::Invalid(format!("{FILE} line {line}: {what}"))
 }
@@ -286,6 +338,21 @@ mod tests {
             .to_string();
         assert!(why.contains("line 4"), "{why}");
         assert!(why.contains("`id`"), "{why}");
+    }
+
+    #[test]
+    fn names_the_ids_of_a_loop() {
+        let text = EXAMPLE.replace(
+            "| parse-10-repair | |",
+            "| parse-10-repair | parse-15-postures |",
+        );
+        let why = Board::parse(&text, &config())
+            .expect_err("a loop in `after` must fail")
+            .to_string();
+        assert!(
+            why.contains("parse-10-repair -> parse-15-postures -> parse-10-repair"),
+            "{why}"
+        );
     }
 
     #[test]

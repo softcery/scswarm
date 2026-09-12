@@ -1,6 +1,6 @@
 # Issue: commit message taken from agent reply unchecked
 
-Seen on alpha board, 2026-09-11. Binary built 2026-09-09 18:57, after HEAD `9ccecf6`.
+Seen on alpha board, 2026-09-11. Seen again on beta board, 2026-09-12. Binary built 2026-09-09 18:57, after HEAD `9ccecf6`.
 
 ## Defect
 
@@ -13,6 +13,7 @@ Seen on alpha board, 2026-09-11. Binary built 2026-09-09 18:57, after HEAD `9cce
 - Agent wraps message in ``` fence. Subject = "```" on 20 of 25 stage commits.
 - Commit `3ba7c9b` holds `Swarm-Task` and `Co-Authored-By` lines inside fence.
 - Commit `483038d` holds agent-written `Swarm-Task` and `Swarm-Stage` trailers. See [issue-trailer-duplicate.md](issue-trailer-duplicate.md).
+- Bare repo `~/swarm/beta.git`, 3 branches, 2026-09-12: subject = "```" on 9 of 9 stage commits. `Swarm-Task` and `Swarm-Stage` once each, so no duplicate trailer on that board.
 
 ## Effect
 

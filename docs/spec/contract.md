@@ -111,6 +111,8 @@ Exit codes: 0 ok, 1 input invalid (config, board, unknown id), 2 git or podman f
 
 Rootless podman, `--userns=keep-id`, one long-lived container per slot, named `scswarm-<project>-<n>`. It sleeps; every turn is one `podman exec`. Mounts: slot worktree rw at same path, bare repo ro at same path, `mounts` rw. Every bind carries the `z` flag, so an SELinux host relabels it shared. Credentials arrive as `env` names. Network on. Agent runs with its own permission checks off.
 
+Git inside the container is read-only: the index sits under the bare repo. `git status`, `git log`, `git diff` work. `git add`, `git mv`, `git commit`, `git checkout` fail with `Read-only file system`. Host stages every change with `add --all` at the stage commit, so a plain `mv` lands. Project prompts and command files must not ask the agent for a git write.
+
 Image: `image` names a Containerfile on the trunk, built as `localhost/scswarm/<project>:latest`, or an image podman resolves. An untagged name reads as `:latest`, the form podman reports.
 
 ## Limits

@@ -34,4 +34,6 @@ Recovery: `reset <id>` drops the branch. Contract Git section states it.
 
 ## Notes
 
+- 013 deletes both trailers, so it deletes this plan too. Land this one only if 013 slips: the reader it hardens guards the binary running today.
+
 - 007 extends `trailer_commit()` to a want list. Land 010 first, 007 keeps the count check per key.

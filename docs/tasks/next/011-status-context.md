@@ -10,42 +10,43 @@
 - Window sits at `modelUsage.<model id>.contextWindow`. Key varies per model; no pointer reaches it. `claude-opus-5` reads 1000000.
 - Same CLI, `--output-format stream-json --verbose`, 3 API calls: stdout holds 6 `assistant` events, each with its call's `/message/usage`. Last one: 8 + 17528 + 142 = 17678. `output_tokens` in those events reads 4, 1, 1: partial.
 - Same mode: the `result` event alone carries top-level `usage` and `total_cost_usd`.
-- alpha ui-00 to ui-05 and beta api-01-transport, 23 stage sessions: peak fill 57k to 588k, no compaction. Read from Claude Code session files inside the slot containers; `~/.claude` has no mount, so `init` drops them with the container.
+- alpha ui-00 to ui-05 and beta api-01-transport, 23 sessions: peak fill 57k to 588k, no compaction. Read from Claude Code session files inside the slot containers; `~/.claude` has no mount, so `init` drops them with the container.
 - Failed tries spend too: alpha ui-01 stage 1 turn 1, first try, `total_cost_usd` 20.74 before a 429.
 
 **Done when.** Live board, one claude row mid-stage:
 
-- `scswarm status` `context` cell equals input + cache_read + cache_creation of the last `assistant` event of that stage's latest try, over `window`.
-- `scswarm log ID --stage N` header of each try carries the `usage` fields and `total_cost_usd` of its `result` event, failed tries included.
+- `scswarm status` `context` cell equals input + cache_read + cache_creation of the last `assistant` event of that row's latest try, over `window`.
+- `scswarm log ID` header of each try carries the `usage` fields and `total_cost_usd` of its `result` event, failed tries included.
 - `grep -ri 'claude\|opencode\|codex' src/` returns nothing.
 
 ## Shape
 
 `config.rs`:
 
-```
-agents: {
-  "claude": (
-    exec: "claude --dangerously-skip-permissions -p --output-format stream-json --verbose",
-    resume: "--resume {session}",
-    reply: (
-      session: (at: "/session_id"),
-      result: (when: (at: "/type", text: Is("result")), at: "/result"),
-      context: [
-        "/message/usage/input_tokens",
-        "/message/usage/cache_read_input_tokens",
-        "/message/usage/cache_creation_input_tokens",
-      ],
-      usage: [
-        ("out", "/usage/output_tokens"),
-        ("read", "/usage/cache_read_input_tokens"),
-        ("write", "/usage/cache_creation_input_tokens"),
-        ("cost", "/total_cost_usd"),
-      ],
-    ),
-    window: 1000000,
-  ),
-},
+```yaml
+agents:
+  claude:
+    exec: claude --dangerously-skip-permissions -p --output-format stream-json --verbose
+    resume: "--resume {session}"
+    reply:
+      session:
+        at: /session_id
+      result:
+        when:
+          at: /type
+          text:
+            is: result
+        at: /result
+      context:
+        - /message/usage/input_tokens
+        - /message/usage/cache_read_input_tokens
+        - /message/usage/cache_creation_input_tokens
+      usage:
+        - [out, /usage/output_tokens]
+        - [read, /usage/cache_read_input_tokens]
+        - [write, /usage/cache_creation_input_tokens]
+        - [cost, /total_cost_usd]
+    window: 1000000
 ```
 
 - `reply.session` and `reply.result` are 006 `Field`s: optional `when` picks the line, `at` reads the value. Under `stream-json` the claude `result` event needs that filter, since `/result` sits on one event of many.
@@ -69,8 +70,8 @@ agents: {
 
 `status.rs`:
 
-- Column 6, `context`. Row in `Running { stage }` with a slot holding its branch: `transcript::context` of stage `stage`. Rendered used over window, each rounded to the nearest thousand with `k`, below 1000 raw: `412k/1000k`, or `412k` with no window. Every other row: `-`.
-- Row with no slot has no live session: a restart reruns the stage in a fresh one.
+- Last column, `context`. Row reading `running` with a slot holding its branch: `transcript::context` of its `run.jsonl`. Rendered used over window, each rounded to the nearest thousand with `k`, below 1000 raw: `412k/1000k`, or `412k` with no window. Every other row: `-`.
+- Row with no slot has no live session: a restart reruns the row in a fresh one.
 - Doc comment `status.rs:14`: every cell but `context` derives from git.
 
 `log.rs`:
@@ -79,8 +80,8 @@ agents: {
 
 ## Rules
 
-- Tool learns no harness field name and no metric name. Pointers, names and window live in `scswarm.ron`.
-- `context` and `usage` are display only. `pool`, `stage` and `state` never read them, so state still derives from git.
+- Tool learns no harness field name and no metric name. Pointers, names and window live in `scswarm.yaml`.
+- `context` and `usage` are display only. `pool`, `script` and `state` never read them, so state still derives from git.
 - Transcript files open in `transcript` alone.
 - No new dependency.
 
@@ -89,9 +90,9 @@ agents: {
 1. `transcript.rs`: move `Entry` and the append body out of `turn.rs`, the read body out of `log.rs`. Add `Context`, `usage`, `context()`.
 2. `config.rs`: `reply.context`, `reply.usage`, agent `window`. Checks, each error names the field: pointer starts with `/`; `usage` name non-empty, no whitespace, no `=`; `window` above 0.
 3. `turn.rs`: parse on every try, `Reply.context`, `Reply.usage`, sum rule, record through `transcript`.
-4. `status.rs`: column 6, cell rule, doc comment.
+4. `status.rs`: last column, cell rule, doc comment.
 5. `log.rs`: read through `transcript`, header fields.
-6. `scswarm.ron`: claude `exec` to `stream-json --verbose`, `reply.context`, `reply.usage`, `window`.
+6. `scswarm.yaml`: claude `exec` to `stream-json --verbose`, `reply.context`, `reply.usage`, `window`.
 7. `docs/spec/contract.md`: `agents.*` bullets for `reply.context`, `reply.usage` and `window`; CLI `status` line adds `context`, `log` line adds the header fields; limits below. `docs/refs/architecture.md`: Known limits gains the stale-value limit.
 8. Test: `turn.rs` parse of a JSONL reply with two `assistant` events and one `result` event: context = second event sum, usage = `result` fields. Extends the 006 JSONL fixture.
 9. Verify: `cargo build`, `cargo test`, `make lint`, live board as Done when.
@@ -100,7 +101,7 @@ agents: {
 
 - Context comes from the last finished try. The try in flight is not counted.
 - After a restart, the cell shows the dead session's last value until the new session's first try ends. Both sessions append to one transcript file.
-- Merge sessions (stage 0) run on a detached head. No slot holds the branch, so the cell stays `-`. `log` still shows their usage.
+- A merge session runs before the branch exists. No slot holds that branch, so the cell stays `-`. `log` still shows its usage.
 - `window` is set by hand per agent. A model change in `exec` without a `window` change gives a wrong ratio.
 - `total_cost_usd` is the harness figure. Claude Code reports `costBasis` `list` in 4 of 4 alpha failed-try replies: list price, not the bill of a subscription account.
 - A try that dies before the `result` event records no usage. Tokens spent before a kill or a crash stay uncounted.
@@ -109,6 +110,6 @@ agents: {
 
 ## Notes
 
-- 006 lands first: JSONL `parse()` and `reply` pointers.
+- 013 lands first, then 006: 013 sets the file format and the one-session row, 006 brings JSONL `parse()` and the `reply` fields.
 - 006 `unavailable` matches per line under stream-json and on non-zero exits only. `api_error_status` sits on the `result` event alone.
 - `session_id` sits on every stream event, so 006 first-hit rule holds.

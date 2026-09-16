@@ -29,8 +29,8 @@ agents: {
     exec: "claude --dangerously-skip-permissions -p --output-format stream-json --verbose",
     resume: "--resume {session}",
     reply: (
-      session: "/session_id",
-      result: "/result",
+      session: (at: "/session_id"),
+      result: (when: (at: "/type", text: Is("result")), at: "/result"),
       context: [
         "/message/usage/input_tokens",
         "/message/usage/cache_read_input_tokens",
@@ -48,6 +48,7 @@ agents: {
 },
 ```
 
+- `reply.session` and `reply.result` are 006 `Field`s: optional `when` picks the line, `at` reads the value. Under `stream-json` the claude `result` event needs that filter, since `/result` sits on one event of many.
 - `reply.context: Vec<String>`, RFC 6901 pointers, default empty. A line counts when at least one pointer reads an unsigned integer. Its value = sum of the pointers that read one. Last counting line wins, same rule as `result`.
 - `reply.usage: Vec<(String, String)>`, name and pointer, default empty. Each pointer reads a JSON number; last hit wins. Names are display text only, so the tool learns no metric.
 - Context sums; usage does not. Fill has no single field in any reply seen; each usage figure has one.
@@ -109,5 +110,5 @@ agents: {
 ## Notes
 
 - 006 lands first: JSONL `parse()` and `reply` pointers.
-- 006 `unavailable` must match per line under stream-json. `api_error_status` sits on the `result` event only.
+- 006 `unavailable` matches per line under stream-json and on non-zero exits only. `api_error_status` sits on the `result` event alone.
 - `session_id` sits on every stream event, so 006 first-hit rule holds.

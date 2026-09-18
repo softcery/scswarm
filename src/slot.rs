@@ -71,8 +71,8 @@ impl Slot {
         &self.container
     }
 
-    /// Put `branch` in worktree at tip, tree clean. New branch: `base` plus merge
-    /// of `stack`, named last. Crash mid-merge leaves no branch.
+    /// Build `branch` from `base` plus merge of `stack`, named last: crash mid-merge
+    /// leaves no branch. Branch standing holds a cut-short session: drop, build again.
     pub fn checkout(
         &self,
         branch: &str,
@@ -81,7 +81,7 @@ impl Slot {
         resolve: &Resolve,
     ) -> Result<()> {
         if self.git.branch_exists(branch)? {
-            return self.git.checkout(branch);
+            self.git.branch_delete(branch)?;
         }
         self.git.detach_at(base)?;
         if let Err(why) = self.merge_stack(stack, resolve) {
@@ -109,8 +109,8 @@ impl Slot {
         self.git.detach()
     }
 
-    pub fn commit(&self, message: &str, trailers: &[(&str, String)]) -> Result<String> {
-        self.git.commit(message, trailers)
+    pub fn commit(&self, message: &str) -> Result<String> {
+        self.git.commit(message)
     }
 
     fn bind(project: &Project, index: usize, path: PathBuf, env: &[String]) -> Self {

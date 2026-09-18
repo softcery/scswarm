@@ -14,7 +14,6 @@ use crate::slot;
 use crate::state::{self, State};
 
 const POLL: Duration = Duration::from_secs(5);
-const FIRST_STAGE: usize = 1;
 
 /// Fetch, derive, fill idle slots with pending rows in board order, sleep. Until killed.
 pub fn serve(repo: &Git, project: &Project) -> Result<()> {
@@ -78,7 +77,7 @@ impl<'a> Server<'a> {
         }
         let config = Arc::new(Config::from_trunk(self.repo)?);
         let board = Board::from_trunk(self.repo, &config)?;
-        let states = state::derive(&board, config.stages.len(), self.repo)?;
+        let states = state::derive(&board, self.repo)?;
         for (index, row) in board.rows().iter().enumerate() {
             if !pending(&states[index]) || self.pool.holds(&row.id) {
                 continue;
@@ -142,9 +141,10 @@ fn sync(repo: &Git, remote: &Remote, origin: &mut Option<Remote>) -> Result<Stri
     repo.tip(git::TRUNK)
 }
 
-/// Ready rows start, running rows resume at the stage after their last commit.
+/// Ready rows start. A running row holds a branch no land ref names, so its
+/// session was cut short: it replays from base.
 fn pending(state: &State) -> bool {
-    matches!(*state, State::Ready | State::Running { .. })
+    matches!(*state, State::Ready | State::Running)
 }
 
 fn job(board: &Board, states: &[State], index: usize, config: &Arc<Config>, base: &str) -> Job {
@@ -153,10 +153,6 @@ fn job(board: &Board, states: &[State], index: usize, config: &Arc<Config>, base
         row: row.clone(),
         config: Arc::clone(config),
         stack: stack(board, states, row),
-        from: match states[index] {
-            State::Running { stage } => stage,
-            _ => FIRST_STAGE,
-        },
         base: base.to_string(),
     }
 }

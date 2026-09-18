@@ -4,19 +4,20 @@ use crate::error::{Error, Result};
 use crate::git::Git;
 use crate::state;
 
-/// Delete the branch and fail mark of `id` and of every row that waits on it,
-/// straight or through others.
+/// Delete the branch, land ref and fail mark of `id` and of every row that waits
+/// on it, straight or through others.
 pub fn reset(repo: &Git, id: &str) -> Result<()> {
     let config = Config::from_trunk(repo)?;
     let board = Board::from_trunk(repo, &config)?;
     let checkouts = repo.checkouts()?;
     let mut dropped = 0;
     for task in targets(&board, id) {
-        let mark = state::fail_ref(&task);
-        if repo.ref_commit(&mark)?.is_some() {
-            repo.ref_delete(&mark)?;
-            println!("cleared fail mark {task}");
-            dropped += 1;
+        for name in [state::land_ref(&task), state::fail_ref(&task)] {
+            if repo.ref_commit(&name)?.is_some() {
+                repo.ref_delete(&name)?;
+                println!("deleted {name}");
+                dropped += 1;
+            }
         }
         let branch = state::branch(&task);
         if !repo.branch_exists(&branch)? {
@@ -31,7 +32,7 @@ pub fn reset(repo: &Git, id: &str) -> Result<()> {
     }
     if dropped == 0 {
         return Err(Error::Invalid(format!(
-            "id `{id}` must name a task with a branch or fail mark: none of `{}` or its dependants has one",
+            "id `{id}` must name a task with a branch, land ref or fail mark: none of `{}` or its dependants has one",
             state::branch(id)
         )));
     }
@@ -69,23 +70,27 @@ fn targets(board: &Board, id: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
-    const CONFIG: &str = r#"
-(
-  image: "Containerfile.swarm",
-  default_agent: "claude",
-  agents: {"claude": (exec: "claude -p")},
-  stages: [(turns: ["{commit}"])],
-)
-"#;
+    const CONFIG: &str = "\
+image: Containerfile.swarm
+default_agent: claude
+agents:
+  claude:
+    exec: claude -p
+commit: Message only.
+";
 
     /// Third row waits on the first through the second, fourth waits on nothing.
     const BOARD: &str = "\
-| id | after | agent | task |
-| --- | --- | --- | --- |
-| one | | | |
-| two | one | | |
-| three | two | | |
-| four | | | |
+- id: one
+  turns: [Work.]
+- id: two
+  after: [one]
+  turns: [Work.]
+- id: three
+  after: [two]
+  turns: [Work.]
+- id: four
+  turns: [Work.]
 ";
 
     #[test]

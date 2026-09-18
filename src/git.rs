@@ -5,8 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Result};
 use crate::{paths, proc};
 
-/// Trunk tip, fetched from the branch the host file declares. The tool holds this
-/// ref, never a branch name.
+/// Trunk tip. Tool holds this ref, never a branch name.
 pub const TRUNK: &str = "refs/swarm/trunk";
 
 const BIN: &str = "git";
@@ -31,12 +30,6 @@ pub struct Git {
     root: PathBuf,
 }
 
-/// Commit picked by one trailer, value of another.
-pub struct Trailer {
-    pub commit: String,
-    pub value: String,
-}
-
 impl Git {
     /// Create the bare repo at `path`, parents and all.
     pub fn init_bare(path: &Path) -> Result<Self> {
@@ -56,7 +49,7 @@ impl Git {
     }
 
     /// Point `origin` at checkout, map `trunk` to `TRUNK`. Idempotent.
-    /// `--replace-all`: hand-edited key can hold many values, plain write fails on those.
+    /// `--replace-all`: hand-edited key holds many values, plain write fails there.
     pub fn set_origin(&self, url: &Path, trunk: &str) -> Result<()> {
         self.set_config(ORIGIN_URL, &paths::arg(url)?)?;
         self.set_config(ORIGIN_FETCH, &format!("+{}:{TRUNK}", refname(trunk)))
@@ -111,23 +104,6 @@ impl Git {
         run(&self.root, &["update-ref", "-d", name]).map(drop)
     }
 
-    /// Newest commit of `branch` with trailer `key` = `value`, plus its `want` trailer.
-    pub fn trailer_commit(
-        &self,
-        branch: &str,
-        key: &str,
-        value: &str,
-        want: &str,
-    ) -> Result<Option<Trailer>> {
-        let format = format!(
-            "--format=%H%x1f{}%x1f{}",
-            trailer_format(key),
-            trailer_format(want)
-        );
-        let log = run(&self.root, &["log", &format, &refname(branch), "--"])?;
-        Ok(log.lines().find_map(|line| parse_trailer(line, value)))
-    }
-
     pub fn is_ancestor(&self, commit: &str, rev: &str) -> Result<bool> {
         let ancestor = refname(rev);
         probe(
@@ -155,7 +131,7 @@ impl Git {
         run(&self.root, &["clean", "--force", "-d"]).map(drop)
     }
 
-    /// Leave the branch behind at the same commit, so another worktree can take it.
+    /// Leave branch at its commit, so another worktree can take it.
     pub fn detach(&self) -> Result<()> {
         run(&self.root, &["checkout", "--detach"]).map(drop)
     }
@@ -222,26 +198,18 @@ impl Git {
         run(&self.root, &["worktree", "prune"]).map(drop)
     }
 
-    /// Stage every change and commit it: message from the agent, trailers from the host.
-    pub fn commit(&self, message: &str, trailers: &[(&str, String)]) -> Result<String> {
+    /// Add every change, commit with the agent's message. No diff: commit empty.
+    pub fn commit(&self, message: &str) -> Result<String> {
         run(&self.root, &["add", "--all"])?;
-        let mut args = vec![
-            "commit".to_string(),
-            "--allow-empty".to_string(),
-            "--message".to_string(),
-            message.to_string(),
-        ];
-        for (key, value) in trailers {
-            args.push("--trailer".to_string());
-            args.push(format!("{key}={value}"));
-        }
-        run(&self.root, &borrow(&args))?;
+        run(
+            &self.root,
+            &["commit", "--allow-empty", "--message", message],
+        )?;
         self.head()
     }
 }
 
-/// Name git takes as ref. Rules of `git check-ref-format`, plus branch rules: no
-/// leading `-`, not `HEAD`. Board and host text pass here before becoming a ref.
+/// Name git takes as ref: `git check-ref-format`, plus no leading `-`, not `HEAD`.
 pub fn valid_ref(name: &str) -> bool {
     let barred = |letter: char| letter.is_ascii_control() || BARRED.contains(letter);
     let part = |part: &str| !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock");
@@ -256,8 +224,7 @@ pub fn valid_ref(name: &str) -> bool {
         && name.split('/').all(part)
 }
 
-/// Full ref name: a branch name alone can also read as a path. A name that
-/// already starts with `refs/` stands, the rule git itself resolves by.
+/// Full ref name: bare branch name can also read as a path. `refs/` prefix stands.
 fn refname(rev: &str) -> String {
     match rev.starts_with(REFS) {
         true => rev.to_string(),
@@ -280,25 +247,6 @@ fn parse_checkouts(listing: &str) -> BTreeMap<String, PathBuf> {
         }
     }
     checkouts
-}
-
-fn trailer_format(key: &str) -> String {
-    format!("%(trailers:key={key},valueonly,separator=%x1e)")
-}
-
-fn parse_trailer(line: &str, value: &str) -> Option<Trailer> {
-    let mut fields = line.split('\x1f');
-    let commit = fields.next()?;
-    let picked = fields.next()?.trim();
-    let wanted = fields.next()?.trim();
-    (picked == value && !wanted.is_empty()).then(|| Trailer {
-        commit: commit.to_string(),
-        value: wanted.to_string(),
-    })
-}
-
-fn borrow(args: &[String]) -> Vec<&str> {
-    args.iter().map(String::as_str).collect()
 }
 
 fn run(dir: &Path, args: &[&str]) -> Result<String> {

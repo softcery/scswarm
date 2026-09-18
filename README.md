@@ -2,7 +2,7 @@
 
 Runs coding agents on a task board with no human at the keyboard. One binary, one workstation.
 
-You list tasks in `SWARM.md` and commit. Workers pick every task whose dependencies are met, run it in its own git worktree and container, and leave branch `swarm/<id>`. You review and merge.
+You list tasks in `SWARM.yaml` and commit. Workers pick every task whose dependencies are met, run it in its own git worktree and container, and leave branch `swarm/<id>`. You review and merge.
 
 ## Requirements
 
@@ -21,19 +21,19 @@ cargo install --path .
 
 `PROJECT` below is any name you pick. It keys the host file, the bare repo, the image and the containers.
 
-1. Write the host file `~/.config/scswarm/PROJECT.ron`:
+1. Write the host file `~/.config/scswarm/PROJECT.yaml`:
 
-   ```
-   (
-     path: "~/myproject",
-     trunk: "main",
-     workers: 2,
-     mounts: ["~/.cargo/registry:/home/dev/.cargo/registry"],
-     env: ["ANTHROPIC_API_KEY"],
-   )
+   ```yaml
+   path: ~/myproject
+   trunk: main
+   workers: 2
+   mounts:
+     - ~/.cargo/registry:/home/dev/.cargo/registry
+   env:
+     - ANTHROPIC_API_KEY
    ```
 
-2. In the project checkout, write `scswarm.ron`, `Containerfile.swarm` and `SWARM.md`. See [Configure](#configure).
+2. In the project checkout, write `scswarm.yaml`, `Containerfile.swarm` and `SWARM.yaml`. See [Configure](#configure).
 
 3. Commit all three on the trunk branch. The swarm reads them from there, never from your working tree.
 
@@ -65,14 +65,14 @@ Job queue with a worker pool. Queue = the board. Workers = slots. State = git.
 Every 5 seconds the loop:
 
 1. Fetches the trunk branch of the checkout at `path` into ref `refs/swarm/trunk`.
-2. Parses `SWARM.md` and `scswarm.ron` at that ref.
+2. Parses `SWARM.yaml` and `scswarm.yaml` at that ref.
 3. Derives the state of every row from git: blocked, ready, running, failed, landed, done.
 4. Gives each ready row a free slot.
 5. Sleeps.
 
 A slot is a git worktree at `~/swarm/slot/<project>/<n>` plus one long-lived container `scswarm-<project>-<n>`.
 
-A task runs as stages. A stage is one agent session with scripted turns. The last turn of a stage asks for a commit message; the host commits every change with trailers `Swarm-Task` and `Swarm-Stage`. Restart resets the worktree to the last stage commit and reruns that stage in a fresh session.
+One row is one agent session with scripted turns. The host appends the `commit` turn, asks for a message, commits every change and writes ref `refs/swarm/land/<id>` at that commit. A branch with no land ref holds a session cut short: the next cycle drops the branch and replays the row from base.
 
 Rows stack. A task whose parent landed but is not merged branches off that parent, so a chain builds while you sleep.
 
@@ -85,8 +85,7 @@ Git only. No database, no state file.
 | Fact | Where |
 |---|---|
 | task started | branch `swarm/<id>` exists |
-| stage reached | trailer `Swarm-Stage: n/total` on the branch tip |
-| task landed | last stage committed |
+| task landed | ref `refs/swarm/land/<id>` holds its commit |
 | task done | that commit is an ancestor of the trunk |
 | task failed | ref `refs/swarm/fail/<id>` holds the trunk tip it failed against |
 
@@ -100,7 +99,7 @@ The gitdir mounts read-only. `git status`, `git log`, `git diff` work. `git add`
 
 Four files. Binding formats: [docs/spec/contract.md](docs/spec/contract.md).
 
-### Host file: `~/.config/scswarm/<project>.ron`
+### Host file: `~/.config/scswarm/<project>.yaml`
 
 What this machine gives the swarm. Never committed.
 
@@ -114,34 +113,27 @@ What this machine gives the swarm. Never committed.
 
 `path` and `trunk` reload each cycle. `workers`, `mounts` and `env` bake into the containers: change one, run `init` again. `serve` exits 2 when reality and the file disagree.
 
-### `scswarm.ron` in the project root
+### `scswarm.yaml` in the project root
 
 What the agents run. Read from the trunk ref.
 
-```
-(
-  image: "Containerfile.swarm",
-  default_agent: "claude",
-  agents: {
-    "claude": (
-      exec: "claude --model opus --dangerously-skip-permissions --disallowedTools Agent Skill SendMessage ListAgents RemoteTrigger PushNotification -p --output-format json",
-      resume: "--resume {session}",
-    ),
-  },
-  stages: [
-    (turns: ["/execute {id}", "Correct, clean, beautiful?", "{commit}"]),
-    (turns: ["/audit {id}", "Close every gap you found.", "{commit}"]),
-  ],
-  merge: (turns: ["Resolve every conflict of the merge of {parent} into {id}.", "{commit}"]),
-)
+```yaml
+image: Containerfile.swarm
+default_agent: claude
+agents:
+  claude:
+    exec: claude --model opus --dangerously-skip-permissions --disallowedTools Agent Skill SendMessage ListAgents RemoteTrigger PushNotification -p --output-format json
+    resume: --resume {session}
+commit: "Reply with the commit message for the work in this session. Message only."
+merge:
+  - "Resolve every conflict of the merge of {parent} into {id}."
 ```
 
 - `exec` runs in the container with the prompt appended as the last argument. It must print JSON holding `session_id` and `result`, or plain text taken as `result`.
-- `--disallowedTools Agent Skill SendMessage ListAgents RemoteTrigger PushNotification` keeps the session flat: no subagent, no skill, no message to another session. A subagent burns the turn budget and writes files the stage never sees in its transcript.
-- `resume` is added from the second turn on, so one stage is one session.
-- Turn text takes `{id}`, `{task}`, `{parent}`. `{commit}` is the built-in turn: it asks for a message and the host commits.
-- `stages[].agent` overrides the row agent for that stage. Use it to make a second model audit the first.
-- `merge` runs in a conflicted worktree when a parent merge fails. Absent = the branch drops and the row starts over.
+- `--disallowedTools Agent Skill SendMessage ListAgents RemoteTrigger PushNotification` keeps the session flat: no subagent, no skill, no message to another session. A subagent burns the turn budget and writes files the transcript never sees.
+- `resume` is added from the second turn on, so one row is one session.
+- `commit` closes every session: it asks for a message and the host commits with the reply.
+- `merge` runs in a conflicted worktree when a parent merge fails. It takes `{parent}` and `{id}`. Absent = the branch drops and the row starts over.
 
 ### `Containerfile.swarm` in the project root
 
@@ -175,35 +167,50 @@ RUN mkdir -p /home/dev/.claude \
 - `/home/dev/.claude/settings.json` empties `attribution.commit` and `attribution.pr` and sets `attribution.sessionUrl`. The host writes every commit, so a `Co-authored-by` trailer from the agent lands as message text, not as a trailer.
 - Run the CLI as a non-root user with `--create-home`. The settings files sit under that home.
 
-### `SWARM.md` in the project root
+### `SWARM.yaml` in the project root
 
-The board. Markdown table, 4 columns, read and never written by the tool.
+The board. YAML sequence, read and never written by the tool. Empty board: `[]`.
 
+```yaml
+- id: parse-10-repair
+  turns:
+    - |
+      Repair the parser.
+      Spec in docs/spec/parser.md.
+    - &check "Correct, clean, beautiful?"
+- id: parse-10-review
+  after: [parse-10-repair]
+  agent: codex
+  turns:
+    - "Audit the parser repair. Write the plan, close nothing."
+    - &gaps "Audited thoroughly, no gaps? If any, close them."
+    - *check
+- id: parse-10-close
+  after: [parse-10-review]
+  turns:
+    - "Close every issue the audit names."
+    - *check
 ```
-| id | after | agent | task |
-| --- | --- | --- | --- |
-| parse-10-repair | | | Repair the parser. Spec in docs/spec/parser.md. |
-| trace-06-decode | | | |
-| parse-15-postures | parse-10-repair, trace-06-decode | codex | Postures. |
-```
 
-- `id` names the branch, the trailer, the transcript and the `after` links. It becomes a git ref, so write it lowercase ASCII with no space. Unique per board.
-- `after` is a comma list of ids. Empty = ready at once.
-- `agent` is a key of `agents`. Empty = `default_agent`.
-- `task` is free text for the agent, substituted as `{task}`. Empty = the turns get the id alone. No `|` inside: the cell ends there.
+- `id` names the branch, the land ref, the transcript and the `after` links. It becomes a git ref, so write it lowercase ASCII with no space. Unique per board.
+- `after` is a list of ids. Absent = ready at once.
+- `agent` is a key of `agents`. Absent = `default_agent`. One row per model is how a second model audits the first.
+- `turns` are the prompts of the session, sent as typed. The host appends the `commit` turn.
+- An anchor (`&check`) carries a repeated turn, an alias (`*check`) points back at it.
+- A turn that starts with `{` must be quoted. YAML reads a bare `- {x}` as a mapping.
 
-`serve` and `status` exit 1 and name the row on a duplicate id, an unknown id in `after`, a dependency loop, an unknown agent, or a row of other than 4 cells.
+`serve` and `status` exit 1 and name the row on a duplicate id, an unknown id in `after`, a dependency loop, an unknown agent, an empty turn list, or an id git refuses as a ref.
 
 ## Commands
 
 `PROJECT` is the stem of the host file. The working directory means nothing.
 
 ```
-scswarm init PROJECT                bare repo, image, slot worktrees and containers
-scswarm serve PROJECT               foreground loop; run under systemd
-scswarm status PROJECT              one line per row: id, state, branch, stage, worker
-scswarm log PROJECT ID [--stage N]  transcript, one block per turn
-scswarm reset PROJECT ID            delete swarm/<id>, every dependant branch, their fail marks
+scswarm init PROJECT       bare repo, image, slot worktrees and containers
+scswarm serve PROJECT      foreground loop; run under systemd
+scswarm status PROJECT     one line per row: id, state, branch, worker
+scswarm log PROJECT ID     transcript, one block per turn
+scswarm reset PROJECT ID   delete swarm/<id>, every dependant branch, their land refs and marks
 ```
 
 Exit codes: 0 ok, 1 input invalid, 2 git or podman failure. Drift between the host file and the slot set exits 2; the fix is `init`.
@@ -220,7 +227,7 @@ systemctl --user enable --now scswarm@PROJECT
 
 **Row shows `failed`.** Read `scswarm log PROJECT ID` for the failing turn. A failed row waits for a new trunk tip, so it costs one attempt per push, not one per cycle. To rerun without a push, run `reset`.
 
-**Rerun a task.** Stop `serve`, run `scswarm reset PROJECT ID`, start `serve`. A worker holding that task recreates the ref at its next commit, so stop it first.
+**Rerun a task.** Stop `serve`, run `scswarm reset PROJECT ID`, start `serve`. A worker holding that task recreates the refs at its next commit, so stop it first.
 
 **Change workers, mounts or env.** Stop `serve`, edit the host file, run `init`, start `serve`. `init` replaces every slot container and drops the slots at or above `workers`.
 
@@ -231,6 +238,8 @@ systemctl --user enable --now scswarm@PROJECT
 ## Limits
 
 - Reads the board from the trunk branch only. A row on any other branch stays invisible.
+- A row's failure or crash costs its whole turn list. The replay starts from base.
+- `status` prints one line per row, so a task written as three rows reads as three lines.
 - One `serve` per project. Two share the slot worktrees and fight over the same branches. Nothing locks them.
 - A task stacked on a rejected parent needs `reset`.
 - One configured agent means one model both writes and audits the work.

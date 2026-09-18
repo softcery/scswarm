@@ -5,20 +5,31 @@ use crate::config::Config;
 use crate::error::Result;
 use crate::git::Git;
 use crate::paths::{self, Project};
-use crate::state::{self, State};
+use crate::state;
 
-const HEADER: [&str; 5] = ["id", "state", "branch", "stage", "worker"];
+const HEADER: [&str; 4] = ["id", "state", "branch", "worker"];
+const COLUMNS: usize = HEADER.len();
 const GAP: &str = "  ";
 const NONE: &str = "-";
+
+type Line = [String; COLUMNS];
 
 /// One line per board row. Every cell derives from git.
 pub fn status(repo: &Git, project: &Project) -> Result<()> {
     let config = Config::from_trunk(repo)?;
     let board = Board::from_trunk(repo, &config)?;
-    let total = config.stages.len();
-    let states = state::derive(&board, total, repo)?;
+    let states = state::derive(&board, repo)?;
     let slots = slots(repo, project)?;
-    print!("{}", render(&board, &states, total, &slots));
+    let mut table = vec![HEADER.map(str::to_string)];
+    for (row, state) in board.rows().iter().zip(&states) {
+        table.push([
+            row.id.clone(),
+            state.to_string(),
+            branch_cell(repo, row)?,
+            worker_cell(row, &slots),
+        ]);
+    }
+    print!("{}", render(&table));
     Ok(())
 }
 
@@ -34,40 +45,13 @@ fn slots(repo: &Git, project: &Project) -> Result<BTreeMap<String, usize>> {
     Ok(slots)
 }
 
-fn render(
-    board: &Board,
-    states: &[State],
-    total: usize,
-    slots: &BTreeMap<String, usize>,
-) -> String {
-    let mut table = vec![HEADER.map(str::to_string)];
-    table.extend(board.rows().iter().zip(states).map(|(row, state)| {
-        [
-            row.id.clone(),
-            state.to_string(),
-            branch_cell(row, *state),
-            stage_cell(*state, total),
-            worker_cell(row, slots),
-        ]
-    }));
-    let widths = column_widths(&table);
-    table.iter().map(|row| line(row, &widths)).collect()
-}
-
-/// A merge that failed leaves no branch, so its cell stays empty.
-fn branch_cell(row: &Row, state: State) -> String {
-    match state {
-        State::Ready | State::Blocked | State::Failed { stage: 0 } => NONE.to_string(),
-        _ => state::branch(&row.id),
-    }
-}
-
-fn stage_cell(state: State, total: usize) -> String {
-    match state {
-        State::Running { stage } | State::Failed { stage } => format!("{stage}/{total}"),
-        State::Landed | State::Done => format!("{total}/{total}"),
-        State::Ready | State::Blocked => NONE.to_string(),
-    }
+/// A row that never started, and one whose merge failed, hold no branch.
+fn branch_cell(repo: &Git, row: &Row) -> Result<String> {
+    let branch = state::branch(&row.id);
+    Ok(match repo.branch_exists(&branch)? {
+        true => branch,
+        false => NONE.to_string(),
+    })
 }
 
 fn worker_cell(row: &Row, slots: &BTreeMap<String, usize>) -> String {
@@ -76,8 +60,13 @@ fn worker_cell(row: &Row, slots: &BTreeMap<String, usize>) -> String {
         .map_or_else(|| NONE.to_string(), usize::to_string)
 }
 
-fn column_widths(table: &[[String; 5]]) -> [usize; 5] {
-    let mut widths = [0; 5];
+fn render(table: &[Line]) -> String {
+    let widths = column_widths(table);
+    table.iter().map(|row| line(row, &widths)).collect()
+}
+
+fn column_widths(table: &[Line]) -> [usize; COLUMNS] {
+    let mut widths = [0; COLUMNS];
     for row in table {
         for (width, cell) in widths.iter_mut().zip(row) {
             *width = (*width).max(cell.chars().count());
@@ -86,7 +75,7 @@ fn column_widths(table: &[[String; 5]]) -> [usize; 5] {
     widths
 }
 
-fn line(row: &[String; 5], widths: &[usize; 5]) -> String {
+fn line(row: &Line, widths: &[usize; COLUMNS]) -> String {
     let last = row.len() - 1;
     let cells: Vec<String> = row
         .iter()

@@ -11,12 +11,13 @@ mod podman;
 mod pool;
 mod proc;
 mod reset;
+mod script;
 mod serve;
 mod slot;
-mod stage;
 mod state;
 mod status;
 mod turn;
+mod yaml;
 
 use clap::{Parser, Subcommand};
 
@@ -39,13 +40,10 @@ enum Command {
     #[command(about = "Print board rows with state derived from git")]
     Status { project: String },
     #[command(about = "Print the agent transcript of one task")]
-    Log {
-        project: String,
-        id: String,
-        #[arg(long, value_name = "N")]
-        stage: Option<usize>,
-    },
-    #[command(about = "Delete the branch and fail mark of one task and of every dependant")]
+    Log { project: String, id: String },
+    #[command(
+        about = "Delete the branch, land ref and fail mark of one task and of every dependant"
+    )]
     Reset { project: String, id: String },
 }
 
@@ -65,7 +63,7 @@ fn dispatch(command: Command) -> Result<()> {
         Command::Init { .. } => init::init(&project),
         Command::Serve { .. } => serve::serve(&init::open(&project)?, &project),
         Command::Status { .. } => status::status(&init::open(&project)?, &project),
-        Command::Log { id, stage, .. } => log::log(&project, &id, stage),
+        Command::Log { id, .. } => log::log(&project, &id),
         Command::Reset { id, .. } => reset::reset(&init::open(&project)?, &id),
     }
 }

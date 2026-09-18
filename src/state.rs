@@ -1,21 +1,19 @@
 use std::fmt;
 
 use crate::board::Board;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::git::{self, Git};
 
-pub const TASK_TRAILER: &str = "Swarm-Task";
-pub const STAGE_TRAILER: &str = "Swarm-Stage";
-
+const LAND_REFS: &str = "refs/swarm/land/";
 const FAIL_REFS: &str = "refs/swarm/fail/";
 
-/// Row standing. Read from git, never stored. `Failed` stage 0 = parent merge.
+/// Row standing. Read from git, never stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     Blocked,
     Ready,
-    Running { stage: usize },
-    Failed { stage: usize },
+    Running,
+    Failed,
     Landed,
     Done,
 }
@@ -24,46 +22,33 @@ pub fn branch(id: &str) -> String {
     format!("swarm/{id}")
 }
 
-/// Ref that marks the trunk tip a row last failed against. Outside `refs/heads/`,
-/// so it lists as no branch and pushes with none.
+/// Ref holding the commit a row landed. Sole record of finished work.
+pub fn land_ref(id: &str) -> String {
+    format!("{LAND_REFS}{id}")
+}
+
+/// Trunk tip a row last failed against. Outside `refs/heads/`: lists as no branch.
 pub fn fail_ref(id: &str) -> String {
     format!("{FAIL_REFS}{id}")
 }
 
-pub fn derive(board: &Board, total: usize, git: &Git) -> Result<Vec<State>> {
-    let base = git.tip(git::TRUNK)?;
-    let progress = board
+pub fn derive(board: &Board, git: &Git) -> Result<Vec<State>> {
+    let tip = git.tip(git::TRUNK)?;
+    let own = board
         .rows()
         .iter()
-        .map(|row| row_progress(git, &row.id, total))
-        .collect::<Result<Vec<Progress>>>()?;
-    let failed = board
-        .rows()
-        .iter()
-        .map(|row| row_failed(git, &row.id, &base))
-        .collect::<Result<Vec<bool>>>()?;
+        .map(|row| row_own(git, &row.id, &tip))
+        .collect::<Result<Vec<Option<State>>>>()?;
     Ok(board
         .rows()
         .iter()
-        .zip(&progress)
-        .zip(&failed)
-        .map(|((row, own), &failed)| match own {
-            Progress::Landed => State::Landed,
-            Progress::Done => State::Done,
-            Progress::Absent if failed => State::Failed { stage: 0 },
-            Progress::Stage(done) if failed => State::Failed { stage: done + 1 },
-            Progress::Absent if row.after.iter().all(|&dep| progress[dep].settled()) => {
-                State::Ready
-            }
-            Progress::Absent => State::Blocked,
-            Progress::Stage(done) => State::Running { stage: done + 1 },
+        .zip(&own)
+        .map(|(row, state)| match state {
+            Some(state) => *state,
+            None if row.after.iter().all(|&parent| settled(own[parent])) => State::Ready,
+            None => State::Blocked,
         })
         .collect())
-}
-
-/// Failed against trunk tip standing now. Moved trunk frees the row.
-fn row_failed(git: &Git, id: &str, base: &str) -> Result<bool> {
-    Ok(git.ref_commit(&fail_ref(id))?.as_deref() == Some(base))
 }
 
 impl fmt::Display for State {
@@ -71,56 +56,29 @@ impl fmt::Display for State {
         f.write_str(match self {
             State::Blocked => "blocked",
             State::Ready => "ready",
-            State::Running { .. } => "running",
-            State::Failed { .. } => "failed",
+            State::Running => "running",
+            State::Failed => "failed",
             State::Landed => "landed",
             State::Done => "done",
         })
     }
 }
 
-/// Stages committed on row branch.
-#[derive(Debug, Clone, Copy)]
-enum Progress {
-    Absent,
-    Stage(usize),
-    Landed,
-    Done,
+/// Standing from the row's own refs. `None`: not started, so parents decide.
+fn row_own(git: &Git, id: &str, tip: &str) -> Result<Option<State>> {
+    if let Some(commit) = git.ref_commit(&land_ref(id))? {
+        return Ok(Some(match git.is_ancestor(&commit, git::TRUNK)? {
+            true => State::Done,
+            false => State::Landed,
+        }));
+    }
+    if git.ref_commit(&fail_ref(id))?.as_deref() == Some(tip) {
+        return Ok(Some(State::Failed));
+    }
+    Ok(git.branch_exists(&branch(id))?.then_some(State::Running))
 }
 
-impl Progress {
-    fn settled(self) -> bool {
-        matches!(self, Progress::Landed | Progress::Done)
-    }
-}
-
-fn row_progress(git: &Git, id: &str, total: usize) -> Result<Progress> {
-    let branch = branch(id);
-    if !git.branch_exists(&branch)? {
-        return Ok(Progress::Absent);
-    }
-    let stamp = git.trailer_commit(&branch, TASK_TRAILER, id, STAGE_TRAILER)?;
-    let Some(trailer) = stamp else {
-        return Ok(Progress::Stage(0));
-    };
-    let done = committed_stages(&trailer.value, &branch)?;
-    if done < total {
-        return Ok(Progress::Stage(done));
-    }
-    if git.is_ancestor(&trailer.commit, git::TRUNK)? {
-        Ok(Progress::Done)
-    } else {
-        Ok(Progress::Landed)
-    }
-}
-
-fn committed_stages(trailer: &str, branch: &str) -> Result<usize> {
-    trailer
-        .split_once('/')
-        .and_then(|(done, _)| done.trim().parse().ok())
-        .ok_or_else(|| {
-            Error::Failed(format!(
-                "branch {branch}: trailer `{STAGE_TRAILER}` must read `<n>/<total>`"
-            ))
-        })
+/// Parent a dependant can branch from.
+fn settled(state: Option<State>) -> bool {
+    matches!(state, Some(State::Landed | State::Done))
 }

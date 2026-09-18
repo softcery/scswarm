@@ -1,12 +1,12 @@
 use std::fs;
 use std::path::PathBuf;
 
-use ron::extensions::Extensions;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::git;
 use crate::paths::{self, Project};
+use crate::yaml;
 
 /// What the swarm runs on. Only reader of the host file.
 #[derive(Debug)]
@@ -73,10 +73,7 @@ impl Host {
     }
 
     pub fn parse(file: &str, text: &str) -> Result<Self> {
-        let written: Written = ron::Options::default()
-            .with_default_extension(Extensions::IMPLICIT_SOME)
-            .from_str(text)
-            .map_err(|why| Error::Invalid(format!("{file}: {why}")))?;
+        let written: Written = yaml::parse(file, text)?;
         written.check(file)?;
         written.split()
     }
@@ -208,8 +205,10 @@ impl From<Mount> for String {
     }
 }
 
+/// Stamp text a container carries as a label. JSON: the YAML reader only reads.
 fn text<T: Serialize>(value: &T) -> Result<String> {
-    ron::to_string(value).map_err(|why| Error::Failed(format!("slot set must serialise: {why}")))
+    serde_json::to_string(value)
+        .map_err(|why| Error::Failed(format!("slot set must serialise: {why}")))
 }
 
 fn shaped(got: &str) -> String {
@@ -224,17 +223,17 @@ fn invalid(file: &str, what: &str) -> Error {
 mod tests {
     use super::*;
 
-    const FILE: &str = "/home/dev/.config/scswarm/alpha.ron";
+    const FILE: &str = "/home/dev/.config/scswarm/alpha.yaml";
 
-    const EXAMPLE: &str = r#"
-(
-  path: "~/alpha",
-  trunk: "blahblah",
-  workers: 3,
-  mounts: ["~/alpha/records:/records"],
-  env: ["ANTHROPIC_API_KEY"],
-)
-"#;
+    const EXAMPLE: &str = "\
+path: ~/alpha
+trunk: blahblah
+workers: 3
+mounts:
+  - ~/alpha/records:/records
+env:
+  - ANTHROPIC_API_KEY
+";
 
     #[test]
     fn parses_contract_example() {
@@ -252,7 +251,7 @@ mod tests {
 
     #[test]
     fn names_the_bad_field() {
-        let text = EXAMPLE.replace("trunk: \"blahblah\"", "trunk: \"two words\"");
+        let text = EXAMPLE.replace("trunk: blahblah", "trunk: two words");
         let why = Host::parse(FILE, &text)
             .expect_err("a trunk of two words must fail")
             .to_string();

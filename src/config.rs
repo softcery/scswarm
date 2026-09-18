@@ -1,33 +1,32 @@
 use std::collections::BTreeMap;
 
-use ron::extensions::Extensions;
 use serde::Deserialize;
 
 use crate::error::{Error, Result};
 use crate::git::{self, Git};
 use crate::paths::Project;
 use crate::podman;
+use crate::yaml;
 
-pub const FILE: &str = "scswarm.ron";
+pub const FILE: &str = "scswarm.yaml";
 
-/// Turn text the tool fills in or acts on.
+/// Turn text the tool fills in.
 pub const ID_SLOT: &str = "{id}";
-pub const TASK_SLOT: &str = "{task}";
 pub const PARENT_SLOT: &str = "{parent}";
 pub const SESSION_SLOT: &str = "{session}";
-pub const COMMIT_TURN: &str = "{commit}";
 
-/// Project settings. Only reader of `scswarm.ron`.
+/// Project settings. Only reader of `scswarm.yaml`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub image: String,
     pub default_agent: String,
     pub agents: BTreeMap<String, Agent>,
-    pub stages: Vec<Stage>,
-    /// Turns that resolve conflicted parent merge. Absent: conflict drops branch.
+    /// Last turn of every session: asks for the message the host commits with.
+    pub commit: String,
+    /// Turns that resolve a conflicted parent merge. Absent: conflict drops branch.
     #[serde(default)]
-    pub merge: Option<Stage>,
+    pub merge: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -36,14 +35,6 @@ pub struct Agent {
     pub exec: String,
     #[serde(default)]
     pub resume: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Stage {
-    #[serde(default)]
-    pub agent: Option<String>,
-    pub turns: Vec<String>,
 }
 
 impl Config {
@@ -55,10 +46,7 @@ impl Config {
     }
 
     pub fn parse(text: &str) -> Result<Self> {
-        let config: Config = ron::Options::default()
-            .with_default_extension(Extensions::IMPLICIT_SOME)
-            .from_str(text)
-            .map_err(|why| Error::Invalid(format!("{FILE}: {why}")))?;
+        let config: Config = yaml::parse(FILE, text)?;
         config.check()?;
         Ok(config)
     }
@@ -90,8 +78,13 @@ impl Config {
                 "field `image` must name a Containerfile path or an image",
             ));
         }
+        if self.commit.trim().is_empty() {
+            return Err(invalid(
+                "field `commit` must hold the turn that asks for a commit message",
+            ));
+        }
         self.check_agents()?;
-        self.check_stages()
+        self.check_merge()
     }
 
     fn check_agents(&self) -> Result<()> {
@@ -120,41 +113,22 @@ impl Config {
         Ok(())
     }
 
-    fn check_stages(&self) -> Result<()> {
-        if self.stages.is_empty() {
-            return Err(invalid("field `stages` must hold one stage or more"));
+    fn check_merge(&self) -> Result<()> {
+        let Some(turns) = self.merge.as_deref() else {
+            return Ok(());
+        };
+        if turns.is_empty() {
+            return Err(invalid(
+                "field `merge` must hold one turn or more, or stay absent",
+            ));
         }
-        for (index, stage) in self.stages.iter().enumerate() {
-            self.check_stage(&format!("stage {}", index + 1), stage)?;
-        }
-        match &self.merge {
-            Some(stage) => self.check_stage("field `merge`", stage),
+        match turns.iter().position(|turn| turn.trim().is_empty()) {
+            Some(index) => Err(invalid(&format!(
+                "field `merge` turn {} must hold the text sent to the agent",
+                index + 1
+            ))),
             None => Ok(()),
         }
-    }
-
-    fn check_stage(&self, label: &str, stage: &Stage) -> Result<()> {
-        if stage.turns.is_empty() {
-            return Err(invalid(&format!(
-                "{label} field `turns` must hold one turn or more"
-            )));
-        }
-        if !stage.turns.iter().any(|turn| turn == COMMIT_TURN) {
-            return Err(invalid(&format!(
-                "{label} field `turns` must hold the turn `{COMMIT_TURN}`, its one commit"
-            )));
-        }
-        if stage
-            .agent
-            .as_deref()
-            .is_some_and(|key| !self.knows_agent(key))
-        {
-            return Err(invalid(&format!(
-                "{label} field `agent` must name a key of `agents`: {}",
-                self.agent_keys()
-            )));
-        }
-        Ok(())
     }
 }
 
@@ -167,31 +141,23 @@ mod tests {
     use super::*;
 
     const EXAMPLE: &str = r#"
-(
-  image: "Containerfile.swarm",
-  default_agent: "claude",
-  agents: {
-    "claude": (
-      exec: "claude --model opus -p --output-format json",
-      resume: "--resume {session}",
-    ),
-  },
-  stages: [
-    (turns: ["/execute {id}", "{commit}"]),
-    (agent: "claude", turns: ["/audit {id}", "{commit}"]),
-  ],
-  merge: (turns: ["Resolve the conflicts of {parent}.", "{commit}"]),
-)
+image: Containerfile.swarm
+default_agent: claude
+agents:
+  claude:
+    exec: claude --model opus -p --output-format json
+    resume: --resume {session}
+commit: "Reply with the commit message for the work in this session. Message only."
+merge:
+  - "Resolve every conflict of the merge of {parent} into {id}."
 "#;
 
     #[test]
     fn parses_contract_example() {
         let config = Config::parse(EXAMPLE).expect("example must parse");
         assert_eq!(config.image, "Containerfile.swarm");
-        assert_eq!(config.stages.len(), 2);
-        assert_eq!(config.stages[0].agent, None);
-        assert_eq!(config.stages[1].agent.as_deref(), Some("claude"));
-        assert_eq!(config.merge.expect("merge must parse").turns.len(), 2);
+        assert!(config.commit.starts_with("Reply with"), "{}", config.commit);
+        assert_eq!(config.merge.expect("merge must parse").len(), 1);
         assert_eq!(
             config.agents["claude"].resume.as_deref(),
             Some("--resume {session}")
@@ -200,7 +166,7 @@ mod tests {
 
     #[test]
     fn names_the_bad_field() {
-        let text = EXAMPLE.replace("default_agent: \"claude\"", "default_agent: \"codex\"");
+        let text = EXAMPLE.replace("default_agent: claude", "default_agent: codex");
         let why = Config::parse(&text)
             .expect_err("unknown agent must fail")
             .to_string();

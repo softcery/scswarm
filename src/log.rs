@@ -1,56 +1,59 @@
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::error::{Error, Result};
-use crate::paths::{self, Project};
+use crate::paths::{self, Project, MERGE_LOG, RUN_LOG};
 use crate::turn::Entry;
 
 const PROMPT: &str = ">";
 const REPLY: &str = "<";
 const FAULT: &str = "!";
 
-/// Print the transcript of one task: the named stage, or every stage in order.
-pub fn log(project: &Project, id: &str, stage: Option<usize>) -> Result<()> {
-    let files = match stage {
-        Some(number) => vec![(number, paths::transcript(project, id, number)?)],
-        None => stages(&paths::transcripts(project, id)?)?,
-    };
-    for (number, path) in files {
-        print!("{}", render(number, &read(&path)?));
+/// Print the transcripts of one task: the merge session first, then the row.
+pub fn log(project: &Project, id: &str) -> Result<()> {
+    let mut printed = false;
+    for name in [MERGE_LOG, RUN_LOG] {
+        let Some(transcript) = read(&paths::transcript(project, id, name)?)? else {
+            continue;
+        };
+        printed = true;
+        print!("{}", render(name, &transcript));
+    }
+    if !printed {
+        let dir = paths::transcripts(project, id)?;
+        return Err(Error::Invalid(format!(
+            "id `{id}` must name a task that ran a session: {} holds no transcript",
+            dir.display()
+        )));
     }
     Ok(())
 }
 
-/// Transcript files of one task, by stage number.
-fn stages(dir: &Path) -> Result<Vec<(usize, PathBuf)>> {
-    let listing = fs::read_dir(dir).map_err(|why| unreadable(dir, &why))?;
-    let mut found: Vec<(usize, PathBuf)> = listing
-        .filter_map(|entry| {
-            let path = entry.ok()?.path();
-            Some((paths::transcript_stage(&path)?, path))
-        })
-        .collect();
-    found.sort_by_key(|(number, _)| *number);
-    Ok(found)
+/// `None` when no such session ran. Any other fault is the filesystem refusing.
+fn read(path: &Path) -> Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(why) if why.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(why) => Err(Error::Failed(format!(
+            "transcript {}: {why}",
+            path.display()
+        ))),
+    }
 }
 
-fn read(path: &Path) -> Result<String> {
-    fs::read_to_string(path).map_err(|why| unreadable(path, &why))
-}
-
-fn render(stage: usize, transcript: &str) -> String {
-    transcript.lines().map(|line| entry(stage, line)).collect()
+fn render(name: &str, transcript: &str) -> String {
+    transcript.lines().map(|line| entry(name, line)).collect()
 }
 
 /// Header, prompt, then reply or failure. A line that parses as no entry stays raw.
-fn entry(stage: usize, line: &str) -> String {
+fn entry(name: &str, line: &str) -> String {
     let Ok(turn) = serde_json::from_str::<Entry>(line) else {
         return format!("{line}\n");
     };
     let head = match turn.exit {
-        Some(code) => format!("stage {stage} turn {} exit {code}", turn.turn),
-        None => format!("stage {stage} turn {}", turn.turn),
+        Some(code) => format!("{name} turn {} exit {code}", turn.turn),
+        None => format!("{name} turn {}", turn.turn),
     };
     let mut lines = vec![head, format!("{PROMPT} {}", turn.prompt.trim())];
     let marked = [
@@ -64,14 +67,4 @@ fn entry(stage: usize, line: &str) -> String {
         }
     }
     lines.join("\n") + "\n"
-}
-
-/// Absent transcript names a task or stage that never ran: bad input. Any other
-/// fault is the filesystem refusing.
-fn unreadable(path: &Path, why: &io::Error) -> Error {
-    let what = format!("transcript {}: {why}", path.display());
-    match why.kind() {
-        io::ErrorKind::NotFound => Error::Invalid(what),
-        _ => Error::Failed(what),
-    }
 }

@@ -4,7 +4,7 @@ After=default.target
 
 [Service]
 Type=simple
-# Host file: %h/.config/scswarm/%i.ron
+# Host file: %h/.config/scswarm/%i.yaml
 ExecStart=%h/.cargo/bin/scswarm serve %i
 # Credentials named in the host file field `env`, one KEY=VALUE per line.
 EnvironmentFile=-%h/.config/scswarm/env

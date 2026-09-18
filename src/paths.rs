@@ -1,5 +1,4 @@
 use std::env;
-use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -18,7 +17,7 @@ const HOME_VAR: &str = "HOME";
 const CONFIG_HOME: &str = "XDG_CONFIG_HOME";
 const CONFIG_FALLBACK: &str = ".config";
 const CONFIG_DIR: &str = "scswarm";
-const CONFIG_EXT: &str = "ron";
+const CONFIG_EXT: &str = "yaml";
 
 /// Project name: stem of host file. Rides into paths, image and container names.
 /// Lowercase only: container names are lowercase.
@@ -92,21 +91,17 @@ pub fn slot_dirs(project: &Project) -> Result<Vec<usize>> {
         .collect())
 }
 
-/// Every transcript of one task, one file per stage.
+/// Sessions a row can run, each with its own transcript.
+pub const RUN_LOG: &str = "run";
+pub const MERGE_LOG: &str = "merge";
+
+/// Every transcript of one task, one file per session.
 pub fn transcripts(project: &Project, id: &str) -> Result<PathBuf> {
     Ok(swarm()?.join(LOG_DIR).join(project.to_string()).join(id))
 }
 
-pub fn transcript(project: &Project, id: &str, stage: usize) -> Result<PathBuf> {
-    Ok(transcripts(project, id)?.join(format!("{stage}.{LOG_EXT}")))
-}
-
-/// Stage number of a transcript path. `None` when the file is no transcript.
-pub fn transcript_stage(path: &Path) -> Option<usize> {
-    if path.extension().and_then(OsStr::to_str)? != LOG_EXT {
-        return None;
-    }
-    path.file_stem()?.to_str()?.parse().ok()
+pub fn transcript(project: &Project, id: &str, name: &str) -> Result<PathBuf> {
+    Ok(transcripts(project, id)?.join(format!("{name}.{LOG_EXT}")))
 }
 
 /// Path as a command argument.

@@ -11,17 +11,13 @@ use crate::host::Slots;
 use crate::paths::Project;
 use crate::slot::Slot;
 use crate::state;
-use crate::{paths, stage};
+use crate::{paths, script};
 
-/// Outcome of running a job's stages: `Err` carries the stage in flight.
-type Staged<T> = std::result::Result<T, (usize, Error)>;
-
-/// One task on one slot: row, branches its base needs, stage to start at.
+/// One task on one slot: row and the branches its base needs.
 pub struct Job {
     pub row: Row,
     pub config: Arc<Config>,
     pub stack: Vec<String>,
-    pub from: usize,
     /// Trunk tip this attempt runs against. Failure marks it, so the row waits for a new tip.
     pub base: String,
 }
@@ -79,12 +75,7 @@ impl Pool {
     pub fn assign(&mut self, index: usize, job: Job) -> Result<()> {
         let worker = &mut self.workers[index];
         worker.id = Some(job.row.id.clone());
-        let at = event::At {
-            id: &job.row.id,
-            stage: job.from,
-            total: job.config.stages.len(),
-        };
-        event::assign(&at, index);
+        event::assign(&job.row.id, index);
         worker.jobs.send(job).map_err(|_| stopped(index))
     }
 }
@@ -124,26 +115,19 @@ fn work(
 ) {
     for job in queue {
         let id = job.row.id.clone();
-        let total = job.config.stages.len();
-        let outcome = stages(slot, project, &job);
+        let outcome = run(slot, project, &job);
         if let Err(why) = slot.release() {
             panic!("slot {index} must detach its worktree after a task: {why}");
         }
         let mark = state::fail_ref(&id);
         let recorded = match outcome {
-            Ok(()) => {
+            Ok(commit) => {
                 event::land(&id);
-                repo.ref_delete(&mark)
+                repo.ref_set(&state::land_ref(&id), &commit)
+                    .and_then(|()| repo.ref_delete(&mark))
             }
-            Err((stage, why)) => {
-                event::fail(
-                    &event::At {
-                        id: &id,
-                        stage,
-                        total,
-                    },
-                    &why,
-                );
+            Err(why) => {
+                event::fail(&id, &why);
                 repo.ref_set(&mark, &job.base)
             }
         };
@@ -156,18 +140,14 @@ fn work(
     }
 }
 
-fn stages(slot: &Slot, project: &Project, job: &Job) -> Staged<()> {
+/// Branch, then the one session of the row. Returns its commit.
+fn run(slot: &Slot, project: &Project, job: &Job) -> Result<String> {
     let id = job.row.id.as_str();
     let resolve = |parent: &str| {
-        let log = paths::transcript(project, id, stage::MERGE)?;
-        stage::resolve(slot, &job.config, &job.row, parent, &log)
+        let log = paths::transcript(project, id, paths::MERGE_LOG)?;
+        script::resolve(slot, &job.config, &job.row, parent, &log)
     };
-    slot.checkout(&state::branch(id), git::TRUNK, &job.stack, &resolve)
-        .map_err(|why| (job.from, why))?;
-    let total = job.config.stages.len();
-    for number in job.from..=total {
-        let log = paths::transcript(project, id, number).map_err(|why| (number, why))?;
-        stage::run(slot, &job.config, &job.row, number, &log).map_err(|why| (number, why))?;
-    }
-    Ok(())
+    slot.checkout(&state::branch(id), git::TRUNK, &job.stack, &resolve)?;
+    let log = paths::transcript(project, id, paths::RUN_LOG)?;
+    script::play(slot, &job.config, &job.row, &log)
 }

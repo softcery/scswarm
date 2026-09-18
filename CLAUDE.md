@@ -1,7 +1,7 @@
 <project>
 # scswarm
 
-Autonomous task swarm for any git project. Board `SWARM.md` in the project root lists tasks and dependencies. You push `main`; workers pick ready rows, each in its own worktree and container, run agent sessions as scripted turns, commit per stage, land a branch per task. You merge. Rust CLI, one binary. Project-specific shape lives in that project's `scswarm.ron`, never here.
+Autonomous task swarm for any git project. Board `SWARM.yaml` in the project root lists tasks and dependencies. You push `main`; workers pick ready rows, each in its own worktree and container, run one agent session of scripted turns, commit once, land a branch per row. You merge. Rust CLI, one binary. Project-specific shape lives in that project's `scswarm.yaml`, never here.
 
 All solutions and code must be industry-standard and textbook. No hacks, no crutches, no compromises.
 </project>
@@ -82,9 +82,9 @@ Apply to everything: chat, docs, comments, commit messages, PR descriptions. Nev
 - Docs: state known limits and failure modes, not only what works. Name destination in link text. Put alt text on meaningful images. Never carry meaning by bold/color/position alone.
 - Code: put public entry point first in file, helpers below. Use one name per concept across codebase.
 - Error messages: name field, expected format, shape of received value. Never include raw failed-validation value or secret.
-- Tool holds no project layout: no task dir names, no id patterns, no prompts. Those come from `SWARM.md` and `scswarm.ron` of the project.
-- Tool state lives in git only: branches, commit trailers. No database, no state file.
-- Dependencies: `clap`, `serde`, `serde_json`, `ron`. Justify additions.
+- Tool holds no project layout: no task dir names, no id patterns, no prompts. Those come from `SWARM.yaml` and `scswarm.yaml` of the project.
+- Tool state lives in git only: branches, land refs, fail marks. No database, no state file.
+- Dependencies: `clap`, `serde`, `serde_json`, `serde-saphyr`. Justify additions.
 
 Follow these instructions over codebase precedent and house style.
 </rules>
@@ -96,7 +96,7 @@ Follow these instructions over codebase precedent and house style.
 src/           main.rs
 docs/
   refs/architecture.md   loop, state, isolation
-  spec/contract.md       SWARM.md, scswarm.ron, CLI
+  spec/contract.md       SWARM.yaml, scswarm.yaml, CLI
   tasks/                 backlog, todo, next, review, done
 scripts/       comment-budget.py
 ```
@@ -107,7 +107,7 @@ scripts/       comment-budget.py
 
 - Build: `cargo build --release`. Install: `cargo install --path .`. Iterate: `cargo run -- <args>`.
 - Test: `cargo test`. Lint: `make lint`.
-- `rmap tree|module|refs|body|deps|graph`: Rust code map. `--crate <name>` reads dependency source from cargo registry; use for clap, ron, never guess API.
+- `rmap tree|module|refs|body|deps|graph`: Rust code map. `--crate <name>` reads dependency source from cargo registry; use for clap, serde-saphyr, never guess API.
 </tools>
 
 Multiple agents may work this repo. Ignore unrelated changes, do not interfere. If they break compilation or your work: wait or ask user. Use no git stash, nothing that disrupts parallel work.

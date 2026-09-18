@@ -6,53 +6,27 @@ pub fn fetch(sha: &str) {
     println!("fetch trunk={}", short(sha));
 }
 
-/// Task and stage a line names.
-#[derive(Clone, Copy)]
-pub struct At<'a> {
-    pub id: &'a str,
-    pub stage: usize,
-    pub total: usize,
+pub fn assign(id: &str, slot: usize) {
+    println!("assign task={id} slot={slot}");
 }
 
-pub fn assign(at: &At, slot: usize) {
-    println!(
-        "assign task={} slot={slot} stage={}/{}",
-        at.id, at.stage, at.total
-    );
+pub fn merge(id: &str, parent: &str) {
+    println!("merge task={id} parent={parent}");
 }
 
-pub fn merge(at: &At, parent: &str) {
-    println!(
-        "merge task={} parent={parent} stage={}/{}",
-        at.id, at.stage, at.total
-    );
+pub fn turn(id: &str, number: usize) {
+    println!("turn task={id} turn={number}");
 }
 
-pub fn turn(at: &At, number: usize) {
+pub fn retry(id: &str, number: usize, attempt: usize, exit: Option<i32>) {
     println!(
-        "turn task={} stage={}/{} turn={number}",
-        at.id, at.stage, at.total
-    );
-}
-
-pub fn retry(at: &At, number: usize, attempt: usize, exit: Option<i32>) {
-    println!(
-        "retry task={} stage={}/{} turn={number} attempt={attempt} exit={}",
-        at.id,
-        at.stage,
-        at.total,
+        "retry task={id} turn={number} attempt={attempt} exit={}",
         exit.map_or_else(|| "none".to_string(), |code| code.to_string())
     );
 }
 
-pub fn commit(at: &At, sha: &str) {
-    println!(
-        "commit task={} stage={}/{} sha={}",
-        at.id,
-        at.stage,
-        at.total,
-        short(sha)
-    );
+pub fn commit(id: &str, sha: &str) {
+    println!("commit task={id} sha={}", short(sha));
 }
 
 /// Cycle passed over: git refused the trunk.
@@ -69,11 +43,8 @@ pub fn land(id: &str) {
     println!("land task={id}");
 }
 
-pub fn fail(at: &At, why: &Error) {
-    eprintln!(
-        "fail task={} stage={}/{} cause={why}",
-        at.id, at.stage, at.total
-    );
+pub fn fail(id: &str, why: &Error) {
+    eprintln!("fail task={id} cause={why}");
 }
 
 fn short(sha: &str) -> String {

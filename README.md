@@ -33,9 +33,9 @@ cargo install --path .
      - ANTHROPIC_API_KEY
    ```
 
-2. In the project checkout, write `scswarm.yaml`, `Containerfile.swarm` and `SWARM.yaml`. See [Configure](#configure).
+2. In the project checkout, write `scswarm.yaml` and `SWARM.yaml`. Add `Containerfile.swarm` when `image` names a file to build. See [Configure](#configure).
 
-3. Commit all three on the trunk branch. The swarm reads them from there, never from your working tree.
+3. Commit them on the trunk branch. The swarm reads them from there, never from your working tree.
 
 4. Build the slot set:
 
@@ -97,7 +97,7 @@ The gitdir mounts read-only. `git status`, `git log`, `git diff` work. `git add`
 
 ## Configure
 
-Four files. Binding formats: [docs/spec/contract.md](docs/spec/contract.md).
+Host file, `scswarm.yaml`, `SWARM.yaml`, and a Containerfile when you build the image. Binding formats: [docs/spec/contract.md](docs/spec/contract.md).
 
 ### Host file: `~/.config/scswarm/<project>.yaml`
 
@@ -129,6 +129,7 @@ merge:
   - "Resolve every conflict of the merge of {parent} into {id}."
 ```
 
+- `image` naming a path on the trunk ref builds at `init`. Any other value names an image podman resolves.
 - `exec` runs in the container with the prompt appended as the last argument. It must print JSON holding `session_id` and `result`, or plain text taken as `result`.
 - `--disallowedTools Agent Skill SendMessage ListAgents RemoteTrigger PushNotification` keeps the session flat: no subagent, no skill, no message to another session. A subagent burns the turn budget and writes files the transcript never sees.
 - `resume` is added from the second turn on, so one row is one session.
@@ -137,7 +138,7 @@ merge:
 
 ### `Containerfile.swarm` in the project root
 
-The image every slot runs. It must hold the agent CLI, its settings, and every tool your build needs. `init` builds it from a throwaway worktree of the trunk ref, so untracked and ignored files stay out of the build context.
+Needed when `image` names a path on the trunk ref. The image every slot runs. It must hold the agent CLI, its settings, and every tool your build needs. `init` builds it from a throwaway worktree of the trunk ref, so untracked and ignored files stay out of the build context.
 
 Start from [Containerfile.swarm](Containerfile.swarm) in this repo and change 3 things: the package list, `ARG PROJECT`, `ARG WORKERS`. `init` passes no build argument, so both values live in the file.
 
@@ -209,7 +210,7 @@ The board. YAML sequence, read and never written by the tool. Empty board: `[]`.
 scswarm init PROJECT       bare repo, image, slot worktrees and containers
 scswarm serve PROJECT      foreground loop; run under systemd
 scswarm status PROJECT     one line per row: id, state, branch, worker
-scswarm log PROJECT ID     transcript, one block per turn
+scswarm log PROJECT ID     transcripts, one block per turn: merge session, then row session
 scswarm reset PROJECT ID   delete swarm/<id>, every dependant branch, their land refs and marks
 ```
 
@@ -243,7 +244,7 @@ systemctl --user enable --now scswarm@PROJECT
 - One `serve` per project. Two share the slot worktrees and fight over the same branches. Nothing locks them.
 - A task stacked on a rejected parent needs `reset`.
 - One configured agent means one model both writes and audits the work.
-- Turn tries cap at 3, counted in tries. No token or time budget: agent flags in `exec` carry any cap.
+- Turn tries cap at 3, counted in tries. A failed try waits 1 s, doubling to 60 s. No token or time budget: agent flags in `exec` carry any cap.
 - The commit message is the agent reply, unchecked. Agents that wrap it in a code fence produce a commit subject of "```".
 - A trunk change leaves running rows on their old base.
 - Mounts use the host path inside the container, so a podman machine must share that path.

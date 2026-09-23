@@ -4,7 +4,7 @@ Seen on alpha board, 2026-09-11. Binary built 2026-09-09 18:57, after HEAD `9cce
 
 ## Defect
 
-- `turn.rs` `Turn::run()`: 3 tries, waits 1 s and 2 s. Reads exit code only, not cause.
+- `call.rs` `Call::run()`: prompt step `tries` default 3, `wait` 1 s doubling. `judge()` reads exit code only, not cause.
 - Usage limit holds for whole account. Scheduler treats it as one row failure.
 - `docs/spec/contract.md` states this retry rule as design.
 
@@ -26,4 +26,4 @@ Seen on alpha board, 2026-09-11. Binary built 2026-09-09 18:57, after HEAD `9cce
 
 - Adapter reads rate-limit cause and reset time from agent output.
 - Scheduler pauses all slots until reset time. Row keeps state, no fail mark.
-- Overlap: task `006-harness-adapters` owns adapters.
+- Overlap: task 006, [0-harness-adapters.md](../tasks/backlog/0-harness-adapters.md), owns adapters and the `unavailable` wait.

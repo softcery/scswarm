@@ -5,7 +5,7 @@
 **Why.**
 
 - A row cannot pick its own workflow. `config.rs:27` holds one `stages` list, every row runs all of it; `state.rs:33` takes one `total` for the whole board.
-- Agents copy host trailers into their own commit messages. alpha commit `483038d` carried `Swarm-Task` and `Swarm-Stage: 3/3` twice, `parse_trailer` joined the two values, `trailer_commit` skipped to the stage 2 commit, stage 3 ran again: 6 min 57 s and one extra commit. See [issue-trailer-duplicate.md](../../notes/issue-trailer-duplicate.md).
+- Agents copy host trailers into their own commit messages. alpha commit `483038d` carried `Swarm-Task` and `Swarm-Stage: 3/3` twice, `parse_trailer` joined the two values, `trailer_commit` skipped to the stage 2 commit, stage 3 ran again: 6 min 57 s and one extra commit.
 - A markdown cell holds one line and no `|` (`contract.md:129`). A turn is a prompt, and a prompt wants paragraphs.
 
 **Done when.** `cargo test` and `make lint` clean; `grep -rn 'stage\|Stage\|trailer\|Trailer\|ron' src/` returns nothing; every check under "Verify by hand" passes.

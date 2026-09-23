@@ -1,14 +1,13 @@
 # 006 — harness adapters
 
-**What.** Agent gains `command` and `reply` templates, a board turn becomes text or command. Any agent harness runs from `scswarm.yaml` with no code change.
+**What.** Agent gains `command` and `reply` templates, a prompt step becomes text or command. Any agent harness runs from `scswarm.yaml` with no code change.
 
 **Why.** Tool fits one harness today.
 
-- `turn.rs:138` `parse()` reads one JSON object, keys `session_id` and `result`. opencode `--format json` prints JSONL events (`sessionID` per event, text in `part.text`), so session never parses and every turn opens a fresh session. Stage context dies between turns.
-- `turn.rs:92` builds `sh -c '<exec> "$@"'` with the prompt last. opencode `run.ts` has no slash parsing: a command needs `--command <name>` with the message as arguments. So `/execute {task}` arrives as chat text and `.claude/commands/execute.md` never loads.
-- `stage.rs:13` `COMMIT_PROMPT` puts prompt text in `src/`. Invariant `architecture.md:21` bars it. 013 moves that text to config field `commit`.
-- `stage.rs:117` takes the commit reply as prose. Subject = "```" on 29 of 34 stage commits across two boards; commit `483038d` carries agent-written `Swarm-Task`. See [issue-commit-message-unchecked.md](../../notes/issue-commit-message-unchecked.md).
-- `turn.rs:71` reads exit code alone. Account usage limit exits 1, three tries in 6 s mark the row failed, row idle 4 h 55 min. See [issue-usage-limit-fails-row.md](../../notes/issue-usage-limit-fails-row.md).
+- `call.rs:256` `parse()` reads one JSON object, keys `session_id` and `result`. opencode `--format json` prints JSONL events (`sessionID` per event, text in `part.text`), so session never parses and every turn opens a fresh session. Row context dies between steps.
+- `call.rs:226` `Turn::argv()` builds `sh -c '<exec> "$@"'` with the prompt last. opencode `run.ts` has no slash parsing: a command needs `--command <name>` with the message as arguments. So `/execute {task}` arrives as chat text and `.claude/commands/execute.md` never loads.
+- `script.rs` takes the agent commit reply as prose; `call.rs:134` `judge()` rejects a blank one alone. Subject = "```" on 29 of 34 stage commits across two boards; commit `483038d` carries agent-written `Swarm-Task`. See [issue-commit-message-unchecked.md](../../notes/issue-commit-message-unchecked.md).
+- `call.rs:134` `judge()` reads exit code alone. Account usage limit exits 1, three tries in 6 s mark the row failed, row idle 4 h 55 min. See [issue-usage-limit-fails-row.md](../../notes/issue-usage-limit-fails-row.md).
 
 **Done when.** One board runs rows with `agent` `claude` and `agent` `opencode` at once, each lands its task, and `scswarm log ID` shows one session per row for both plus a commit message with no event noise. `scswarm.yaml` carries a third agent, `codex`, and `cargo test` parses a captured codex JSONL reply to one session and one message. `grep -ri 'claude\|opencode\|codex' src/` returns nothing. A live codex row belongs to 012: account quota on this workstation resets 2026-09-22.
 
@@ -72,41 +71,40 @@ agents:
         has: usage limit
 ```
 
-- Turn is `text` or `command`, read from the board row. The commit turn comes from config field `commit`, appended by the host, so `src/` holds no prompt text.
+- Prompt step is text or `command`, a new step key beside `prompt`. The agent commit step sends config field `commit`, so `src/` holds no prompt text.
 - `command.text` puts name and args in the message. `command.argv` puts the name in argv, args stay the message. A harness with no command system uses `text: "Read .claude/commands/{name}.md, follow it. Arguments: {args}"`, so the model opens the file itself. Three placements cover every harness.
 - `Match { at, text }`, `text` is `is` or `has`. `at` is an RFC 6901 pointer, `serde_json::Value::pointer` reads it, no new dependency. `is` compares the scalar's text form whole, `has` asks substring. Claude `429` is a number, opencode `text` and codex `agent_message` are exact strings, codex states its limit in prose with a reset date, so both forms carry work.
 - `Field { when: Option<Match>, at: String }`. A line counts when `when` is absent or matches; `at` reads the value out of that line. One picker, one reader, three uses: `result`, `unavailable`, and the per-line problem 011 names.
 - `reply: (session: Field, result: Field)`. Session takes the first counting line, result the last. Pick rule stays in code until a harness needs another.
 - `commit: Option<CommitReply { args: String, reply: String }>`. `{schema}` = tool-owned JSON schema `{ subject: string, body: string }`, rendered by `serde_json::to_string`, compact, no whitespace, so it stays one argv token through the whitespace split. `reply` points at the object. Absent: host takes `result` whole as message; harness with no structured output, stated limit.
-- `unavailable: Option<Match>`, tested on non-zero exits alone. A matching line is an environment failure, not a row failure. Both limits verified non-zero: codex exit 1 on 2026-09-16, claude exit 1 in [issue-usage-limit-fails-row.md](../../notes/issue-usage-limit-fails-row.md). Testing successful replies too would let an agent that writes the words "usage limit" into a commit message hold its slot forever. Absent: every non-zero exit is a row failure, as today.
+- `unavailable: Option<Match>`, tested on non-zero exits alone. A matching line is an environment failure, not a step failure. Both limits verified non-zero: codex exit 1 on 2026-09-16, claude exit 1 in [issue-usage-limit-fails-row.md](../../notes/issue-usage-limit-fails-row.md). Testing successful replies too would let an agent that writes the words "usage limit" into a commit message hold its slot forever. Absent: every non-zero exit is a row failure, as today.
 
-Commit message, host-built from the object: subject, blank line, body. Boundary check, failed check = failed try under the cap: subject one line, non-empty. 013 writes no trailer, so the `swarm-` key space needs no guard.
+Commit message, host-built from the object: subject, blank line, body. Boundary check, failed check = failed try under the cap: subject one line, non-empty. 010 writes no trailer, so the `swarm-` key space needs no guard.
 
 Unavailable, wait in place:
 
-- `turn.rs`: reply matches `unavailable` = sleep `hold` seconds from the host file, same turn again. No try counted. Transcript entry holds the reply, event `hold` names the elapsed wait.
-- Session, worktree, stage position stay. A limit in turn 4 of 5 costs nothing when it lifts.
-- Other slots: `serve` keeps assigning. A new row hits the limit at its first turn and waits the same way. Cost: one call per slot per `hold`.
+- `call.rs`: reply matches `unavailable` = sleep `hold` seconds from the host file, same step again. No try counted. Transcript entry holds the reply, event `hold` names the elapsed wait.
+- Session, worktree, step position stay. A limit in step 4 of 5 costs nothing when it lifts.
+- Other slots: `serve` keeps assigning. A new row hits the limit at its first agent step and waits the same way. Cost: one call per slot per `hold`.
 - `status`: a slot whose last transcript entry is a hold reads `held`, not `running`.
 - Reset time in the reply is prose, "resets 7am (UTC)". Not parsed. Fixed interval.
-- Aborting to the pool instead loses the stage in flight: worktree resets to the last stage commit, session dies. Rejected.
+- Aborting to the pool instead loses the row in flight: replay from base, session dies. Rejected.
 
-`turn.rs`:
+`call.rs`:
 
-- Rename struct `Turn` to `Call`; the board turn type takes the name. `script.rs` updates.
 - Argv order: `exec` tokens, command argv, resume argv, prompt. Prompt stays one argv token, so agent text never reaches the shell.
 - `parse()`: read stdout line by line, skip lines that hold no JSON, apply the fields. Session = first counting line, result = last.
 - `reply` absent = plain-text harness: result is the whole stdout trimmed, as today. `reply.result` set and no line counts = failed try under the cap, never a fallback. A wrong pointer otherwise passes every commit check of this task: line 1 of a codex stream is `{"type":"thread.started","thread_id":"…"}`, one line, non-empty, no fence, so a JSON object lands as a commit subject.
-- Template substitution reuses `turn.rs:99`: split on whitespace, replace the slot per token. `resume` uses it for `{session}`, `Command::Argv` for `{name}`.
+- Template substitution reuses `Turn::argv()`: split on whitespace, replace the slot per token. `resume` uses it for `{session}`, `Command::Argv` for `{name}`.
 
-`script.rs`: renders a board turn into prompt text plus command argv. A text turn goes as written. A command turn renders through the agent's `command`. The appended commit turn sends the config text, then the host commits with the reply.
+`script.rs`: renders a prompt step into prompt text plus command argv. A text step goes as written. A command step renders through the agent's `command`. The agent commit step sends the config text, then the host commits with the reply.
 
 Checks in `config.rs`:
 
 - Every `at` starts with `/`. Error names the field: `reply.session.at`, `reply.result.at`, `reply.result.when.at`, `unavailable.at`.
 - `Is` and `Has` text non-empty. Error names the field.
 - `resume` present requires `reply.session`; without an id there is nothing to resume with.
-- A command turn on any row requires every agent to define `command`. Rows pick the agent per row, so any agent can run any row.
+- A command step on any row requires every agent to define `command`. Rows pick the agent per row, so any agent can run any row.
 - `commit.reply` starts with `/`. Error names the field.
 - Host file `hold` must be present when any agent sets `unavailable`. Error names both fields.
 - Rendered prompt trimmed, so `text: "/{name} {args}"` with empty args leaves no trailing space.
@@ -114,26 +112,26 @@ Checks in `config.rs`:
 ## Rules
 
 - Tool learns no harness name and no dialect. Every dialect lives in `scswarm.yaml`.
-- Keep no back-compat. 013 deletes the `{commit}` turn form already.
+- Keep no back-compat. 010 deleted the `{commit}` turn form already.
 - No new dependency.
 
 ## Steps
 
-1. `config.rs`: add `Match`, `Text`, `Field`, `Command`; extend `Agent`; write the checks; update the module test. `board.rs`: a turn gains the command form beside plain text.
-2. `turn.rs`: rename `Turn` to `Call`, take command argv, rewrite `parse()` to the pointer rule.
-3. `script.rs`: render both turn kinds, drop `COMMIT_PROMPT`. The appended commit turn adds `commit.args`, reads the object, builds the message, runs the boundary check.
-4. `turn.rs`, `host.rs`, `status.rs`, `event.rs`: `unavailable` match and wait, `hold` field, `held` line, `hold` event.
+1. `config.rs`: add `Match`, `Text`, `Field`, `Command`; extend `Agent`; write the checks; update the module test. `step.rs`: prompt step gains the `command` form beside plain text.
+2. `call.rs`: take command argv, rewrite `parse()` to the pointer rule.
+3. `script.rs`: render both prompt forms. The agent commit step adds `commit.args`, reads the object, builds the message. `call.rs` `Fault::Blank` grows into the boundary check.
+4. `call.rs`, `host.rs`, `status.rs`, `event.rs`: `unavailable` match and wait, `hold` field, `held` line, `hold` event.
 5. `scswarm.yaml`: `opencode` and `codex` agents, mount `~/.local/share/opencode/auth.json:/home/dev/.local/share/opencode/auth.json`. Bind the file, never the directory: the directory holds session storage and two slots would write one index. Codex takes no mount: host file `env` gains `CODEX_ACCESS_TOKEN`, and the `exec` prelude logs in inside the container, one container per slot, so no file is shared.
 6. `Containerfile.swarm`: `npm install -g opencode-ai @openai/codex`.
 7. Symlink `.opencode/commands` to `.claude/commands`. Formats match: frontmatter plus `$ARGUMENTS` body (`.claude/commands/execute.md:1-5`). Single source, no copies.
-8. `docs/spec/contract.md`: rewrite the `agents.*` and board turn bullets, host file `hold`, name `CODEX_ACCESS_TOKEN` beside `ANTHROPIC_API_KEY` in the `env` example, add the limits below. `docs/refs/architecture.md:33`: new argv order and parse rule.
-9. Tests: `config.rs` parses the three-agent example and names the bad field; `turn.rs` parses a one-object reply, an opencode JSONL reply, and a codex JSONL reply whose stream holds a `reasoning` item and a `command_execution` item after the `agent_message`, so the `when` filter is what picks the message. Nothing else; `script.rs` and `pool.rs` need real podman.
+8. `docs/spec/contract.md`: rewrite the `agents.*` bullets and the prompt row of the step table, host file `hold`, name `CODEX_ACCESS_TOKEN` beside `ANTHROPIC_API_KEY` in the `env` example, add the limits below. `docs/refs/architecture.md` section Step: new argv order and parse rule.
+9. Tests: `config.rs` parses the three-agent example and names the bad field; `call.rs` parses a one-object reply, an opencode JSONL reply, and a codex JSONL reply whose stream holds a `reasoning` item and a `command_execution` item after the `agent_message`, so the `when` filter is what picks the message. Nothing else; `script.rs` and `pool.rs` need real podman.
 10. Verify: `cargo build`, `cargo test`, `make lint`, then a live board with one claude row and one opencode row.
 
 ## Limits
 
 - Prompt rides as the last argv token. A harness that reads the prompt from stdin only does not fit. Add an `input` field when such a harness turns up.
-- Harness with no session resume: leave `resume` absent, every turn opens a fresh session, stage context is lost between turns.
+- Harness with no session resume: leave `resume` absent, every agent step opens a fresh session, row context is lost between steps.
 - Result must reach stdout. A harness that writes the final message to a file only does not fit.
 - opencode wraps a space-holding argv in literal quotes (`run.ts`: `arg.includes(" ") ? '"' + … + '"'`), so the model sees the prompt quoted.
 - opencode emits one `text` part per text block. Text before a tool call in the final turn drops out of a commit message, since result takes the last hit.
@@ -149,7 +147,7 @@ Checks in `config.rs`:
 Unverified, check on first run:
 
 - Claude CLI 2.1.263 `--json-schema`: field that carries the object in `--output-format json`. `/structured_output` above is a guess. Read one live reply before writing the pointer.
-- 013 lands first: it sets the file format, puts turns on the board row, and deletes both the `Commit` turn kind and plan 010.
+- 010 landed: file format, turns on the board row, `Commit` turn kind gone. 014 landed: step list, policy fields, `call.rs`.
 
 - codex 0.154.0, read from the binary and one live run on 2026-09-16: events tag on `type`, values `thread.started`, `turn.started`, `turn.completed`, `turn.failed`, `item.started`, `item.updated`, `item.completed`, `error`. Session id is `thread_id` on `thread.started`. Item kinds number 18, `agent_message` among `reasoning`, `command_execution`, `file_change`, `web_search`, `mcp_tool_call`.
 - codex item tag key is `item_type` or `type`: unverified, quota spent. 012 reads one live stream and corrects `reply.result.when.at` if wrong. The failed-try rule above keeps a wrong key loud.

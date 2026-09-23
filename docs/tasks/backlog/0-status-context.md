@@ -4,7 +4,7 @@
 
 **Why.** `status` shows `running` and nothing of session size. The transcript keeps no usage, so a per-turn breakdown needs the harness session files inside the slot containers.
 
-- `turn.rs:73` records `session` and `result` on a successful try. Reply `usage` drops.
+- `call.rs:158` `Call::passed()` records `session` and `result` on a successful try. Reply `usage` drops.
 - Claude Code 2.1.263, `-p --output-format json`, haiku, 2 API calls: top-level `usage` sums the calls. `input_tokens` 18 = 10 + 8, `cache_creation_input_tokens` 17609 = 17220 + 389. That is turn usage, not context fill.
 - Same reply: last call prompt = 8 + 17220 + 389 = 17617 tokens, found only in `usage.iterations[0]`. Field has no docs; a pointer cannot pick the last element of a longer array.
 - Window sits at `modelUsage.<model id>.contextWindow`. Key varies per model; no pointer reaches it. `claude-opus-5` reads 1000000.
@@ -13,7 +13,7 @@
 - alpha ui-00 to ui-05 and beta api-01-transport, 23 sessions: peak fill 57k to 588k, no compaction. Read from Claude Code session files inside the slot containers; `~/.claude` has no mount, so `init` drops them with the container.
 - Failed tries spend too: alpha ui-01 stage 1 turn 1, first try, `total_cost_usd` 20.74 before a 429.
 
-**Done when.** Live board, one claude row mid-stage:
+**Done when.** Live board, one claude row mid-session:
 
 - `scswarm status` `context` cell equals input + cache_read + cache_creation of the last `assistant` event of that row's latest try, over `window`.
 - `scswarm log ID` header of each try carries the `usage` fields and `total_cost_usd` of its `result` event, failed tries included.
@@ -58,12 +58,12 @@ agents:
 
 `transcript.rs`, new, sole reader and writer of transcript files:
 
-- `Entry` moves here from `turn.rs`, gains `context: Option<Context>`, `Context { used: u64, window: Option<u64> }`, and `usage: Vec<(String, Number)>`, skipped when empty. Window rides in the entry, so readers resolve no agent and a later config change leaves old entries true.
-- `append(path, &Entry)`: body of `Turn::record`.
-- `read(path) -> Result<Vec<Line>>`, `Line` = `Entry` or raw text, so `log` keeps printing a line that parses as no entry. Absent file keeps the `log.rs:71` rule: `Invalid`.
+- `Entry` moves here from `call.rs`, gains `context: Option<Context>`, `Context { used: u64, window: Option<u64> }`, and `usage: Vec<(String, Number)>`, skipped when empty. Window rides in the entry, so readers resolve no agent and a later config change leaves old entries true.
+- `append(path, &Entry)`: body of `Call::record`.
+- `read(path) -> Result<Vec<Line>>`, `Line` = `Entry` or raw text, so `log` keeps printing a line that parses as no entry. Absent file keeps the `log.rs:27` rule: `Invalid`.
 - `context(path) -> Result<Option<Context>>`: last entry that carries `context`. Absent file = `None`.
 
-`turn.rs`:
+`call.rs`:
 
 - `parse()` runs on every try, failed ones included. `Reply` gains `context: Option<u64>` and `usage: Vec<(String, Number)>`.
 - `record` calls `transcript::append`.
@@ -87,14 +87,14 @@ agents:
 
 ## Steps
 
-1. `transcript.rs`: move `Entry` and the append body out of `turn.rs`, the read body out of `log.rs`. Add `Context`, `usage`, `context()`.
+1. `transcript.rs`: move `Entry` and the append body out of `call.rs`, the read body out of `log.rs`. Add `Context`, `usage`, `context()`.
 2. `config.rs`: `reply.context`, `reply.usage`, agent `window`. Checks, each error names the field: pointer starts with `/`; `usage` name non-empty, no whitespace, no `=`; `window` above 0.
-3. `turn.rs`: parse on every try, `Reply.context`, `Reply.usage`, sum rule, record through `transcript`.
+3. `call.rs`: parse on every agent try, `Reply.context`, `Reply.usage`, sum rule, record through `transcript`.
 4. `status.rs`: last column, cell rule, doc comment.
 5. `log.rs`: read through `transcript`, header fields.
 6. `scswarm.yaml`: claude `exec` to `stream-json --verbose`, `reply.context`, `reply.usage`, `window`.
 7. `docs/spec/contract.md`: `agents.*` bullets for `reply.context`, `reply.usage` and `window`; CLI `status` line adds `context`, `log` line adds the header fields; limits below. `docs/refs/architecture.md`: Known limits gains the stale-value limit.
-8. Test: `turn.rs` parse of a JSONL reply with two `assistant` events and one `result` event: context = second event sum, usage = `result` fields. Extends the 006 JSONL fixture.
+8. Test: `call.rs` parse of a JSONL reply with two `assistant` events and one `result` event: context = second event sum, usage = `result` fields. Extends the 006 JSONL fixture.
 9. Verify: `cargo build`, `cargo test`, `make lint`, live board as Done when.
 
 ## Limits
@@ -110,6 +110,6 @@ agents:
 
 ## Notes
 
-- 013 lands first, then 006: 013 sets the file format and the one-session row, 006 brings JSONL `parse()` and the `reply` fields.
+- 006 lands first: it brings JSONL `parse()` and the `reply` fields. 010 and 014 already set the file format, the one-session row and the step list.
 - 006 `unavailable` matches per line under stream-json and on non-zero exits only. `api_error_status` sits on the `result` event alone.
 - `session_id` sits on every stream event, so 006 first-hit rule holds.

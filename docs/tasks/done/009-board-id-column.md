@@ -5,7 +5,7 @@
 **Why.** `board.rs:64` reads a path-like `task` cell as a path and takes its file stem as id. Two effects:
 
 - The tool holds a project layout rule: cell with `/` or `.` and no space is a file path. Invariant `architecture.md:25` bars that.
-- `{task}` hands the agent a path frozen at push time. beta run 2026-09-12: stage 1 moved `docs/tasks/next/api-02-pipeline.yaml` to `done/`, stage 2 and 3 prompts still named `next/`. 2 of 3 rows lost the file, each agent picked a folder itself. See [issue-task-slot-path-goes-stale.md](../../notes/issue-task-slot-path-goes-stale.md).
+- `{task}` hands the agent a path frozen at push time. beta run 2026-09-12: stage 1 moved `docs/tasks/next/api-02-pipeline.yaml` to `done/`, stage 2 and 3 prompts still named `next/`. 2 of 3 rows lost the file, each agent picked a folder itself.
 
 **Done when.** Board `| id | after | agent | task |` parses, `task` holds any text or nothing, `{id}` and `{task}` fill from their cells, `grep -n 'Path\|file_stem' src/board.rs` returns nothing, and a live row with `task` "Search pipeline. Spec in docs/spec/search.md." lands on branch `swarm/<id>`.
 

@@ -139,7 +139,7 @@ Workstation, podman 5.8.4, image `localhost/scswarm/alpha:latest` (claude 2.1.26
 
 ## Limits
 
-- Failure at step N replays steps 1 to N-1. Checkpoints from commit steps belong to [0-turn-checkpoints.md](../backlog/0-turn-checkpoints.md).
+- Failure at step N replays steps 1 to N-1. Checkpoints from commit steps belong to [0-step-checkpoints.md](../backlog/0-step-checkpoints.md).
 - Slots share CPU. Latency numbers from a `run` step carry noise from other slots. Fix in the project: `workers: 1`, or a lock in the script.
 - No `timeout` set = no cap, as today.
 - Sweep kills every process in the container, so no step can leave a server running for a later step. Start and stop it inside one `run`.

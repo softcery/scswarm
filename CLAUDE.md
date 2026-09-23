@@ -1,7 +1,7 @@
 <project>
 # scswarm
 
-Autonomous task swarm for any git project. Board `SWARM.yaml` in the project root lists tasks and dependencies. You push `main`; workers pick ready rows, each in its own worktree and container, run one agent session of scripted turns, commit once, land a branch per row. You merge. Rust CLI, one binary. Project-specific shape lives in that project's `scswarm.yaml`, never here.
+Autonomous task swarm for any git project. Board `SWARM.yaml` in the project root lists tasks and dependencies. You push `main`; workers pick ready rows, each in its own worktree and container, run one session of scripted steps (agent prompts, shell runs, commits), land a branch per row. You merge. Rust CLI, one binary. Project-specific shape lives in that project's `scswarm.yaml`, never here.
 
 All solutions and code must be industry-standard and textbook. No hacks, no crutches, no compromises.
 </project>

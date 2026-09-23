@@ -10,14 +10,14 @@
 
 1. Export `CODEX_ACCESS_TOKEN`, add it to the host file `env`, run `init`, start `serve`.
 2. Capture one live stream: `codex exec --json "reply with the word ping" > codex.jsonl`.
-3. Read the `item.completed` line. Tag key is `item_type` or `type`: set `reply.result.when.at` in `scswarm.yaml` to whichever it is, and correct the `turn.rs` test fixture to the captured lines.
+3. Read the `item.completed` line. Tag key is `item_type` or `type`: set `reply.result.when.at` in `scswarm.yaml` to whichever it is, and correct the `call.rs` test fixture to the captured lines.
 4. Confirm `codex login status` inside a slot container exits zero after the `exec` prelude ran once, so the prelude skips the network on later turns.
 5. Confirm `codex exec --json resume <id> <prompt>` continues the session: turn 2 of a row must answer a question about turn 1.
 6. Hit the limit on purpose, or wait for one: the row must read `held` in `status`, keep its worktree and session, and resume when the limit lifts.
 
 ## Notes
 
-- 013 and 006 land first: 013 sets the file format and the one-session row, 006 ships the codex agent.
+- 006 lands first: it ships the codex agent. 010 and 014 already set the file format, the one-session row and the step list.
 
-- A wrong tag key fails the try under the 3-try cap and never lands a commit: 006 drops the whole-stdout fallback for an agent that sets `reply.result`.
+- A wrong tag key fails the try under the prompt `tries` cap, default 3, and never lands a commit: 006 drops the whole-stdout fallback for an agent that sets `reply.result`.
 - `login --with-access-token` accepting a refresh-free token is unverified. If it refuses, the fallback is `OPENAI_API_KEY` through the same `env` list, which costs API-key billing instead of plan quota.

@@ -4,9 +4,9 @@ Seen on beta board, 2026-09-12. Binary built 2026-09-09 18:57, after HEAD `9ccec
 
 ## Defect
 
-- `podman.rs:77` mounts the bare repo `ro`. `slot.rs:10` leaves `.git` as the worktree link into it.
+- `podman.rs:101` mounts the bare repo `ro`. `slot.rs:10` leaves `.git` as the worktree link into it.
 - Read commands work. Any git write fails, since the index sits under the bare repo.
-- Host commits with `git.rs:227` `add --all`, so a plain `mv` lands. Agent has no way to know that.
+- Host commits with `git.rs:203` `add --all`, so a plain `mv` lands. Agent has no way to know that.
 
 ## Evidence
 
@@ -18,12 +18,12 @@ Seen on beta board, 2026-09-12. Binary built 2026-09-09 18:57, after HEAD `9ccec
 ## Effect
 
 - Agent spends turn budget on a git failure it cannot fix.
-- Task file carries a false defect row, which the next stage audits.
+- Task file carries a false defect row, which the next audit step reads.
 - No message states the rule, so each row can repeat it.
 
 ## Fix
 
 - Write the rule where the agent reads it. 2 places carry it today, neither reaches the session: `README.md` "Host owns git" and `docs/refs/architecture.md`.
 - Option A: `init` writes the rule into the slot container image, for example `/home/dev/swarm/README`. Tool text, no project layout.
-- Option B: project states it in `scswarm.ron` stage turns. Tool changes nothing, every project repeats the text.
+- Option B: project states it in its board prompts. Tool changes nothing, every project repeats the text.
 - Option A costs 1 file in `Containerfile.swarm` and covers every project.

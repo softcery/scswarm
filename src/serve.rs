@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 use crate::board::{Board, Row};
 use crate::config::Config;
@@ -12,8 +11,6 @@ use crate::paths::Project;
 use crate::pool::{Job, Pool};
 use crate::slot;
 use crate::state::{self, State};
-
-const POLL: Duration = Duration::from_secs(5);
 
 /// Fetch, derive, fill idle slots with pending rows in board order, sleep. Until killed.
 pub fn serve(repo: &Git, project: &Project) -> Result<()> {
@@ -61,7 +58,7 @@ impl<'a> Server<'a> {
     fn run(mut self) -> Result<()> {
         loop {
             self.cycle()?;
-            thread::sleep(POLL);
+            thread::sleep(self.host.poll);
             self.reload()?;
         }
     }

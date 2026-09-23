@@ -1,9 +1,30 @@
 use std::ffi::OsStr;
-use std::io;
+use std::io::{self, Read};
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
+
+/// Interval between deadline checks of a capped child.
+const TICK: Duration = Duration::from_millis(100);
+
+/// How a captured child ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exit {
+    Code(i32),
+    /// Signal from outside the host.
+    Signal,
+    /// Host kill at deadline.
+    Timeout,
+}
+
+pub struct Captured {
+    pub exit: Exit,
+    pub stdout: String,
+    pub stderr: String,
+}
 
 /// Subprocess mechanics: spawn, exit code, error text. Arguments belong to the caller.
 pub fn run<S: AsRef<OsStr>>(bin: &str, dir: &Path, args: &[S]) -> Result<String> {
@@ -24,11 +45,32 @@ pub fn probe<S: AsRef<OsStr>>(bin: &str, dir: &Path, args: &[S]) -> Result<bool>
     }
 }
 
+/// Run `command` to its end, or kill it at `timeout`. Output captured, stdin closed.
+/// Pipes drain on their own threads, so a chatty child never blocks on a full pipe.
+pub fn capture(mut command: Command, timeout: Option<Duration>) -> Result<Captured> {
+    let program = command.get_program().to_string_lossy().into_owned();
+    let broke = |why: io::Error| unspawned(&program, &program, &why);
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(broke)?;
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+    let exit = wait(&mut child, timeout).map_err(broke)?;
+    Ok(Captured {
+        exit,
+        stdout: collect(stdout).map_err(broke)?,
+        stderr: collect(stderr).map_err(broke)?,
+    })
+}
+
 /// Output goes to operator, not buffer.
 pub fn stream<S: AsRef<OsStr>>(bin: &str, dir: &Path, args: &[S]) -> Result<()> {
     let status = command(bin, dir, args)
         .status()
-        .map_err(|why| unspawned(bin, args, &why))?;
+        .map_err(|why| unspawned(bin, &call(bin, args), &why))?;
     if !status.success() {
         return Err(failed(bin, args, &format!("exit {}", code(status.code()))));
     }
@@ -38,7 +80,7 @@ pub fn stream<S: AsRef<OsStr>>(bin: &str, dir: &Path, args: &[S]) -> Result<()> 
 fn output<S: AsRef<OsStr>>(bin: &str, dir: &Path, args: &[S]) -> Result<Output> {
     command(bin, dir, args)
         .output()
-        .map_err(|why| unspawned(bin, args, &why))
+        .map_err(|why| unspawned(bin, &call(bin, args), &why))
 }
 
 fn command<S: AsRef<OsStr>>(bin: &str, dir: &Path, args: &[S]) -> Command {
@@ -47,10 +89,50 @@ fn command<S: AsRef<OsStr>>(bin: &str, dir: &Path, args: &[S]) -> Command {
     command
 }
 
-fn unspawned<S: AsRef<OsStr>>(bin: &str, args: &[S], why: &io::Error) -> Error {
+/// Deadline passed: kill, reap, report `Timeout`.
+fn wait(child: &mut Child, timeout: Option<Duration>) -> io::Result<Exit> {
+    let Some(timeout) = timeout else {
+        return child.wait().map(exit);
+    };
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Some(status) = child.try_wait()? {
+            return Ok(exit(status));
+        }
+        thread::sleep(TICK);
+    }
+    child.kill()?;
+    child.wait()?;
+    Ok(Exit::Timeout)
+}
+
+fn exit(status: ExitStatus) -> Exit {
+    status.code().map_or(Exit::Signal, Exit::Code)
+}
+
+fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> JoinHandle<io::Result<Vec<u8>>> {
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = pipe {
+            pipe.read_to_end(&mut bytes)?;
+        }
+        Ok(bytes)
+    })
+}
+
+fn collect(reader: JoinHandle<io::Result<Vec<u8>>>) -> io::Result<String> {
+    let bytes = reader
+        .join()
+        .map_err(|_| io::Error::other("pipe reader panicked"))??;
+    Ok(text(&bytes))
+}
+
+/// `context` names the call in the error: argv for host tools, program alone
+/// where argv carries agent text.
+fn unspawned(bin: &str, context: &str, why: &io::Error) -> Error {
     match why.kind() {
         io::ErrorKind::NotFound => Error::Failed(format!("{bin} must sit on PATH")),
-        _ => failed(bin, args, &why.to_string()),
+        _ => Error::Failed(format!("{context}: {why}")),
     }
 }
 
@@ -64,7 +146,11 @@ fn fault(out: &Output) -> String {
 }
 
 fn failed<S: AsRef<OsStr>>(bin: &str, args: &[S], why: &str) -> Error {
-    Error::Failed(format!("{bin} {}: {why}", line(args)))
+    Error::Failed(format!("{}: {why}", call(bin, args)))
+}
+
+fn call<S: AsRef<OsStr>>(bin: &str, args: &[S]) -> String {
+    format!("{bin} {}", line(args))
 }
 
 fn line<S: AsRef<OsStr>>(args: &[S]) -> String {

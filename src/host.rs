@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -8,11 +9,16 @@ use crate::git;
 use crate::paths::{self, Project};
 use crate::yaml;
 
+/// Seconds between loop cycles when the host file sets none.
+const POLL: u64 = 5;
+
 /// What the swarm runs on. Only reader of the host file.
 #[derive(Debug)]
 pub struct Host {
     pub remote: Remote,
     pub slots: Slots,
+    /// Pause between loop cycles. Reloads each cycle.
+    pub poll: Duration,
 }
 
 /// Trunk source, reloaded each cycle. Fields become `remote.origin.url` and
@@ -61,6 +67,8 @@ struct Written {
     mounts: Vec<Mount>,
     #[serde(default)]
     env: Vec<String>,
+    #[serde(default)]
+    poll: Option<u64>,
 }
 
 impl Host {
@@ -133,6 +141,12 @@ impl Written {
                 "field `workers` must be a count of 1 or more",
             ));
         }
+        if self.poll == Some(0) {
+            return Err(invalid(
+                file,
+                "field `poll` must be seconds, 1 or more, or stay absent",
+            ));
+        }
         self.check_env(file)
     }
 
@@ -174,6 +188,7 @@ impl Written {
                 mounts,
                 env: self.env,
             },
+            poll: Duration::from_secs(self.poll.unwrap_or(POLL)),
         })
     }
 }

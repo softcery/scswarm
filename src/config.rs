@@ -6,6 +6,7 @@ use crate::error::{Error, Result};
 use crate::git::{self, Git};
 use crate::paths::Project;
 use crate::podman;
+use crate::step::{self, Defaults, Step};
 use crate::yaml;
 
 pub const FILE: &str = "scswarm.yaml";
@@ -16,17 +17,17 @@ pub const PARENT_SLOT: &str = "{parent}";
 pub const SESSION_SLOT: &str = "{session}";
 
 /// Project settings. Only reader of `scswarm.yaml`.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub struct Config {
     pub image: String,
     pub default_agent: String,
     pub agents: BTreeMap<String, Agent>,
-    /// Last turn of every session: asks for the message the host commits with.
+    /// Prompt of every agent commit step: asks for the message the host commits with.
     pub commit: String,
-    /// Turns that resolve a conflicted parent merge. Absent: conflict drops branch.
-    #[serde(default)]
-    pub merge: Option<Vec<String>>,
+    /// Policy per step kind, under every step field.
+    pub defaults: Defaults,
+    /// Steps that resolve a conflicted parent merge. Absent: conflict drops branch.
+    pub merge: Option<Vec<Step>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,6 +36,20 @@ pub struct Agent {
     pub exec: String,
     #[serde(default)]
     pub resume: Option<String>,
+}
+
+/// File as written. Settles into `Config` once checked.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Written {
+    image: String,
+    default_agent: String,
+    agents: BTreeMap<String, Agent>,
+    commit: String,
+    #[serde(default)]
+    defaults: Defaults,
+    #[serde(default)]
+    merge: Option<Vec<step::Written>>,
 }
 
 impl Config {
@@ -46,13 +61,13 @@ impl Config {
     }
 
     pub fn parse(text: &str) -> Result<Self> {
-        let config: Config = yaml::parse(FILE, text)?;
-        config.check()?;
-        Ok(config)
+        let written: Written = yaml::parse(FILE, text)?;
+        written.check()?;
+        written.settle()
     }
 
-    /// Image the slots run, in the form podman reports. `image` naming a file on
-    /// trunk is one `init` builds, anything else an image podman resolves.
+    /// Image slots run, in podman's reported form. `image` naming a trunk file:
+    /// `init` builds it. Anything else: podman resolves it.
     pub fn image_name(&self, repo: &Git, project: &Project) -> Result<String> {
         Ok(match repo.has_path(git::TRUNK, &self.image)? {
             true => podman::tag(project),
@@ -69,9 +84,11 @@ impl Config {
     }
 
     pub fn agent_keys(&self) -> String {
-        self.agents.keys().cloned().collect::<Vec<_>>().join(", ")
+        keys(&self.agents)
     }
+}
 
+impl Written {
     fn check(&self) -> Result<()> {
         if self.image.trim().is_empty() {
             return Err(invalid(
@@ -80,11 +97,11 @@ impl Config {
         }
         if self.commit.trim().is_empty() {
             return Err(invalid(
-                "field `commit` must hold the turn that asks for a commit message",
+                "field `commit` must hold the prompt that asks for a commit message",
             ));
         }
-        self.check_agents()?;
-        self.check_merge()
+        self.defaults.check().map_err(|what| invalid(&what))?;
+        self.check_agents()
     }
 
     fn check_agents(&self) -> Result<()> {
@@ -104,32 +121,35 @@ impl Config {
                 )));
             }
         }
-        if !self.knows_agent(&self.default_agent) {
+        if !self.agents.contains_key(&self.default_agent) {
             return Err(invalid(&format!(
                 "field `default_agent` must name a key of `agents`: {}",
-                self.agent_keys()
+                keys(&self.agents)
             )));
         }
         Ok(())
     }
 
-    fn check_merge(&self) -> Result<()> {
-        let Some(turns) = self.merge.as_deref() else {
-            return Ok(());
-        };
-        if turns.is_empty() {
-            return Err(invalid(
-                "field `merge` must hold one turn or more, or stay absent",
-            ));
-        }
-        match turns.iter().position(|turn| turn.trim().is_empty()) {
-            Some(index) => Err(invalid(&format!(
-                "field `merge` turn {} must hold the text sent to the agent",
-                index + 1
-            ))),
-            None => Ok(()),
-        }
+    fn settle(self) -> Result<Config> {
+        let merge = self
+            .merge
+            .as_deref()
+            .map(|written| step::settle("merge", written, &self.defaults))
+            .transpose()
+            .map_err(|what| invalid(&what))?;
+        Ok(Config {
+            image: self.image,
+            default_agent: self.default_agent,
+            agents: self.agents,
+            commit: self.commit,
+            defaults: self.defaults,
+            merge,
+        })
     }
+}
+
+fn keys(agents: &BTreeMap<String, Agent>) -> String {
+    agents.keys().cloned().collect::<Vec<_>>().join(", ")
 }
 
 fn invalid(what: &str) -> Error {
@@ -148,8 +168,13 @@ agents:
     exec: claude --model opus -p --output-format json
     resume: --resume {session}
 commit: "Reply with the commit message for the work in this session. Message only."
+defaults:
+  prompt: { tries: 3, timeout: 3600 }
+  run: { tries: 1, timeout: 7200 }
 merge:
   - "Resolve every conflict of the merge of {parent} into {id}."
+  - run: make lint
+  - commit:
 "#;
 
     #[test]
@@ -157,7 +182,7 @@ merge:
         let config = Config::parse(EXAMPLE).expect("example must parse");
         assert_eq!(config.image, "Containerfile.swarm");
         assert!(config.commit.starts_with("Reply with"), "{}", config.commit);
-        assert_eq!(config.merge.expect("merge must parse").len(), 1);
+        assert_eq!(config.merge.expect("merge must parse").len(), 3);
         assert_eq!(
             config.agents["claude"].resume.as_deref(),
             Some("--resume {session}")

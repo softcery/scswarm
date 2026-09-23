@@ -74,6 +74,16 @@ impl Container {
         run(&["start".to_string(), self.name.clone()])
     }
 
+    /// Kill every process at once, start again. Same container, same bake: a
+    /// process a step left behind never reaches the next step.
+    pub fn restart(&self) -> Result<()> {
+        run(&[
+            "restart".to_string(),
+            "--time=0".to_string(),
+            self.name.clone(),
+        ])
+    }
+
     /// Worktree rw, bare repo ro, project mounts rw. Every path is the host path.
     fn run_args(&self, spec: &Spec) -> Result<Vec<String>> {
         let worktree = paths::arg(spec.worktree)?;

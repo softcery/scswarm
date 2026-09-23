@@ -82,15 +82,15 @@ commit: Message only.
     /// Third row waits on the first through the second, fourth waits on nothing.
     const BOARD: &str = "\
 - id: one
-  turns: [Work.]
+  steps: [Work., {commit: Work.}]
 - id: two
   after: [one]
-  turns: [Work.]
+  steps: [Work., {commit: Work.}]
 - id: three
   after: [two]
-  turns: [Work.]
+  steps: [Work., {commit: Work.}]
 - id: four
-  turns: [Work.]
+  steps: [Work., {commit: Work.}]
 ";
 
     #[test]

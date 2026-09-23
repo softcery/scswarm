@@ -62,7 +62,7 @@ cargo install --path .
 
 Job queue with a worker pool. Queue = the board. Workers = slots. State = git.
 
-Every 5 seconds the loop:
+Every `poll` seconds, 5 by default, the loop:
 
 1. Fetches the trunk branch of the checkout at `path` into ref `refs/swarm/trunk`.
 2. Parses `SWARM.yaml` and `scswarm.yaml` at that ref.
@@ -72,7 +72,7 @@ Every 5 seconds the loop:
 
 A slot is a git worktree at `~/swarm/slot/<project>/<n>` plus one long-lived container `scswarm-<project>-<n>`.
 
-One row is one agent session with scripted turns. The host appends the `commit` turn, asks for a message, commits every change and writes ref `refs/swarm/land/<id>` at that commit. A branch with no land ref holds a session cut short: the next cycle drops the branch and replays the row from base.
+One row is one session of scripted steps: agent prompts, shell `run` steps, and commit steps. The host commits at each commit step and writes ref `refs/swarm/land/<id>` at the last one. A branch with no land ref holds a session cut short: the next cycle drops the branch and replays the row from base.
 
 Rows stack. A task whose parent landed but is not merged branches off that parent, so a chain builds while you sleep.
 
@@ -110,8 +110,9 @@ What this machine gives the swarm. Never committed.
 | `workers` | slot count |
 | `mounts` | extra `host:container` binds, read-write. Build caches ride here |
 | `env` | host environment variable names forwarded into every container. Credentials ride here |
+| `poll` | seconds between loop cycles. Absent = 5 |
 
-`path` and `trunk` reload each cycle. `workers`, `mounts` and `env` bake into the containers: change one, run `init` again. `serve` exits 2 when reality and the file disagree.
+`path`, `trunk` and `poll` reload each cycle. `workers`, `mounts` and `env` bake into the containers: change one, run `init` again. `serve` exits 2 when reality and the file disagree.
 
 ### `scswarm.yaml` in the project root
 
@@ -122,19 +123,25 @@ image: Containerfile.swarm
 default_agent: claude
 agents:
   claude:
-    exec: claude --model opus --dangerously-skip-permissions --disallowedTools Agent Skill SendMessage ListAgents RemoteTrigger PushNotification -p --output-format json
+    exec: CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 claude --model opus --dangerously-skip-permissions --disallowedTools Agent Skill SendMessage ListAgents RemoteTrigger PushNotification -p --output-format json
     resume: --resume {session}
 commit: "Reply with the commit message for the work in this session. Message only."
+defaults:
+  run: { timeout: 7200 }
 merge:
   - "Resolve every conflict of the merge of {parent} into {id}."
+  - run: make lint
+  - commit:
 ```
 
 - `image` naming a path on the trunk ref builds at `init`. Any other value names an image podman resolves.
 - `exec` runs in the container with the prompt appended as the last argument. It must print JSON holding `session_id` and `result`, or plain text taken as `result`.
+- `exec` must return only when the turn's work ends. The container restarts after every try, which kills anything left running. `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` stops Claude Code from sending a long command to the background and ending the turn with "the command is running in the background". Without it, the next step runs over half-done work. Measured on claude 2.1.280: switch off, turn ends at 13 s, output file never written; switch on, turn holds 209 s, file written. The switch leaves `nohup cmd &` from Bash open; the restart after the try kills it.
 - `--disallowedTools Agent Skill SendMessage ListAgents RemoteTrigger PushNotification` keeps the session flat: no subagent, no skill, no message to another session. A subagent burns the turn budget and writes files the transcript never sees.
-- `resume` is added from the second turn on, so one row is one session.
-- `commit` closes every session: it asks for a message and the host commits with the reply.
-- `merge` runs in a conflicted worktree when a parent merge fails. It takes `{parent}` and `{id}`. Absent = the branch drops and the row starts over.
+- `resume` is added from the second agent turn on, so one row is one session.
+- `commit` is the prompt of every agent commit step: it asks for a message and the host commits with the reply.
+- `defaults` sets policy per step kind, `prompt` and `run`. See the step fields below.
+- `merge` is a step list run in a conflicted worktree when a parent merge fails. Its prompts take `{parent}` and `{id}`. It ends with a commit step; the first commit closes the merge. Absent = the branch drops and the row starts over.
 
 ### `Containerfile.swarm` in the project root
 
@@ -175,34 +182,56 @@ RUN mkdir -p /home/dev/.claude \
 The board. YAML sequence, read and never written by the tool. Empty board: `[]`.
 
 ```yaml
-- id: parse-10-repair
-  turns:
+- id: rag-04-retriever
+  steps:
     - |
-      Repair the parser.
-      Spec in docs/spec/parser.md.
+      Swap the retriever to hybrid BM25 plus dense.
+      Spec in docs/spec/retrieval.md.
     - &check "Correct, clean, beautiful?"
-- id: parse-10-review
-  after: [parse-10-repair]
+    - commit:
+    - run: make bench > bench/out.txt
+      timeout: 1800
+    - commit: "bench: hybrid retriever"
+- id: rag-04-review
+  after: [rag-04-retriever]
   agent: codex
-  turns:
-    - "Audit the parser repair. Write the plan, close nothing."
-    - &gaps "Audited thoroughly, no gaps? If any, close them."
+  steps:
+    - "Read bench/out.txt. Audit the retriever swap against it. Close every gap."
     - *check
-- id: parse-10-close
-  after: [parse-10-review]
-  turns:
-    - "Close every issue the audit names."
-    - *check
+    - run: make test > test/out.txt 2>&1
+      continue_on_error: true
+    - "Read test/out.txt. Fix every failure."
+    - run: make test
+    - commit:
 ```
 
 - `id` names the branch, the land ref, the transcript and the `after` links. It becomes a git ref, so write it lowercase ASCII with no space. Unique per board.
 - `after` is a list of ids. Absent = ready at once.
 - `agent` is a key of `agents`. Absent = `default_agent`. One row per model is how a second model audits the first.
-- `turns` are the prompts of the session, sent as typed. The host appends the `commit` turn.
-- An anchor (`&check`) carries a repeated turn, an alias (`*check`) points back at it.
-- A turn that starts with `{` must be quoted. YAML reads a bare `- {x}` as a mapping.
+- `steps` run in order in one session. The last step must be a commit.
+- An anchor (`&check`) carries a repeated step, an alias (`*check`) points back at it.
+- A prompt that starts with `{`, or one YAML reads as a bool or number (`yes`, `42`), must be quoted.
 
-`serve` and `status` exit 1 and name the row on a duplicate id, an unknown id in `after`, a dependency loop, an unknown agent, an empty turn list, or an id git refuses as a ref.
+| Step | Form | Does |
+|---|---|---|
+| prompt | a string, or `prompt: <text>` | one agent turn, text as typed |
+| run | `run: <text>` | `sh -c <text>` in the slot container, no agent |
+| agent commit | `commit:` with no value | agent writes the message, host commits |
+| literal commit | `commit: <text>` | host commits with that text |
+
+- Steps share the worktree and nothing else. A `run` step writes a file, a later prompt reads it. Output a later row needs must sit on a tracked path: ignored files miss the commit.
+- The agent session spans the row. `run` and literal commit steps leave it open.
+- Prompt, run and agent commit steps take these fields. Each field is looked up on the step, then in `defaults`, then here.
+
+| Field | Meaning | Default |
+|---|---|---|
+| `tries` | tries before the step fails | prompt and agent commit 3, run 1 |
+| `wait` | seconds after a failed try, doubling | 1 |
+| `wait_max` | cap of `wait` | 60 |
+| `timeout` | seconds before a try is killed | none |
+| `continue_on_error` | `run` alone: move on after spent tries | false |
+
+`serve` and `status` exit 1 and name the row on a duplicate id, an unknown id in `after`, a dependency loop, an unknown agent, or an id git refuses as a ref. A bad step names the row, the step number and the field.
 
 ## Commands
 
@@ -212,7 +241,7 @@ The board. YAML sequence, read and never written by the tool. Empty board: `[]`.
 scswarm init PROJECT       bare repo, image, slot worktrees and containers
 scswarm serve PROJECT      foreground loop; run under systemd
 scswarm status PROJECT     one line per row: id, state, branch, worker
-scswarm log PROJECT ID     transcripts, one block per turn: merge session, then row session
+scswarm log PROJECT ID     transcripts, one block per try: merge session, then row session
 scswarm reset PROJECT ID   delete swarm/<id>, every dependant branch, their land refs and marks
 ```
 
@@ -228,7 +257,7 @@ systemctl --user enable --now scswarm@PROJECT
 
 ## Operate
 
-**Row shows `failed`.** Read `scswarm log PROJECT ID` for the failing turn. A failed row waits for a new trunk tip, so it costs one attempt per push, not one per cycle. To rerun without a push, run `reset`.
+**Row shows `failed`.** Read `scswarm log PROJECT ID` for the failing step. A failed row waits for a new trunk tip, so it costs one attempt per push, not one per cycle. To rerun without a push, run `reset`.
 
 **Rerun a task.** Stop `serve`, run `scswarm reset PROJECT ID`, start `serve`. A worker holding that task recreates the refs at its next commit, so stop it first.
 
@@ -241,12 +270,14 @@ systemctl --user enable --now scswarm@PROJECT
 ## Limits
 
 - Reads the board from the trunk branch only. A row on any other branch stays invisible.
-- A row's failure or crash costs its whole turn list. The replay starts from base.
+- A row's failure or crash costs its whole step list. The replay starts from base.
 - `status` prints one line per row, so a task written as three rows reads as three lines.
 - One `serve` per project. Two share the slot worktrees and fight over the same branches. Nothing locks them.
 - A task stacked on a rejected parent needs `reset`.
 - One configured agent means one model both writes and audits the work.
-- Turn tries cap at 3, counted in tries. A failed try waits 1 s, doubling to 60 s. No token or time budget: agent flags in `exec` carry any cap.
+- A step with no `timeout` runs without limit. No token budget: agent flags in `exec` carry any cap.
+- The container restarts after every try. A server a step needs starts and stops inside one `run`.
+- Slots share the CPU, so timings from a `run` step carry noise from other slots. Set `workers: 1`, or lock inside the script.
 - The commit message is the agent reply, unchecked. Agents that wrap it in a code fence produce a commit subject of "```".
 - A trunk change leaves running rows on their old base.
 - Mounts use the host path inside the container, so a podman machine must share that path.

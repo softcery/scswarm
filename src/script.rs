@@ -1,112 +1,142 @@
 use std::path::Path;
-use std::thread;
 
 use crate::board::Row;
+use crate::call::{Call, Input, Outcome, Turn};
 use crate::config::{self, Agent, Config, ID_SLOT, PARENT_SLOT};
 use crate::error::{Error, Result};
 use crate::event;
 use crate::slot::Slot;
-use crate::turn::{Turn, ATTEMPTS, RETRY_WAIT};
+use crate::step::{Policy, Step};
 
 /// First character of every slot name.
 const SLOT_OPEN: char = '{';
 
-/// Send every turn of one row in one session, then commit the worktree with the
-/// message the agent replies. Returns the commit.
+/// Run every step of one row in one session. Returns the last commit.
 pub fn play(slot: &Slot, config: &Config, row: &Row, log: &Path) -> Result<String> {
-    Session {
-        slot,
-        agent: agent(config, &row.agent)?,
-        id: &row.id,
-        parent: None,
-        log,
-        session: None,
-    }
-    .play(&row.turns, &config.commit)
+    Session::open(slot, config, row, None, log)?.play(&row.steps)
 }
 
-/// Hand conflicted worktree to project merge turns.
+/// Hand conflicted worktree to project merge steps.
 /// `false` when project sets none: caller keeps git error.
 pub fn resolve(slot: &Slot, config: &Config, row: &Row, parent: &str, log: &Path) -> Result<bool> {
-    let Some(turns) = config.merge.as_deref() else {
+    let Some(steps) = config.merge.as_deref() else {
         return Ok(false);
     };
     event::merge(&row.id, parent);
-    Session {
-        slot,
-        agent: agent(config, &row.agent)?,
-        id: &row.id,
-        parent: Some(parent),
-        log,
-        session: None,
-    }
-    .play(turns, &config.commit)?;
+    Session::open(slot, config, row, Some(parent), log)?.play(steps)?;
     Ok(true)
 }
 
 struct Session<'a> {
     slot: &'a Slot,
     agent: &'a Agent,
+    /// Config `commit`: prompt of every agent commit step.
+    commit_prompt: &'a str,
     id: &'a str,
     log: &'a Path,
     /// Branch merged in this session. `None` off merge.
     parent: Option<&'a str>,
-    /// Session id of the agent, known from its first reply on.
+    /// Session id of the agent, known from its first reply on. Spans every step.
     session: Option<String>,
 }
 
-impl Session<'_> {
-    fn play(&mut self, turns: &[String], commit: &str) -> Result<String> {
-        for (index, turn) in turns.iter().enumerate() {
-            self.turn(&self.prompt(turn), index + 1)?;
-        }
-        self.commit(commit, turns.len() + 1)
+impl<'a> Session<'a> {
+    fn open(
+        slot: &'a Slot,
+        config: &'a Config,
+        row: &'a Row,
+        parent: Option<&'a str>,
+        log: &'a Path,
+    ) -> Result<Self> {
+        Ok(Self {
+            slot,
+            agent: agent(config, &row.agent)?,
+            commit_prompt: &config.commit,
+            id: &row.id,
+            log,
+            parent,
+            session: None,
+        })
     }
 
-    /// Board turns go as typed. Merge turns take the two names the tool knows.
-    fn prompt(&self, turn: &str) -> String {
+    /// Steps in order. Every settled list ends with a commit step.
+    fn play(&mut self, steps: &[Step]) -> Result<String> {
+        let mut last = None;
+        for (index, step) in steps.iter().enumerate() {
+            let number = index + 1;
+            match step {
+                Step::Prompt { text, policy } => {
+                    let text = self.fill(text);
+                    let outcome = self.call(Input::Prompt(self.turn(&text)), policy, number)?;
+                    self.reply(outcome)?;
+                }
+                Step::Run { command, policy } => self.run(command, policy, number)?,
+                Step::AgentCommit { policy } => {
+                    let turn = self.turn(self.commit_prompt);
+                    let outcome = self.call(Input::AgentCommit(turn), policy, number)?;
+                    let message = self.reply(outcome)?;
+                    last = Some(self.commit(message.trim())?);
+                }
+                Step::Commit { message } => last = Some(self.commit(message)?),
+            }
+        }
+        Ok(last.expect("a settled step list must end with a commit step"))
+    }
+
+    /// Board steps go as typed. Merge prompts take the two names the tool knows.
+    fn fill(&self, text: &str) -> String {
         match self.parent {
-            Some(parent) => fill(turn, &[(ID_SLOT, self.id), (PARENT_SLOT, parent)]),
-            None => turn.to_string(),
+            Some(parent) => fill(text, &[(ID_SLOT, self.id), (PARENT_SLOT, parent)]),
+            None => text.to_string(),
         }
     }
 
-    fn turn(&mut self, prompt: &str, number: usize) -> Result<String> {
-        let reply = Turn {
+    /// Next agent turn of this session.
+    fn turn<'t>(&'t self, text: &'t str) -> Turn<'t> {
+        Turn {
             agent: self.agent,
-            container: self.slot.container(),
             session: self.session.as_deref(),
-            prompt,
-            dir: self.slot.path(),
-            log: self.log,
-            number,
-            id: self.id,
+            text,
         }
-        .run()?;
+    }
+
+    /// Agent reply: session id kept for the next turn, result returned. Spent
+    /// tries fail the row.
+    fn reply(&mut self, outcome: Outcome) -> Result<String> {
+        let reply = match outcome {
+            Outcome::Done(reply) => reply,
+            Outcome::Spent(why) => return Err(Error::Failed(why)),
+        };
         if reply.session.is_some() {
             self.session = reply.session;
         }
         Ok(reply.result)
     }
 
-    /// Ask agent for the message, commit on host. Blank reply costs one try.
-    fn commit(&mut self, prompt: &str, number: usize) -> Result<String> {
-        for attempt in 1..=ATTEMPTS {
-            let reply = self.turn(prompt, number)?;
-            let message = reply.trim();
-            if message.is_empty() {
-                if attempt < ATTEMPTS {
-                    thread::sleep(RETRY_WAIT);
-                }
-                continue;
-            }
-            let commit = self.slot.commit(message)?;
-            event::commit(self.id, &commit);
-            return Ok(commit);
+    /// Shell step. Spent tries fail row unless `continue_on_error`.
+    fn run(&self, command: &str, policy: &Policy, number: usize) -> Result<()> {
+        match self.call(Input::Run(command), policy, number)? {
+            Outcome::Spent(why) if !policy.continue_on_error => Err(Error::Failed(why)),
+            Outcome::Done(_) | Outcome::Spent(_) => Ok(()),
         }
-        Err(Error::Failed(format!(
-            "agent must reply a commit message of one line or more: {ATTEMPTS} tries, each blank"
-        )))
+    }
+
+    fn call(&self, input: Input, policy: &Policy, number: usize) -> Result<Outcome> {
+        Call {
+            slot: self.slot,
+            input,
+            policy,
+            log: self.log,
+            id: self.id,
+            step: number,
+        }
+        .run()
+    }
+
+    fn commit(&self, message: &str) -> Result<String> {
+        let commit = self.slot.commit(message)?;
+        event::commit(self.id, &commit);
+        Ok(commit)
     }
 }
 

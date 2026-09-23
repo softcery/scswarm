@@ -2,11 +2,12 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use crate::call::Entry;
 use crate::error::{Error, Result};
 use crate::paths::{self, Project, MERGE_LOG, RUN_LOG};
-use crate::turn::Entry;
 
 const PROMPT: &str = ">";
+const RUN: &str = "$";
 const REPLY: &str = "<";
 const FAULT: &str = "!";
 
@@ -43,23 +44,27 @@ fn read(path: &Path) -> Result<Option<String>> {
 }
 
 fn render(name: &str, transcript: &str) -> String {
-    transcript.lines().map(|line| entry(name, line)).collect()
+    transcript.lines().map(|line| block(name, line)).collect()
 }
 
-/// Header, prompt, then reply or failure. A line that parses as no entry stays raw.
-fn entry(name: &str, line: &str) -> String {
-    let Ok(turn) = serde_json::from_str::<Entry>(line) else {
+/// Header, prompt or command, then reply, output and faults. A line that parses
+/// as no entry stays raw.
+fn block(name: &str, line: &str) -> String {
+    let Ok(entry) = serde_json::from_str::<Entry>(line) else {
         return format!("{line}\n");
     };
-    let head = match turn.exit {
-        Some(code) => format!("{name} turn {} exit {code}", turn.turn),
-        None => format!("{name} turn {}", turn.turn),
+    let head = match entry.exit {
+        Some(code) => format!("{name} step {} exit {code}", entry.step),
+        None => format!("{name} step {}", entry.step),
     };
-    let mut lines = vec![head, format!("{PROMPT} {}", turn.prompt.trim())];
+    let mut lines = vec![head];
     let marked = [
-        (REPLY, &turn.result),
-        (REPLY, &turn.stdout),
-        (FAULT, &turn.error),
+        (PROMPT, &entry.prompt),
+        (RUN, &entry.run),
+        (REPLY, &entry.result),
+        (REPLY, &entry.stdout),
+        (FAULT, &entry.stderr),
+        (FAULT, &entry.fault),
     ];
     for (mark, field) in marked {
         if let Some(text) = field.as_deref().map(str::trim).filter(|it| !it.is_empty()) {

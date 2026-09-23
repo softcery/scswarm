@@ -2,9 +2,11 @@ image: Containerfile.swarm
 default_agent: claude
 agents:
   claude:
-    exec: claude --dangerously-skip-permissions --disallowedTools Agent Skill SendMessage ListAgents RemoteTrigger PushNotification -p --output-format json
+    exec: CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 claude --dangerously-skip-permissions --disallowedTools Agent Skill SendMessage ListAgents RemoteTrigger PushNotification -p --output-format json
     resume: --resume {session}
 commit: "Reply with the commit message for the work in this session. Message only."
 merge:
   - "This worktree holds a conflicted merge of branch {parent} into the branch of task {id}. Read both sides, resolve every conflict so both intents survive, run `make lint`."
   - "Conflict markers gone, build and lint clean?"
+  - run: make lint
+  - commit:

@@ -14,15 +14,12 @@ pub fn merge(id: &str, parent: &str) {
     println!("merge task={id} parent={parent}");
 }
 
-pub fn turn(id: &str, number: usize) {
-    println!("turn task={id} turn={number}");
+pub fn step(id: &str, number: usize) {
+    println!("step task={id} step={number}");
 }
 
-pub fn retry(id: &str, number: usize, attempt: usize, exit: Option<i32>) {
-    println!(
-        "retry task={id} turn={number} attempt={attempt} exit={}",
-        exit.map_or_else(|| "none".to_string(), |code| code.to_string())
-    );
+pub fn attempt(id: &str, number: usize, attempt: usize, fault: &str) {
+    println!("attempt task={id} step={number} try={attempt} cause={fault}");
 }
 
 pub fn commit(id: &str, sha: &str) {
@@ -34,7 +31,7 @@ pub fn skip(why: &Error) {
     eprintln!("skip cause={why}");
 }
 
-/// Host file unreadable. The loop runs on the last good copy.
+/// Host file unreadable: loop runs on last good copy.
 pub fn stale(why: &Error) {
     eprintln!("stale cause={why}");
 }

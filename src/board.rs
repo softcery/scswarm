@@ -5,6 +5,7 @@ use serde::Deserialize;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::git::{self, Git};
+use crate::step::{self, Step};
 use crate::yaml;
 
 pub const FILE: &str = "SWARM.yaml";
@@ -15,7 +16,7 @@ pub struct Board {
     rows: Vec<Row>,
 }
 
-/// One row is one agent session: own turns, one commit, one branch.
+/// One row is one session: own steps, one branch, one land ref.
 #[derive(Debug, Clone)]
 pub struct Row {
     /// Key of the row: branch, land ref, fail mark, transcript dir.
@@ -23,8 +24,8 @@ pub struct Row {
     /// Row indices this row waits for, resolved at parse time.
     pub after: Vec<usize>,
     pub agent: String,
-    /// Prompts of the session, sent in order.
-    pub turns: Vec<String>,
+    /// Run in order. The last one commits.
+    pub steps: Vec<Step>,
 }
 
 impl Board {
@@ -66,7 +67,7 @@ struct Written {
     #[serde(default)]
     agent: Option<String>,
     #[serde(default)]
-    turns: Vec<String>,
+    steps: Vec<step::Written>,
 }
 
 impl Written {
@@ -93,30 +94,14 @@ impl Written {
                 ),
             ));
         }
-        self.check_turns(at)
-    }
-
-    fn check_turns(&self, at: usize) -> Result<()> {
-        if self.turns.is_empty() {
-            return Err(self.bad(at, "field `turns` must hold one turn or more"));
-        }
-        match self.turns.iter().position(|turn| turn.trim().is_empty()) {
-            Some(turn) => Err(self.bad(
-                at,
-                &format!(
-                    "field `turns` turn {} must hold the text sent to the agent",
-                    turn + 1
-                ),
-            )),
-            None => Ok(()),
-        }
+        Ok(())
     }
 
     fn agent<'a>(&'a self, config: &'a Config) -> &'a str {
         self.agent.as_deref().unwrap_or(&config.default_agent)
     }
 
-    /// Resolve `after` against the board, own every field.
+    /// Resolve `after` against the board, settle steps against `defaults`.
     fn row(&self, at: usize, index: &BTreeMap<&str, usize>, config: &Config) -> Result<Row> {
         let after = self
             .after
@@ -130,11 +115,13 @@ impl Written {
                 })
             })
             .collect::<Result<Vec<usize>>>()?;
+        let steps = step::settle("steps", &self.steps, &config.defaults)
+            .map_err(|what| self.bad(at, &what))?;
         Ok(Row {
             id: self.id.clone(),
             after,
             agent: self.agent(config).to_string(),
-            turns: self.turns.clone(),
+            steps,
         })
     }
 
@@ -231,22 +218,34 @@ commit: Message only.
 ";
 
     const EXAMPLE: &str = r#"
-- id: parse-10-repair
-  turns:
+- id: rag-04-retriever
+  steps:
     - |
-      Repair the parser.
-      Spec in docs/spec/parser.md.
+      Swap the retriever to hybrid BM25 plus dense.
+      Spec in docs/spec/retrieval.md.
     - &check "Correct, clean, beautiful?"
-- id: parse-10-review
-  after: [parse-10-repair]
+    - commit:
+    - run: make bench > bench/out.txt
+      timeout: 1800
+    - commit: "bench: hybrid retriever"
+- id: rag-04-review
+  after: [rag-04-retriever]
   agent: codex
-  turns:
-    - "Audit the parser repair. Write the plan, close nothing."
+  steps:
+    - "Read bench/out.txt. Audit the retriever swap against it. Close every gap."
     - *check
+    - commit:
 "#;
 
     fn config() -> Config {
         Config::parse(CONFIG).expect("test config must parse")
+    }
+
+    fn prompt(step: &Step) -> &str {
+        match step {
+            Step::Prompt { text, .. } => text,
+            other => panic!("step must be a prompt: {other:?}"),
+        }
     }
 
     #[test]
@@ -255,28 +254,29 @@ commit: Message only.
         let rows = board.rows();
         assert_eq!(rows.len(), 2);
         assert_eq!(
-            rows[0].turns[0],
-            "Repair the parser.\nSpec in docs/spec/parser.md.\n"
+            prompt(&rows[0].steps[0]),
+            "Swap the retriever to hybrid BM25 plus dense.\nSpec in docs/spec/retrieval.md.\n"
         );
+        assert!(matches!(rows[0].steps[3], Step::Run { .. }));
         assert_eq!(rows[0].agent, "claude");
         assert_eq!(rows[1].after, [0]);
         assert_eq!(rows[1].agent, "codex");
-        assert_eq!(rows[1].turns[1], "Correct, clean, beautiful?");
+        assert_eq!(prompt(&rows[1].steps[1]), "Correct, clean, beautiful?");
     }
 
     #[test]
-    fn names_a_row_with_no_turns() {
-        let text = "- id: parse-10-repair\n  turns: []\n";
-        let why = Board::parse(text, &config())
-            .expect_err("an empty turn list must fail")
+    fn names_the_row_and_step_of_a_bad_field() {
+        let text = EXAMPLE.replace("timeout: 1800", "timeout: 0");
+        let why = Board::parse(&text, &config())
+            .expect_err("a zero timeout must fail")
             .to_string();
-        assert!(why.contains("row `parse-10-repair`"), "{why}");
-        assert!(why.contains("`turns`"), "{why}");
+        assert!(why.contains("row `rag-04-retriever`"), "{why}");
+        assert!(why.contains("step 4: field `timeout`"), "{why}");
     }
 
     #[test]
     fn names_the_place_of_a_row_with_no_id() {
-        let text = EXAMPLE.replace("- id: parse-10-review", "- id: \"\"");
+        let text = EXAMPLE.replace("- id: rag-04-review", "- id: \"\"");
         let why = Board::parse(&text, &config())
             .expect_err("an empty id must fail")
             .to_string();
@@ -287,25 +287,25 @@ commit: Message only.
     #[test]
     fn names_the_ids_of_a_loop() {
         let text = EXAMPLE.replace(
-            "- id: parse-10-repair",
-            "- id: parse-10-repair\n  after: [parse-10-review]",
+            "- id: rag-04-retriever",
+            "- id: rag-04-retriever\n  after: [rag-04-review]",
         );
         let why = Board::parse(&text, &config())
             .expect_err("a loop in `after` must fail")
             .to_string();
         assert!(
-            why.contains("parse-10-repair -> parse-10-review -> parse-10-repair"),
+            why.contains("rag-04-retriever -> rag-04-review -> rag-04-retriever"),
             "{why}"
         );
     }
 
     #[test]
     fn names_the_row_that_waits_on_no_row() {
-        let text = EXAMPLE.replace("after: [parse-10-repair]", "after: [parse-99-missing]");
+        let text = EXAMPLE.replace("after: [rag-04-retriever]", "after: [rag-99-missing]");
         let why = Board::parse(&text, &config())
             .expect_err("unknown id must fail")
             .to_string();
-        assert!(why.contains("row `parse-10-review`"), "{why}");
+        assert!(why.contains("row `rag-04-review`"), "{why}");
         assert!(why.contains("`after`"), "{why}");
     }
 }

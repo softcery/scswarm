@@ -4,7 +4,7 @@ Seen on alpha board, 2026-09-11. Seen again on beta board, 2026-09-12. Binary bu
 
 ## Defect
 
-- `script.rs` agent commit step takes `reply.trim()` as message. `call.rs` `judge()` rejects only a blank reply.
+- `script.rs` agent commit step takes `reply.trim()` as message. `call.rs` `Message::reply()` rejects only a blank reply.
 - Config `commit` prompt asks "Message only." Reply format has no check.
 
 ## Evidence

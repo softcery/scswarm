@@ -11,6 +11,8 @@ use crate::host::Slots;
 use crate::paths::Project;
 use crate::slot::Slot;
 use crate::state;
+use crate::step::Outcome;
+use crate::transcript::Transcript;
 use crate::{paths, script};
 
 /// One task on one slot: row and the branches its base needs.
@@ -25,8 +27,11 @@ pub struct Job {
 /// Slot threads and what each holds. The assignment rule lives in the caller.
 pub struct Pool {
     workers: Vec<Worker>,
-    reports: Receiver<usize>,
+    reports: Receiver<Report>,
 }
+
+/// Slot that finished a job. `Err`: git or podman failed, the slot stopped.
+type Report = (usize, Result<()>);
 
 struct Worker {
     jobs: Sender<Job>,
@@ -45,18 +50,19 @@ impl Pool {
         Ok(Self { workers, reports })
     }
 
-    /// Free every slot that finished since the last call. A dead thread is fatal:
-    /// its slot would stay busy for good.
+    /// Free each slot done since last call. Machine fault or dead thread is
+    /// fatal: its slot stays busy for good.
     pub fn collect(&mut self) -> Result<()> {
         let Self { workers, reports } = self;
-        for index in reports.try_iter() {
+        for (index, report) in reports.try_iter() {
             workers[index].id = None;
+            report.map_err(|why| stopped(index, &why.to_string()))?;
         }
         match workers
             .iter()
             .position(|worker| worker.thread.is_finished())
         {
-            Some(index) => Err(stopped(index)),
+            Some(index) => Err(stopped(index, "thread ended")),
             None => Ok(()),
         }
     }
@@ -76,7 +82,10 @@ impl Pool {
         let worker = &mut self.workers[index];
         worker.id = Some(job.row.id.clone());
         event::assign(&job.row.id, index);
-        worker.jobs.send(job).map_err(|_| stopped(index))
+        worker
+            .jobs
+            .send(job)
+            .map_err(|_| stopped(index, "thread ended"))
     }
 }
 
@@ -85,7 +94,7 @@ fn spawn(
     project: &Project,
     index: usize,
     env: &[String],
-    done: Sender<usize>,
+    done: Sender<Report>,
 ) -> Result<Worker> {
     let slot = Slot::attach(project, index, env)?;
     let (jobs, queue) = mpsc::channel();
@@ -99,55 +108,60 @@ fn spawn(
     })
 }
 
-fn stopped(index: usize) -> Error {
-    Error::Failed(format!("slot {index} stopped: restart `scswarm serve`"))
+fn stopped(index: usize, why: &str) -> Error {
+    Error::Failed(format!(
+        "slot {index} stopped: {why}: restart `scswarm serve`"
+    ))
 }
 
-/// Release first: no panic below leaves a branch held. Mark next: spent attempt
-/// must not repeat free. Either failure panics, `collect()` reads it as `stopped`.
+/// Serve jobs until pool drops or machine fault stops slot.
 fn work(
     slot: &Slot,
     repo: &Git,
     project: &Project,
     index: usize,
     queue: &Receiver<Job>,
-    done: &Sender<usize>,
+    done: &Sender<Report>,
 ) {
     for job in queue {
-        let id = job.row.id.clone();
-        let outcome = run(slot, project, &job);
-        if let Err(why) = slot.release() {
-            panic!("slot {index} must detach its worktree after a task: {why}");
-        }
-        let mark = state::fail_ref(&id);
-        let recorded = match outcome {
-            Ok(commit) => {
-                event::land(&id);
-                repo.ref_set(&state::land_ref(&id), &commit)
-                    .and_then(|()| repo.ref_delete(&mark))
-            }
-            Err(why) => {
-                event::fail(&id, &why);
-                repo.ref_set(&mark, &job.base)
-            }
-        };
-        if let Err(why) = recorded {
-            panic!("slot {index} must record the outcome of task {id}: {why}");
-        }
-        if done.send(index).is_err() {
+        let report = attempt(slot, repo, project, &job);
+        let stop = report.is_err();
+        if done.send((index, report)).is_err() || stop {
             return;
         }
     }
 }
 
-/// Branch, then the one session of the row. Returns its commit.
-fn run(slot: &Slot, project: &Project, job: &Job) -> Result<String> {
+/// One row attempt. Release first: no fault below leaves branch held. Then land
+/// ref or fail mark. `Err`: git or podman failed, row not at fault, no mark.
+fn attempt(slot: &Slot, repo: &Git, project: &Project, job: &Job) -> Result<()> {
     let id = job.row.id.as_str();
-    let resolve = |parent: &str| {
-        let log = paths::transcript(project, id, paths::MERGE_LOG)?;
-        script::resolve(slot, &job.config, &job.row, parent, &log)
-    };
-    slot.checkout(&state::branch(id), git::TRUNK, &job.stack, &resolve)?;
-    let log = paths::transcript(project, id, paths::RUN_LOG)?;
-    script::play(slot, &job.config, &job.row, &log)
+    let outcome = run(slot, project, job);
+    slot.release()?;
+    let mark = state::fail_ref(id);
+    match outcome.map_err(|why| Error::Failed(format!("task {id}: {why}")))? {
+        Outcome::Done(commit) => {
+            event::land(id);
+            repo.ref_set(&state::land_ref(id), &commit)?;
+            repo.ref_delete(&mark)
+        }
+        Outcome::Spent(why) => {
+            event::fail(id, &why);
+            repo.ref_set(&mark, &job.base)
+        }
+    }
+}
+
+/// Branch, then the one session of the row. `Done` holds its last commit.
+fn run(slot: &Slot, project: &Project, job: &Job) -> Result<Outcome<String>> {
+    let id = job.row.id.as_str();
+    let merge = Transcript::at(paths::transcript(project, id, paths::MERGE_LOG)?);
+    let resolve = |parent: &str| script::resolve(slot, &job.config, &job.row, parent, &merge);
+    if let Outcome::Spent(why) =
+        slot.checkout(&state::branch(id), git::TRUNK, &job.stack, &resolve)?
+    {
+        return Ok(Outcome::Spent(why));
+    }
+    let transcript = Transcript::at(paths::transcript(project, id, paths::RUN_LOG)?);
+    script::play(slot, &job.config, &job.row, &transcript)
 }

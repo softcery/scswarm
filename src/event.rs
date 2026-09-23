@@ -40,7 +40,7 @@ pub fn land(id: &str) {
     println!("land task={id}");
 }
 
-pub fn fail(id: &str, why: &Error) {
+pub fn fail(id: &str, why: &str) {
     eprintln!("fail task={id} cause={why}");
 }
 

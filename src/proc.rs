@@ -58,7 +58,10 @@ pub fn capture(mut command: Command, timeout: Option<Duration>) -> Result<Captur
         .map_err(broke)?;
     let stdout = drain(child.stdout.take());
     let stderr = drain(child.stderr.take());
-    let exit = wait(&mut child, timeout).map_err(broke)?;
+    let exit = wait(&mut child, timeout).map_err(|why| {
+        stop(&mut child);
+        broke(why)
+    })?;
     Ok(Captured {
         exit,
         stdout: collect(stdout).map_err(broke)?,
@@ -89,12 +92,11 @@ fn command<S: AsRef<OsStr>>(bin: &str, dir: &Path, args: &[S]) -> Command {
     command
 }
 
-/// Deadline passed: kill, reap, report `Timeout`.
+/// Deadline passed: kill, reap, report `Timeout`. Deadline past `Instant` range: none.
 fn wait(child: &mut Child, timeout: Option<Duration>) -> io::Result<Exit> {
-    let Some(timeout) = timeout else {
+    let Some(deadline) = timeout.and_then(|timeout| Instant::now().checked_add(timeout)) else {
         return child.wait().map(exit);
     };
-    let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if let Some(status) = child.try_wait()? {
             return Ok(exit(status));
@@ -104,6 +106,13 @@ fn wait(child: &mut Child, timeout: Option<Duration>) -> io::Result<Exit> {
     child.kill()?;
     child.wait()?;
     Ok(Exit::Timeout)
+}
+
+/// Error path: kill, reap, best effort.
+fn stop(child: &mut Child) {
+    if child.kill().is_ok() {
+        let _ = child.wait();
+    }
 }
 
 fn exit(status: ExitStatus) -> Exit {

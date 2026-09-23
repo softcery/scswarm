@@ -18,6 +18,7 @@ mod slot;
 mod state;
 mod status;
 mod step;
+mod transcript;
 mod yaml;
 
 use clap::{Parser, Subcommand};

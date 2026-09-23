@@ -4,10 +4,10 @@
 
 **Why.** Tool fits one harness today.
 
-- `call.rs:256` `parse()` reads one JSON object, keys `session_id` and `result`. opencode `--format json` prints JSONL events (`sessionID` per event, text in `part.text`), so session never parses and every turn opens a fresh session. Row context dies between steps.
-- `call.rs:226` `Turn::argv()` builds `sh -c '<exec> "$@"'` with the prompt last. opencode `run.ts` has no slash parsing: a command needs `--command <name>` with the message as arguments. So `/execute {task}` arrives as chat text and `.claude/commands/execute.md` never loads.
-- `script.rs` takes the agent commit reply as prose; `call.rs:134` `judge()` rejects a blank one alone. Subject = "```" on 29 of 34 stage commits across two boards; commit `483038d` carries agent-written `Swarm-Task`. See [issue-commit-message-unchecked.md](../../notes/issue-commit-message-unchecked.md).
-- `call.rs:134` `judge()` reads exit code alone. Account usage limit exits 1, three tries in 6 s mark the row failed, row idle 4 h 55 min. See [issue-usage-limit-fails-row.md](../../notes/issue-usage-limit-fails-row.md).
+- `call.rs:255` `parse()` reads one JSON object, keys `session_id` and `result`. opencode `--format json` prints JSONL events (`sessionID` per event, text in `part.text`), so session never parses and every turn opens a fresh session. Row context dies between steps.
+- `call.rs:133` `Turn::argv()` builds `sh -c '<exec> "$@"'` with the prompt last. opencode `run.ts` has no slash parsing: a command needs `--command <name>` with the message as arguments. So `/execute {task}` arrives as chat text and `.claude/commands/execute.md` never loads.
+- `script.rs` takes the agent commit reply as prose; `call.rs:187` `Message::reply()` rejects a blank one alone. Subject = "```" on 29 of 34 stage commits across two boards; commit `483038d` carries agent-written `Swarm-Task`. See [issue-commit-message-unchecked.md](../../notes/issue-commit-message-unchecked.md).
+- `call.rs:238` `judge()` reads exit code alone. Account usage limit exits 1, three tries in 6 s mark the row failed, row idle 4 h 55 min. See [issue-usage-limit-fails-row.md](../../notes/issue-usage-limit-fails-row.md).
 
 **Done when.** One board runs rows with `agent` `claude` and `agent` `opencode` at once, each lands its task, and `scswarm log ID` shows one session per row for both plus a commit message with no event noise. `scswarm.yaml` carries a third agent, `codex`, and `cargo test` parses a captured codex JSONL reply to one session and one message. `grep -ri 'claude\|opencode\|codex' src/` returns nothing. A live codex row belongs to 012: account quota on this workstation resets 2026-09-22.
 

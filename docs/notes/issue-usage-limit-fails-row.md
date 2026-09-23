@@ -4,7 +4,7 @@ Seen on alpha board, 2026-09-11. Binary built 2026-09-09 18:57, after HEAD `9cce
 
 ## Defect
 
-- `call.rs` `Call::run()`: prompt step `tries` default 3, `wait` 1 s doubling. `judge()` reads exit code only, not cause.
+- `call.rs` `Call::ask()`: prompt step `tries` default 3, `wait` 1 s doubling. `judge()` reads exit code only, not cause.
 - Usage limit holds for whole account. Scheduler treats it as one row failure.
 - `docs/spec/contract.md` states this retry rule as design.
 

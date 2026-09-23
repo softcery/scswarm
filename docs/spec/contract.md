@@ -122,8 +122,8 @@ merge:
 ```
 
 - `image`: Containerfile path relative to root, or image name. Must hold every tool the agents and the project build need. `init` builds it from a throwaway worktree of the trunk ref, so untracked and ignored files stay out of the build context.
-- `agents.*.exec`: command run inside the container. Prompt appended as last argument. Must print JSON with `session_id` and `result` on stdout, or plain text as `result`. Must return only after the turn's work ends: a harness that sends work to the background and returns leaves the next step over half-done work, and the restart after the try kills that work.
-- `agents.*.resume`: arguments added from second turn on. `{session}` = id from first reply.
+- `agents.*.exec`: command run inside the container. Prompt appended as last argument. Must print JSON with `session_id` and `result` on stdout, or plain text as `result`. With `resume` set, a reply with no `session_id` fails the try. Must return only after the turn's work ends: a harness that sends work to the background and returns leaves the next step over half-done work, and the restart after the try kills that work.
+- `agents.*.resume`: arguments added from second turn on. `{session}` = id from first reply. Absent = every prompt opens a new session.
 - `commit`: prompt of every agent commit step. Asks for the commit message; the host commits with the reply. Required, non-empty.
 - `defaults`: policy per step kind, keys `prompt` and `run`, fields as on a step. `continue_on_error` sits under `run` alone. Checked at parse: an error names the field, for example `defaults.prompt.tries`.
 - `merge`: steps run in the conflicted worktree when a parent merge conflicts. Same kinds and rules as board steps: last step a commit. `{parent}` = branch merged in, `{id}` = row id, filled into prompt steps alone, in one pass so filled text never reads as a template. Absent = no try, branch dropped. The first commit closes the merge.
@@ -136,7 +136,8 @@ merge:
 - Branch per row: `swarm/<id>`. Base: `refs/swarm/trunk`, then a merge of every parent in `after` that is landed and unmerged. One such parent fast-forwards, so the branch equals `swarm/<parent>`.
 - The stack merges on a detached head. The branch takes its name after the last merge, so a crash mid-merge leaves no branch.
 - Merge conflict on that base: `merge` steps get one try in the conflicted worktree. The first commit step closes the merge. Merge commits get no ref. Transcript: `merge`.
-- No `merge` block, a failed merge session, or a conflict left after it: the tool aborts the merge, names no branch, and reports the parent and the files. The row starts over next cycle.
+- No `merge` block, a failed merge session, or a conflict left after it: the tool aborts the merge, names no branch, and reports the parent and the files. The row fails and waits for a new trunk tip.
+- A `git merge` error with no `MERGE_HEAD` is git failing, not a conflict: no `merge` steps run.
 - Worktree per slot: `~/swarm/slot/<project>/<n>`. Never inside the project checkout.
 - A slot detaches its worktree when a row ends or fails, and again when `serve` opens it. A branch left checked out by a crash blocks every other slot.
 - One commit per commit step, no trailer. The host stages with `add --all`: ignored files miss every commit. A commit step with no diff commits empty, so state still moves.
@@ -145,7 +146,8 @@ merge:
 - Failed: ref `refs/swarm/fail/<id>` holds the trunk tip the last attempt ran against, and no land ref stands. `serve` skips the row while that tip stands, so a broken row costs one attempt per trunk tip, not one per cycle. The mark sits outside `refs/heads/`, so it lists as no branch and pushes with none.
 - A branch with no land ref holds a session cut short. `serve` reads it as running, hands it to a slot, and the slot deletes the branch and replays the row from base.
 - A landed row clears its own mark. `reset <id>` clears branch, land ref and mark of the row and of every dependant.
-- A try fails on non-zero exit, a signal, `timeout`, or a blank agent commit reply. A step whose tries are spent fails the row and marks it, except a `run` step with `continue_on_error`.
+- A try fails on non-zero exit, a signal, `timeout`, a blank agent commit reply, or no `session_id` from an agent with `resume`. A step whose tries are spent fails the row and marks it, except a `run` step with `continue_on_error`.
+- A git or podman failure in a slot is no row failure. It writes no mark: `serve` exits 2, and the row replays on the next start.
 
 ## CLI
 
@@ -156,15 +158,16 @@ scswarm init PROJECT       bare repo, image, slot worktrees and containers
 scswarm serve PROJECT      foreground loop; run under systemd
 scswarm status PROJECT     one line per row: id, state, branch, worker
                              state: blocked, ready, running, failed, landed, done
-scswarm log PROJECT ID     transcript, one block per try: prompt or command, then reply, output, faults
+scswarm log PROJECT ID     transcript, one block per try or commit: prompt, command or commit
+                             message, then reply, stdout, stderr, faults
 scswarm reset PROJECT ID   delete swarm/<id>, every dependant branch, their land refs and marks
 ```
 
-Exit codes: 0 ok, 1 input invalid (config, board, unknown id), 2 git or podman failure. Drift between the host file and the slot set exits 2: the file parses and the machine is intact, and the fix is `init`.
+Exit codes: 0 ok, 1 input invalid (config, board, unknown id), 2 git or podman failure. Drift between the host file and the slot set exits 2: the file parses and the machine is intact, and the fix is `init`. A git or podman failure inside a slot exits `serve` 2.
 
 ## Container
 
-Rootless podman, `--userns=keep-id`, one long-lived container per slot, named `scswarm-<project>-<n>`. It sleeps; every try of a prompt, `run` or agent commit step is one `podman exec`, then `podman restart --time=0`. The restart kills every process the try left, so a background job never reaches the next step or the commit. Mounts: slot worktree rw at same path, bare repo ro at same path, `mounts` rw. Every bind carries the `z` flag, so an SELinux host relabels it shared. Credentials arrive as `env` names. Network on. Agent runs with its own permission checks off.
+Rootless podman, `--userns=keep-id`, one long-lived container per slot, named `scswarm-<project>-<n>`. It sleeps; every try of a prompt, `run` or agent commit step is one `podman exec`, then `podman restart --time=0`. The restart kills every process the try left, so a background job never reaches the next step or the commit. `serve` restarts each container when it opens the slot, so a process a killed `serve` left never reaches the next row. Mounts: slot worktree rw at same path, bare repo ro at same path, `mounts` rw. Every bind carries the `z` flag, so an SELinux host relabels it shared. Credentials arrive as `env` names. Network on. Agent runs with its own permission checks off.
 
 Git inside the container is read-only: the index sits under the bare repo. `git status`, `git log`, `git diff` work. `git add`, `git mv`, `git commit`, `git checkout` fail with `Read-only file system`. Host stages every change with `add --all` at each commit step, so a plain `mv` lands. Project prompts and command files must not ask the agent for a git write.
 
@@ -190,6 +193,9 @@ Image: `image` names a Containerfile on the trunk, built as `localhost/scswarm/<
 - `env` values come from the `serve` process. A refreshed credential needs a restart.
 - A row that fails waits for a new trunk tip. A parent that lands while the trunk stands still leaves it waiting: move the trunk or run `reset`.
 - A step with no `timeout` runs without limit. No cap counts tokens.
+- A podman fault inside `exec` exits 125 and counts as a failed try. A step command that exits 125 reads the same: `sh -c` passes the code through.
+- The transcript keeps full stdout and stderr of every try. Redirect big output to a file.
+- A git or podman failure in one slot stops `serve`. Every row in flight replays from base.
 - A kill between the failure and the mark write loses the mark. The row runs once more.
 - A kill between the commit and the land ref write leaves a branch the next cycle replays.
 - Stop `serve` before `reset`. A worker running that row recreates the refs at its next commit.

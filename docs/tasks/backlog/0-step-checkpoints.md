@@ -4,7 +4,7 @@
 
 **Why.** A crash or restart repays the whole step list.
 
-- `slot.rs:76` `checkout()` deletes a standing branch with no land ref and replays the row from base. Contract limit: "A row's failure or crash costs its whole step list."
+- `slot.rs:77` `checkout()` deletes a standing branch with no land ref and replays the row from base. Contract limit: "A row's failure or crash costs its whole step list."
 - alpha `parse-18-cache`, 2026-09-07, stage model: 4 of 5 turns ran, 25 files, +561 / -73, no commit. Restart at `21:42:23Z` dropped the tree. Only transcripts survived.
 - Since 014, work before a commit step already sits in a commit. The tool throws it away on replay.
 

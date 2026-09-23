@@ -135,13 +135,13 @@ merge:
 ```
 
 - `image` naming a path on the trunk ref builds at `init`. Any other value names an image podman resolves.
-- `exec` runs in the container with the prompt appended as the last argument. It must print JSON holding `session_id` and `result`, or plain text taken as `result`.
+- `exec` runs in the container with the prompt appended as the last argument. It must print JSON holding `session_id` and `result`, or plain text taken as `result`. With `resume` set, a reply with no `session_id` fails the try.
 - `exec` must return only when the turn's work ends. The container restarts after every try, which kills anything left running. `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` stops Claude Code from sending a long command to the background and ending the turn with "the command is running in the background". Without it, the next step runs over half-done work. Measured on claude 2.1.280: switch off, turn ends at 13 s, output file never written; switch on, turn holds 209 s, file written. The switch leaves `nohup cmd &` from Bash open; the restart after the try kills it.
 - `--disallowedTools Agent Skill SendMessage ListAgents RemoteTrigger PushNotification` keeps the session flat: no subagent, no skill, no message to another session. A subagent burns the turn budget and writes files the transcript never sees.
-- `resume` is added from the second agent turn on, so one row is one session.
+- `resume` is added from the second agent turn on, so one row is one session. Absent = every prompt opens a new session.
 - `commit` is the prompt of every agent commit step: it asks for a message and the host commits with the reply.
 - `defaults` sets policy per step kind, `prompt` and `run`. See the step fields below.
-- `merge` is a step list run in a conflicted worktree when a parent merge fails. Its prompts take `{parent}` and `{id}`. It ends with a commit step; the first commit closes the merge. Absent = the branch drops and the row starts over.
+- `merge` is a step list run in a conflicted worktree when a parent merge fails. Its prompts take `{parent}` and `{id}`. It ends with a commit step; the first commit closes the merge. Absent = the branch drops, the row fails and waits for a new trunk tip.
 
 ### `Containerfile.swarm` in the project root
 
@@ -241,11 +241,11 @@ The board. YAML sequence, read and never written by the tool. Empty board: `[]`.
 scswarm init PROJECT       bare repo, image, slot worktrees and containers
 scswarm serve PROJECT      foreground loop; run under systemd
 scswarm status PROJECT     one line per row: id, state, branch, worker
-scswarm log PROJECT ID     transcripts, one block per try: merge session, then row session
+scswarm log PROJECT ID     transcripts, one block per try or commit: merge session, then row session
 scswarm reset PROJECT ID   delete swarm/<id>, every dependant branch, their land refs and marks
 ```
 
-Exit codes: 0 ok, 1 input invalid, 2 git or podman failure. Drift between the host file and the slot set exits 2; the fix is `init`.
+Exit codes: 0 ok, 1 input invalid, 2 git or podman failure. Drift between the host file and the slot set exits 2; the fix is `init`. A git or podman failure inside a slot also stops `serve` with exit 2 and marks no row.
 
 ## Run under systemd
 
@@ -258,6 +258,8 @@ systemctl --user enable --now scswarm@PROJECT
 ## Operate
 
 **Row shows `failed`.** Read `scswarm log PROJECT ID` for the failing step. A failed row waits for a new trunk tip, so it costs one attempt per push, not one per cycle. To rerun without a push, run `reset`.
+
+**`serve` exits with `slot N stopped`.** Git or podman failed inside that slot. No row got a fail mark. Read the cause in the journal and fix the machine. systemd starts `serve` again, which restarts every slot container, and the rows in flight replay.
 
 **Rerun a task.** Stop `serve`, run `scswarm reset PROJECT ID`, start `serve`. A worker holding that task recreates the refs at its next commit, so stop it first.
 
@@ -276,7 +278,9 @@ systemctl --user enable --now scswarm@PROJECT
 - A task stacked on a rejected parent needs `reset`.
 - One configured agent means one model both writes and audits the work.
 - A step with no `timeout` runs without limit. No token budget: agent flags in `exec` carry any cap.
-- The container restarts after every try. A server a step needs starts and stops inside one `run`.
+- The container restarts after every try and when `serve` starts. A server a step needs starts and stops inside one `run`.
+- A podman fault inside `exec` exits 125 and counts as a failed try. A step command that exits 125 reads the same.
+- The transcript keeps full stdout and stderr of every try. Redirect big output to a file.
 - Slots share the CPU, so timings from a `run` step carry noise from other slots. Set `workers: 1`, or lock inside the script.
 - The commit message is the agent reply, unchecked. Agents that wrap it in a code fence produce a commit subject of "```".
 - A trunk change leaves running rows on their old base.

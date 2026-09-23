@@ -1,4 +1,5 @@
 use std::fmt;
+use std::ops::Deref;
 use std::time::Duration;
 
 use serde::de::{self, value::MapAccessDeserializer, MapAccess, Visitor};
@@ -11,18 +12,30 @@ const RUN_TRIES: usize = 1;
 const WAIT: u64 = 1;
 const WAIT_MAX: u64 = 60;
 
+/// Keys that name a step kind, in the order errors list them.
+const KEYS: [&str; 3] = ["prompt", "run", "commit"];
+
 /// One step of a session, settled: every policy field resolved.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Step {
     /// Agent turn in the row session.
     Prompt { text: String, policy: Policy },
     /// Shell text in the slot container, worktree as working dir.
-    Run { command: String, policy: Policy },
+    Run {
+        command: String,
+        policy: Policy,
+        /// Spent tries move on to the next step instead of failing the row.
+        continue_on_error: bool,
+    },
     /// Agent writes message in row session, host commits.
     AgentCommit { policy: Policy },
     /// Host commits with message as written.
     Commit { message: String },
 }
+
+/// Settled step list: one step or more, the last a commit. `settle` alone builds it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Steps(Vec<Step>);
 
 /// How an exec'd step runs.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -33,24 +46,13 @@ pub struct Policy {
     pub wait_max: Duration,
     /// Try killed past this. `None`: no cap.
     pub timeout: Option<Duration>,
-    /// Spent tries move on to the next step instead of failing the row.
-    pub continue_on_error: bool,
 }
 
-/// Policy as written in `defaults` or on one step. Absent field: next layer decides.
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Tuning {
-    #[serde(default)]
-    tries: Option<usize>,
-    #[serde(default)]
-    wait: Option<u64>,
-    #[serde(default)]
-    wait_max: Option<u64>,
-    #[serde(default)]
-    timeout: Option<u64>,
-    #[serde(default)]
-    continue_on_error: Option<bool>,
+/// How one step, or one step list, ends.
+pub enum Outcome<T> {
+    Done(T),
+    /// Tries spent or conflict left. Text names step and last fault.
+    Spent(String),
 }
 
 /// Field `defaults` of `scswarm.yaml`: one policy per exec'd step kind.
@@ -67,6 +69,17 @@ pub struct Defaults {
 #[derive(Debug)]
 pub struct Written(Fields);
 
+/// Policy as written in `defaults` or on one step. Absent field: next layer decides.
+#[derive(Debug, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Tuning {
+    tries: Option<usize>,
+    wait: Option<u64>,
+    wait_max: Option<u64>,
+    timeout: Option<u64>,
+    continue_on_error: Option<bool>,
+}
+
 /// Step kinds that exec in the container. Agent commit is a prompt.
 #[derive(Clone, Copy)]
 enum Kind {
@@ -74,14 +87,15 @@ enum Kind {
     Run,
 }
 
+/// `Some(None)` on a kind key: key present with no value.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Fields {
-    #[serde(default)]
-    prompt: Option<String>,
-    #[serde(default)]
-    run: Option<String>,
-    /// `Some(None)`: key present with no value, the agent writes the message.
+    #[serde(default, deserialize_with = "present")]
+    prompt: Option<Option<String>>,
+    #[serde(default, deserialize_with = "present")]
+    run: Option<Option<String>>,
+    /// No value: the agent writes the message.
     #[serde(default, deserialize_with = "present")]
     commit: Option<Option<String>>,
     #[serde(flatten)]
@@ -90,7 +104,7 @@ struct Fields {
 
 /// Settle a step list against `defaults`. Error names `field`, step number and
 /// step field; caller names the file and row.
-pub fn settle(field: &str, written: &[Written], defaults: &Defaults) -> Result<Vec<Step>, String> {
+pub fn settle(field: &str, written: &[Written], defaults: &Defaults) -> Result<Steps, String> {
     let steps = written
         .iter()
         .enumerate()
@@ -102,15 +116,33 @@ pub fn settle(field: &str, written: &[Written], defaults: &Defaults) -> Result<V
         .collect::<Result<Vec<Step>, String>>()?;
     match steps.last() {
         None => Err(format!("field `{field}` must hold one step or more")),
-        Some(Step::AgentCommit { .. } | Step::Commit { .. }) => Ok(steps),
+        Some(Step::AgentCommit { .. } | Step::Commit { .. }) => Ok(Steps(steps)),
         Some(_) => Err(format!("field `{field}` must end with a `commit` step")),
     }
 }
 
+impl Deref for Steps {
+    type Target = [Step];
+
+    fn deref(&self) -> &[Step] {
+        &self.0
+    }
+}
+
+impl<T> Outcome<T> {
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Outcome<U> {
+        match self {
+            Outcome::Done(value) => Outcome::Done(f(value)),
+            Outcome::Spent(why) => Outcome::Spent(why),
+        }
+    }
+}
+
 impl Defaults {
+    /// Rules each field states alone. The `wait` pair settles per step.
     pub fn check(&self) -> Result<(), String> {
-        self.prompt.settle(Kind::Prompt, "defaults.prompt.")?;
-        self.run.settle(Kind::Run, "defaults.run.").map(drop)
+        self.prompt.check(Kind::Prompt, "defaults.prompt.")?;
+        self.run.check(Kind::Run, "defaults.run.")
     }
 
     fn of(&self, kind: Kind) -> &Tuning {
@@ -123,15 +155,23 @@ impl Defaults {
 
 impl Fields {
     fn settle(&self, defaults: &Defaults) -> Result<Step, String> {
-        let policy = |kind| self.tuning.over(defaults.of(kind)).settle(kind, "");
+        let policy = |kind| {
+            self.tuning.check(kind, "")?;
+            self.tuning.over(defaults.of(kind)).policy(kind)
+        };
         match (&self.prompt, &self.run, &self.commit) {
             (Some(text), None, None) => Ok(Step::Prompt {
-                text: filled("prompt", text)?.to_string(),
+                text: filled("prompt", text)?,
                 policy: policy(Kind::Prompt)?,
             }),
             (None, Some(command), None) => Ok(Step::Run {
-                command: filled("run", command)?.to_string(),
+                command: filled("run", command)?,
                 policy: policy(Kind::Run)?,
+                continue_on_error: self
+                    .tuning
+                    .over(&defaults.run)
+                    .continue_on_error
+                    .unwrap_or(false),
             }),
             (None, None, Some(None)) => Ok(Step::AgentCommit {
                 policy: policy(Kind::Prompt)?,
@@ -140,31 +180,56 @@ impl Fields {
                 "field `commit` must hold the message, or no value for the agent to write it"
                     .to_string(),
             ),
-            (None, None, Some(Some(message))) if self.tuning.is_empty() => Ok(Step::Commit {
-                message: message.trim().to_string(),
-            }),
+            (None, None, Some(Some(message))) if self.tuning == Tuning::default() => {
+                Ok(Step::Commit {
+                    message: message.trim().to_string(),
+                })
+            }
             (None, None, Some(Some(_))) => {
                 Err("a `commit` step with a message must hold no other field".to_string())
             }
-            _ => Err("must hold exactly one of the keys `prompt`, `run`, `commit`".to_string()),
+            _ => Err(format!(
+                "must hold exactly one of the keys `prompt`, `run`, `commit`, holds {}",
+                self.keys()
+            )),
+        }
+    }
+
+    /// Kind keys present, by name. Values stay out of errors.
+    fn keys(&self) -> String {
+        let held: Vec<String> = [&self.prompt, &self.run, &self.commit]
+            .iter()
+            .zip(KEYS)
+            .filter(|(value, _)| value.is_some())
+            .map(|(_, key)| format!("`{key}`"))
+            .collect();
+        match held.is_empty() {
+            true => "none".to_string(),
+            false => held.join(", "),
         }
     }
 }
 
 impl Tuning {
-    fn is_empty(&self) -> bool {
-        let Self {
-            tries,
-            wait,
-            wait_max,
-            timeout,
-            continue_on_error,
-        } = self;
-        tries.is_none()
-            && wait.is_none()
-            && wait_max.is_none()
-            && timeout.is_none()
-            && continue_on_error.is_none()
+    /// Rules each field states alone. `path` prefixes each field name.
+    fn check(&self, kind: Kind, path: &str) -> Result<(), String> {
+        let field = |name: &str| format!("field `{path}{name}`");
+        if matches!(kind, Kind::Prompt) && self.continue_on_error.is_some() {
+            return Err(format!(
+                "{} belongs to `run` steps alone",
+                field("continue_on_error")
+            ));
+        }
+        if self.tries == Some(0) {
+            return Err(format!("{} must be a count of 1 or more", field("tries")));
+        }
+        if self.timeout == Some(0) {
+            return Err(format!(
+                "{} must be seconds, 1 or more, or stay absent",
+                field("timeout")
+            ));
+        }
+        Ok(())
     }
 
     /// Field-wise: own value, else `base`.
@@ -178,46 +243,23 @@ impl Tuning {
         }
     }
 
-    /// Fill gaps with tool defaults and check. `path` prefixes each field name.
-    fn settle(&self, kind: Kind, path: &str) -> Result<Policy, String> {
-        let field = |name: &str| format!("field `{path}{name}`");
-        let (tries, continue_on_error) = match kind {
-            Kind::Prompt if self.continue_on_error.is_some() => {
-                return Err(format!(
-                    "{} belongs to `run` steps alone",
-                    field("continue_on_error")
-                ))
-            }
-            Kind::Prompt => (self.tries.unwrap_or(PROMPT_TRIES), false),
-            Kind::Run => (
-                self.tries.unwrap_or(RUN_TRIES),
-                self.continue_on_error.unwrap_or(false),
-            ),
-        };
-        if tries == 0 {
-            return Err(format!("{} must be a count of 1 or more", field("tries")));
-        }
-        if self.timeout == Some(0) {
-            return Err(format!(
-                "{} must be seconds, 1 or more, or stay absent",
-                field("timeout")
-            ));
-        }
+    /// Fill gaps with tool defaults. Resolved `wait` must not pass `wait_max`.
+    fn policy(&self, kind: Kind) -> Result<Policy, String> {
         let wait = self.wait.unwrap_or(WAIT);
         let wait_max = self.wait_max.unwrap_or(WAIT_MAX);
         if wait > wait_max {
-            return Err(format!(
-                "{} must not exceed {} once both are resolved",
-                field("wait"),
-                field("wait_max")
-            ));
+            return Err(
+                "field `wait` must not exceed field `wait_max` once both are resolved".to_string(),
+            );
         }
         Ok(Policy {
-            tries,
+            tries: self.tries.unwrap_or(match kind {
+                Kind::Prompt => PROMPT_TRIES,
+                Kind::Run => RUN_TRIES,
+            }),
             wait: Duration::from_secs(wait),
             wait_max: Duration::from_secs(wait_max),
             timeout: self.timeout.map(Duration::from_secs),
-            continue_on_error,
         })
     }
 }
@@ -239,7 +281,7 @@ impl<'de> Visitor<'de> for WrittenVisitor {
 
     fn visit_str<E: de::Error>(self, text: &str) -> Result<Written, E> {
         Ok(Written(Fields {
-            prompt: Some(text.to_string()),
+            prompt: Some(Some(text.to_string())),
             ..Fields::default()
         }))
     }
@@ -254,10 +296,10 @@ fn present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Option<S
     Option::<String>::deserialize(deserializer).map(Some)
 }
 
-fn filled<'a>(key: &str, text: &'a str) -> Result<&'a str, String> {
-    match text.trim().is_empty() {
-        true => Err(format!("field `{key}` must hold text")),
-        false => Ok(text),
+fn filled(key: &str, text: &Option<String>) -> Result<String, String> {
+    match text.as_deref().filter(|text| !text.trim().is_empty()) {
+        Some(text) => Ok(text.to_string()),
+        None => Err(format!("field `{key}` must hold text")),
     }
 }
 
@@ -277,16 +319,19 @@ mod tests {
 - commit:
 "#;
 
-    fn settled(text: &str, defaults: &Defaults) -> Result<Vec<Step>, String> {
+    fn settled(text: &str, defaults: &Defaults) -> Result<Steps, String> {
         let written: Vec<Written> = serde_saphyr::from_str(text).map_err(|why| why.to_string())?;
         settle("steps", &written, defaults)
     }
 
+    fn defaults(text: &str) -> Defaults {
+        serde_saphyr::from_str(text).expect("defaults must parse")
+    }
+
     #[test]
     fn settles_each_kind_through_three_layers() {
-        let defaults: Defaults =
-            serde_saphyr::from_str("run: { timeout: 7200, wait: 5 }").expect("defaults must parse");
-        let steps = settled(STEPS, &defaults).expect("steps must settle");
+        let steps = settled(STEPS, &defaults("run: { timeout: 7200, wait: 5 }"))
+            .expect("steps must settle");
         assert_eq!(steps.len(), 6);
         let Step::Prompt { policy, .. } = &steps[0] else {
             panic!("step 1 must be a prompt: {:?}", steps[0]);
@@ -305,11 +350,16 @@ mod tests {
                 message: "bench: hybrid retriever".to_string()
             }
         );
-        let Step::Run { policy, .. } = &steps[4] else {
+        let Step::Run {
+            policy,
+            continue_on_error,
+            ..
+        } = &steps[4]
+        else {
             panic!("step 5 must be a run: {:?}", steps[4]);
         };
         assert_eq!(policy.timeout, Some(Duration::from_secs(7200)));
-        assert!(policy.continue_on_error);
+        assert!(continue_on_error);
     }
 
     #[test]
@@ -320,6 +370,19 @@ mod tests {
             why,
             "field `steps` step 3: field `tries` must be a count of 1 or more"
         );
+    }
+
+    #[test]
+    fn names_a_kind_key_with_no_value() {
+        let why = settled("- run:\n- commit:\n", &Defaults::default())
+            .expect_err("a `run` with no value must fail");
+        assert_eq!(why, "field `steps` step 1: field `run` must hold text");
+    }
+
+    #[test]
+    fn settles_the_wait_pair_across_layers() {
+        let text = "- prompt: Work.\n  wait_max: 300\n- commit:\n  wait_max: 300\n";
+        settled(text, &defaults("prompt: { wait: 120 }")).expect("resolved pair must settle");
     }
 
     #[test]

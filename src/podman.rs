@@ -70,12 +70,8 @@ impl Container {
         run(&self.run_args(spec)?)
     }
 
-    pub fn start(&self) -> Result<()> {
-        run(&["start".to_string(), self.name.clone()])
-    }
-
-    /// Kill every process at once, start again. Same container, same bake: a
-    /// process a step left behind never reaches the next step.
+    /// Kill every process, start again; stopped container starts too. Same bake:
+    /// no process left by one step reaches next step.
     pub fn restart(&self) -> Result<()> {
         run(&[
             "restart".to_string(),

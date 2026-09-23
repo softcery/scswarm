@@ -1,20 +1,15 @@
 use std::fmt;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::Path;
-use std::process::Command;
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::{Agent, SESSION_SLOT};
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::event;
 use crate::proc::{self, Captured, Exit};
 use crate::slot::Slot;
-use crate::step::Policy;
+use crate::step::{Outcome, Policy};
+use crate::transcript::{Entry, Transcript};
 
 const SHELL: &str = "sh";
 /// Shell `$0`, so prompt stays `$1`.
@@ -24,21 +19,30 @@ const ARGV0: &str = "scswarm";
 /// container restart, so no process outlives its try.
 pub struct Call<'a> {
     pub slot: &'a Slot,
-    pub input: Input<'a>,
     pub policy: &'a Policy,
-    pub log: &'a Path,
+    pub transcript: &'a Transcript,
     /// Row the step belongs to: event context only.
     pub id: &'a str,
     pub step: usize,
 }
 
-pub enum Input<'a> {
-    Prompt(Turn<'a>),
-    /// Agent turn, reply is commit message: blank costs one try.
-    AgentCommit(Turn<'a>),
-    /// Shell text as written.
-    Run(&'a str),
+/// What one exec'd step sends, and what a try that exits 0 gives back.
+pub trait Ask {
+    type Reply;
+
+    fn argv(&self) -> Vec<String>;
+
+    /// `entry` with what this step sent.
+    fn sent(&self, entry: Entry) -> Entry;
+
+    /// Reply read from stdout of a try that exited 0.
+    fn reply(&self, stdout: &str) -> Judged<Self::Reply>;
+
+    /// `entry` with what a passed try keeps.
+    fn kept(&self, reply: &Self::Reply, captured: &Captured, entry: Entry) -> Entry;
 }
+
+pub type Judged<T> = std::result::Result<T, Fault>;
 
 /// One prompt to one agent.
 pub struct Turn<'a> {
@@ -48,68 +52,36 @@ pub struct Turn<'a> {
     pub text: &'a str,
 }
 
-pub enum Outcome {
-    Done(Reply),
-    /// Every try failed. Text names step and last fault.
-    Spent(String),
-}
+/// Agent turn whose reply is a commit message: blank costs one try.
+pub struct Message<'a>(pub Turn<'a>);
+
+/// Shell text as written.
+pub struct Shell<'a>(pub &'a str);
 
 pub struct Reply {
     pub session: Option<String>,
-    /// Agent result, or script stdout.
     pub result: String,
 }
 
-/// Transcript line. Written here, read by `log`. One schema, both directions.
-#[derive(Default, Serialize, Deserialize)]
-pub struct Entry {
-    pub at: u64,
-    pub step: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exit: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stdout: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stderr: Option<String>,
-    /// Host reason for a failed try beyond exit code.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fault: Option<String>,
-}
-
 /// Why one try failed.
-enum Fault {
+pub enum Fault {
     Exit(i32),
     Signal,
     Timeout,
     Blank,
+    Sessionless,
 }
 
 impl Call<'_> {
-    pub fn run(&self) -> Result<Outcome> {
+    pub fn ask<A: Ask>(&self, ask: &A) -> Result<Outcome<A::Reply>> {
         event::step(self.id, self.step);
         let mut wait = self.policy.wait;
-        let mut attempt = 0;
+        let mut attempt = 1;
         loop {
-            attempt += 1;
-            let captured = proc::capture(self.command()?, self.policy.timeout);
-            self.slot.container().restart()?;
-            let captured = captured?;
-            let fault = match self.judge(&captured) {
-                Ok(reply) => {
-                    self.record(self.passed(&captured, &reply))?;
-                    return Ok(Outcome::Done(reply));
-                }
+            let fault = match self.once(ask)? {
+                Ok(reply) => return Ok(Outcome::Done(reply)),
                 Err(fault) => fault,
             };
-            self.record(self.failed(&captured, &fault))?;
             event::attempt(self.id, self.step, attempt, &fault.to_string());
             if attempt == self.policy.tries {
                 return Ok(Outcome::Spent(format!(
@@ -118,110 +90,45 @@ impl Call<'_> {
                 )));
             }
             thread::sleep(wait);
-            wait = (wait * 2).min(self.policy.wait_max);
+            wait = wait.saturating_mul(2).min(self.policy.wait_max);
+            attempt += 1;
         }
     }
 
-    fn command(&self) -> Result<Command> {
-        let argv = match &self.input {
-            Input::Prompt(turn) | Input::AgentCommit(turn) => turn.argv(),
-            Input::Run(text) => vec![SHELL.to_string(), "-c".to_string(), text.to_string()],
-        };
-        self.slot.container().exec(self.slot.path(), &argv)
+    /// One try, then restart, even when the try broke: no process outlives it.
+    fn once<A: Ask>(&self, ask: &A) -> Result<Judged<A::Reply>> {
+        let tried = self.tried(ask);
+        self.slot.container().restart()?;
+        tried
     }
 
-    /// Exit 0 and usable reply, else fault.
-    fn judge(&self, captured: &Captured) -> std::result::Result<Reply, Fault> {
-        match captured.exit {
-            Exit::Code(0) => {}
-            Exit::Code(code) => return Err(Fault::Exit(code)),
-            Exit::Signal => return Err(Fault::Signal),
-            Exit::Timeout => return Err(Fault::Timeout),
-        }
-        match self.input {
-            Input::Prompt(_) => Ok(parse(&captured.stdout)),
-            Input::AgentCommit(_) => {
-                let reply = parse(&captured.stdout);
-                match reply.result.trim().is_empty() {
-                    true => Err(Fault::Blank),
-                    false => Ok(reply),
-                }
-            }
-            Input::Run(_) => Ok(Reply {
-                session: None,
-                result: captured.stdout.trim().to_string(),
-            }),
-        }
-    }
-
-    /// Agent try keeps parsed reply, script keeps raw output.
-    fn passed(&self, captured: &Captured, reply: &Reply) -> Entry {
-        match self.input {
-            Input::Run(_) => self.output(captured),
-            Input::Prompt(_) | Input::AgentCommit(_) => Entry {
-                session: reply.session.clone(),
-                result: Some(reply.result.clone()),
-                ..self.entry(captured)
-            },
-        }
-    }
-
-    fn failed(&self, captured: &Captured, fault: &Fault) -> Entry {
-        Entry {
-            fault: match fault {
-                Fault::Exit(_) => None,
-                other => Some(other.to_string()),
-            },
-            ..self.output(captured)
-        }
-    }
-
-    fn output(&self, captured: &Captured) -> Entry {
-        Entry {
-            stdout: Some(captured.stdout.trim().to_string()),
-            stderr: Some(captured.stderr.trim().to_string()),
-            ..self.entry(captured)
-        }
-    }
-
-    fn entry(&self, captured: &Captured) -> Entry {
-        let (prompt, run) = match &self.input {
-            Input::Prompt(turn) | Input::AgentCommit(turn) => (Some(turn.text), None),
-            Input::Run(text) => (None, Some(*text)),
-        };
-        Entry {
-            at: now(),
-            step: self.step,
-            prompt: prompt.map(str::to_string),
-            run: run.map(str::to_string),
+    /// Exec, judge, record.
+    fn tried<A: Ask>(&self, ask: &A) -> Result<Judged<A::Reply>> {
+        let command = self.slot.container().exec(self.slot.path(), &ask.argv())?;
+        let captured = proc::capture(command, self.policy.timeout)?;
+        let judged = judge(ask, &captured);
+        let entry = ask.sent(Entry {
             exit: match captured.exit {
                 Exit::Code(code) => Some(code),
                 Exit::Signal | Exit::Timeout => None,
             },
-            ..Entry::default()
-        }
-    }
-
-    fn record(&self, entry: Entry) -> Result<()> {
-        let line = serde_json::to_string(&entry)
-            .map_err(|why| self.unwritable(&format!("entry: {why}")))?;
-        if let Some(dir) = self.log.parent() {
-            fs::create_dir_all(dir).map_err(|why| self.unwritable(&why.to_string()))?;
-        }
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.log)
-            .map_err(|why| self.unwritable(&why.to_string()))?;
-        writeln!(file, "{line}").map_err(|why| self.unwritable(&why.to_string()))
-    }
-
-    fn unwritable(&self, why: &str) -> Error {
-        Error::Failed(format!("transcript {}: {why}", self.log.display()))
+            ..Entry::new(self.step)
+        });
+        self.transcript.append(&match &judged {
+            Ok(reply) => ask.kept(reply, &captured, entry),
+            Err(Fault::Exit(_)) => output(&captured, entry),
+            Err(fault) => Entry {
+                fault: Some(fault.to_string()),
+                ..output(&captured, entry)
+            },
+        })?;
+        Ok(judged)
     }
 }
 
-impl Turn<'_> {
+impl Ask for Turn<'_> {
+    type Reply = Reply;
+
     /// `sh -c '<exec> "$@"' scswarm [<resume>] <text>`: agent text never reaches the shell.
     fn argv(&self) -> Vec<String> {
         let mut argv = vec![
@@ -240,6 +147,77 @@ impl Turn<'_> {
         argv.push(self.text.to_string());
         argv
     }
+
+    fn sent(&self, entry: Entry) -> Entry {
+        Entry {
+            prompt: Some(self.text.to_string()),
+            ..entry
+        }
+    }
+
+    /// An agent that resumes must name its session, or the next turn starts blank.
+    fn reply(&self, stdout: &str) -> Judged<Reply> {
+        let reply = parse(stdout);
+        match (&self.agent.resume, &reply.session) {
+            (Some(_), None) => Err(Fault::Sessionless),
+            _ => Ok(reply),
+        }
+    }
+
+    fn kept(&self, reply: &Reply, _: &Captured, entry: Entry) -> Entry {
+        Entry {
+            session: reply.session.clone(),
+            result: Some(reply.result.clone()),
+            ..entry
+        }
+    }
+}
+
+impl Ask for Message<'_> {
+    type Reply = Reply;
+
+    fn argv(&self) -> Vec<String> {
+        self.0.argv()
+    }
+
+    fn sent(&self, entry: Entry) -> Entry {
+        self.0.sent(entry)
+    }
+
+    fn reply(&self, stdout: &str) -> Judged<Reply> {
+        let reply = self.0.reply(stdout)?;
+        match reply.result.trim().is_empty() {
+            true => Err(Fault::Blank),
+            false => Ok(reply),
+        }
+    }
+
+    fn kept(&self, reply: &Reply, captured: &Captured, entry: Entry) -> Entry {
+        self.0.kept(reply, captured, entry)
+    }
+}
+
+impl Ask for Shell<'_> {
+    type Reply = ();
+
+    fn argv(&self) -> Vec<String> {
+        vec![SHELL.to_string(), "-c".to_string(), self.0.to_string()]
+    }
+
+    fn sent(&self, entry: Entry) -> Entry {
+        Entry {
+            run: Some(self.0.to_string()),
+            ..entry
+        }
+    }
+
+    fn reply(&self, _: &str) -> Judged<()> {
+        Ok(())
+    }
+
+    fn kept(&self, (): &(), captured: &Captured, entry: Entry) -> Entry {
+        output(captured, entry)
+    }
 }
 
 impl fmt::Display for Fault {
@@ -249,7 +227,28 @@ impl fmt::Display for Fault {
             Fault::Signal => f.write_str("killed by a signal"),
             Fault::Timeout => f.write_str("killed at `timeout`"),
             Fault::Blank => f.write_str("reply must hold a commit message"),
+            Fault::Sessionless => {
+                f.write_str("reply must hold `session_id`: the agent sets `resume`")
+            }
         }
+    }
+}
+
+/// Exit 0 hands stdout to the step kind; anything else is a fault.
+fn judge<A: Ask>(ask: &A, captured: &Captured) -> Judged<A::Reply> {
+    match captured.exit {
+        Exit::Code(0) => ask.reply(&captured.stdout),
+        Exit::Code(code) => Err(Fault::Exit(code)),
+        Exit::Signal => Err(Fault::Signal),
+        Exit::Timeout => Err(Fault::Timeout),
+    }
+}
+
+fn output(captured: &Captured, entry: Entry) -> Entry {
+    Entry {
+        stdout: Some(captured.stdout.trim().to_string()),
+        stderr: Some(captured.stderr.trim().to_string()),
+        ..entry
     }
 }
 
@@ -266,11 +265,4 @@ fn parse(stdout: &str) -> Reply {
         session: field("session_id"),
         result: field("result").unwrap_or_else(|| stdout.trim().to_string()),
     }
-}
-
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|since| since.as_secs())
-        .unwrap_or_default()
 }

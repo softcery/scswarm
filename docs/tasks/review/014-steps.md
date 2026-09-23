@@ -74,7 +74,7 @@ Agent commit takes `defaults.prompt`. Host file gains `poll`, default 5 s: loop 
 - Commit step with no diff commits empty.
 - `run` non-zero exit after its tries: fails the row, writes fail mark. With `continue_on_error`, transcript records the exit, next step runs.
 - `timeout` expiry counts as one failed try.
-- Literal commit takes no field. Git failure is exit 2, as today.
+- Literal commit takes no field. Git failure stops the slot, `serve` exits 2, no mark (015).
 - `merge` in `scswarm.yaml` takes the same step list, must end with a commit step. First commit closes the conflicted merge. `{parent}` and `{id}` fill prompt steps only.
 - Step with no prompt in its row still has an agent: agent commit uses the row `agent`, else `default_agent`.
 - Output a later row needs must sit on a tracked path. `git.rs:131` cleans with no `-x`: ignored files miss the commit and stay in the slot worktree for the next row on that slot.
@@ -82,9 +82,9 @@ Agent commit takes `defaults.prompt`. Host file gains `poll`, default 5 s: loop 
 ## Process sweep
 
 - After every try of an exec'd step, timeout kill included, host runs `podman restart --time=0` on the slot container through the `podman` module.
-- Same container: name, labels, mounts, `--init` stay. `env` rides on `exec` (`podman.rs:110`), so nothing is lost. Restart creates nothing, so `init` still owns the slot set.
+- Same container: name, labels, mounts, `--init` stay. `env` rides on `exec` (`podman::Container::exec`), so nothing is lost. Restart creates nothing, so `init` still owns the slot set.
 - Covers `nohup cmd &` from agent Bash, which no agent flag blocks, and the process a timeout leaves inside.
-- Restart failure: slot error, exit 2 path, as any podman failure.
+- Restart failure: shipped as fail mark on the row. 015 moves it to slot stop, `serve` exit 2, no mark.
 
 Measured on the workstation, podman 5.8.4, throwaway container with slot flags, 2026-09-23:
 

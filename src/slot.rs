@@ -6,11 +6,12 @@ use crate::git::{self, Git};
 use crate::host::{Slots, Stamp};
 use crate::paths::{self, Project};
 use crate::podman::{self, Container, Spec};
+use crate::step::Outcome;
 
 const WORKTREE_LINK: &str = ".git";
 
-/// One try at conflicted merge. `false`: no try made.
-pub type Resolve<'a> = dyn Fn(&str) -> Result<bool> + 'a;
+/// One try at conflicted merge.
+pub type Resolve<'a> = dyn Fn(&str) -> Result<Outcome<()>> + 'a;
 
 /// Worker slot: worktree outside project checkout, container over it. Idle slot
 /// holds no branch. Crash leaves one checked out.
@@ -44,8 +45,8 @@ impl Slot {
         Ok(slot)
     }
 
-    /// Bind to worktree and container `init` made. `serve` alone attaches, builds
-    /// nothing: absent slot is drift, not work.
+    /// Bind to worktree and container `init` made; absent slot is drift. Restart
+    /// kills what a killed `serve` left running inside.
     pub fn attach(project: &Project, index: usize, env: &[String]) -> Result<Self> {
         let path = paths::slot(project, index)?;
         if !path.join(WORKTREE_LINK).exists() {
@@ -58,7 +59,7 @@ impl Slot {
                 &format!("container {}", slot.container.name()),
             ));
         }
-        slot.container.start()?;
+        slot.container.restart()?;
         slot.release()?;
         Ok(slot)
     }
@@ -79,30 +80,41 @@ impl Slot {
         base: &str,
         stack: &[String],
         resolve: &Resolve,
-    ) -> Result<()> {
+    ) -> Result<Outcome<()>> {
         if self.git.branch_exists(branch)? {
             self.git.branch_delete(branch)?;
         }
         self.git.detach_at(base)?;
-        if let Err(why) = self.merge_stack(stack, resolve) {
-            self.git.merge_abort()?;
-            return Err(why);
+        match self.merge_stack(stack, resolve) {
+            Ok(Outcome::Done(())) => {}
+            unmerged => {
+                self.git.merge_abort()?;
+                return unmerged;
+            }
         }
         self.git.branch_at(branch, &self.git.head()?)?;
-        self.git.checkout(branch)
+        self.git.checkout(branch)?;
+        Ok(Outcome::Done(()))
     }
 
-    /// Merge each parent. Conflict goes to `resolve` once, then stands.
-    fn merge_stack(&self, stack: &[String], resolve: &Resolve) -> Result<()> {
+    /// Merge each parent. Conflict goes to `resolve` once; conflict left after it
+    /// spends the row. Merge error with no merge in flight is git failing.
+    fn merge_stack(&self, stack: &[String], resolve: &Resolve) -> Result<Outcome<()>> {
         for parent in stack {
             let Err(conflict) = self.git.merge(parent) else {
                 continue;
             };
-            if !resolve(parent)? || self.git.merging()? {
+            if !self.git.merging()? {
                 return Err(conflict);
             }
+            if let Outcome::Spent(why) = resolve(parent)? {
+                return Ok(Outcome::Spent(format!("{conflict}; `merge` steps: {why}")));
+            }
+            if self.git.merging()? {
+                return Ok(Outcome::Spent(conflict.to_string()));
+            }
         }
-        Ok(())
+        Ok(Outcome::Done(()))
     }
 
     pub fn release(&self) -> Result<()> {

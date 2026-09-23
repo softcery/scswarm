@@ -2,13 +2,15 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use crate::call::Entry;
 use crate::error::{Error, Result};
 use crate::paths::{self, Project, MERGE_LOG, RUN_LOG};
+use crate::transcript::Entry;
 
 const PROMPT: &str = ">";
 const RUN: &str = "$";
+const COMMIT: &str = "@";
 const REPLY: &str = "<";
+const STDERR: &str = "2>";
 const FAULT: &str = "!";
 
 /// Print the transcripts of one task: the merge session first, then the row.
@@ -47,23 +49,27 @@ fn render(name: &str, transcript: &str) -> String {
     transcript.lines().map(|line| block(name, line)).collect()
 }
 
-/// Header, prompt or command, then reply, output and faults. A line that parses
-/// as no entry stays raw.
+/// Header, prompt, command or commit, then reply, output and faults. A line that
+/// parses as no entry stays raw.
 fn block(name: &str, line: &str) -> String {
     let Ok(entry) = serde_json::from_str::<Entry>(line) else {
         return format!("{line}\n");
     };
-    let head = match entry.exit {
-        Some(code) => format!("{name} step {} exit {code}", entry.step),
-        None => format!("{name} step {}", entry.step),
-    };
+    let mut head = format!("{name} step {}", entry.step);
+    if let Some(code) = entry.exit {
+        head.push_str(&format!(" exit {code}"));
+    }
+    if let Some(commit) = &entry.commit {
+        head.push_str(&format!(" commit {commit}"));
+    }
     let mut lines = vec![head];
     let marked = [
         (PROMPT, &entry.prompt),
         (RUN, &entry.run),
+        (COMMIT, &entry.message),
         (REPLY, &entry.result),
         (REPLY, &entry.stdout),
-        (FAULT, &entry.stderr),
+        (STDERR, &entry.stderr),
         (FAULT, &entry.fault),
     ];
     for (mark, field) in marked {

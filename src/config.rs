@@ -6,7 +6,7 @@ use crate::error::{Error, Result};
 use crate::git::{self, Git};
 use crate::paths::Project;
 use crate::podman;
-use crate::step::{self, Defaults, Step};
+use crate::step::{self, Defaults, Steps};
 use crate::yaml;
 
 pub const FILE: &str = "scswarm.yaml";
@@ -27,7 +27,7 @@ pub struct Config {
     /// Policy per step kind, under every step field.
     pub defaults: Defaults,
     /// Steps that resolve a conflicted parent merge. Absent: conflict drops branch.
-    pub merge: Option<Vec<Step>>,
+    pub merge: Option<Steps>,
 }
 
 #[derive(Debug, Deserialize)]

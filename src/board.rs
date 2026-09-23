@@ -5,7 +5,7 @@ use serde::Deserialize;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::git::{self, Git};
-use crate::step::{self, Step};
+use crate::step::{self, Steps};
 use crate::yaml;
 
 pub const FILE: &str = "SWARM.yaml";
@@ -24,8 +24,7 @@ pub struct Row {
     /// Row indices this row waits for, resolved at parse time.
     pub after: Vec<usize>,
     pub agent: String,
-    /// Run in order. The last one commits.
-    pub steps: Vec<Step>,
+    pub steps: Steps,
 }
 
 impl Board {
@@ -205,6 +204,7 @@ fn loop_error(rows: &[Row], path: &[usize], closes: usize) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::step::Step;
 
     const CONFIG: &str = "\
 image: Containerfile.swarm

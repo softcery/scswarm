@@ -4,7 +4,7 @@ Seen on beta board, 2026-09-12. Binary built 2026-09-09 18:57, after HEAD `9ccec
 
 ## Defect
 
-- `podman.rs:101` mounts the bare repo `ro`. `slot.rs:10` leaves `.git` as the worktree link into it.
+- `podman.rs:97` mounts the bare repo `ro`. `slot.rs:11` leaves `.git` as the worktree link into it.
 - Read commands work. Any git write fails, since the index sits under the bare repo.
 - Host commits with `git.rs:203` `add --all`, so a plain `mv` lands. Agent has no way to know that.
 

@@ -4,7 +4,7 @@
 
 **Why.** `status` shows `running` and nothing of session size. The transcript keeps no usage, so a per-turn breakdown needs the harness session files inside the slot containers.
 
-- `call.rs:158` `Call::passed()` records `session` and `result` on a successful try. Reply `usage` drops.
+- `call.rs:167` `Turn::kept()` records `session` and `result` on a successful try. Reply `usage` drops.
 - Claude Code 2.1.263, `-p --output-format json`, haiku, 2 API calls: top-level `usage` sums the calls. `input_tokens` 18 = 10 + 8, `cache_creation_input_tokens` 17609 = 17220 + 389. That is turn usage, not context fill.
 - Same reply: last call prompt = 8 + 17220 + 389 = 17617 tokens, found only in `usage.iterations[0]`. Field has no docs; a pointer cannot pick the last element of a longer array.
 - Window sits at `modelUsage.<model id>.contextWindow`. Key varies per model; no pointer reaches it. `claude-opus-5` reads 1000000.

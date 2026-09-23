@@ -142,6 +142,8 @@ Needed when `image` names a path on the trunk ref. The image every slot runs. It
 
 Start from [Containerfile.swarm](Containerfile.swarm) in this repo and change 3 things: the package list, `ARG PROJECT`, `ARG WORKERS`. `init` passes no build argument, so both values live in the file.
 
+`ARG CLAUDE_CODE_VERSION` pins the agent CLI. The build cache keeps an unpinned install at the version of the first build, and the agent user cannot update a root install. To update the CLI, change this value and run `init`.
+
 The agent runs with nobody at the keyboard, so the image must answer every prompt the CLI would ask and switch off every footer it would write:
 
 ```

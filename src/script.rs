@@ -13,17 +13,19 @@ const SLOT_OPEN: char = '{';
 /// Run every step of one row in one session. `Done` holds the last commit.
 pub fn play(
     slot: &Slot,
+    env: &[String],
     config: &Config,
     row: &Row,
     transcript: &Transcript,
 ) -> Result<Outcome<String>> {
-    Session::open(slot, config, row, None, transcript)?.play(&row.steps)
+    Session::open(slot, env, config, row, None, transcript)?.play(&row.steps)
 }
 
 /// Hand conflicted worktree to project merge steps. No `merge` steps: nothing
 /// runs, conflict stands.
 pub fn resolve(
     slot: &Slot,
+    env: &[String],
     config: &Config,
     row: &Row,
     parent: &str,
@@ -33,12 +35,13 @@ pub fn resolve(
         return Ok(Outcome::Done(()));
     };
     event::merge(&row.id, parent);
-    let played = Session::open(slot, config, row, Some(parent), transcript)?.play(steps)?;
+    let played = Session::open(slot, env, config, row, Some(parent), transcript)?.play(steps)?;
     Ok(played.map(drop))
 }
 
 struct Session<'a> {
     slot: &'a Slot,
+    env: &'a [String],
     agent: &'a Agent,
     /// Config `commit`: prompt of every agent commit step.
     commit_prompt: &'a str,
@@ -53,6 +56,7 @@ struct Session<'a> {
 impl<'a> Session<'a> {
     fn open(
         slot: &'a Slot,
+        env: &'a [String],
         config: &'a Config,
         row: &'a Row,
         parent: Option<&'a str>,
@@ -60,6 +64,7 @@ impl<'a> Session<'a> {
     ) -> Result<Self> {
         Ok(Self {
             slot,
+            env,
             agent: agent(config, &row.agent)?,
             commit_prompt: &config.commit,
             id: &row.id,
@@ -141,6 +146,7 @@ impl<'a> Session<'a> {
     fn call<'c>(&'c self, policy: &'c Policy, number: usize) -> Call<'c> {
         Call {
             slot: self.slot,
+            env: self.env,
             policy,
             transcript: self.transcript,
             id: self.id,

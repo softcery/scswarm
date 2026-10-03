@@ -31,21 +31,22 @@ pub struct Remote {
     pub trunk: String,
 }
 
-/// What `init` bakes into the slot set. Immutable while `serve` runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Slot set the host file declares. `serve` converges the machine to it each cycle.
+#[derive(Debug)]
 pub struct Slots {
     pub workers: usize,
     pub mounts: Vec<Mount>,
-    /// Host environment variables the containers get. Credentials ride here.
+    /// Host environment variables each exec gets. Credentials ride here.
     pub env: Vec<String>,
 }
 
-/// Slot set as text. A container carries it, `serve` compares it back.
+/// What a slot container bakes, as text. A container carries it, `serve` compares
+/// it back.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Stamp {
+    /// Image ID: a rebuild under the same name reads as a change.
     pub image: String,
     pub mounts: String,
-    pub env: String,
 }
 
 /// One bind: absolute host path, absolute container path. Both sides rw.
@@ -88,33 +89,12 @@ impl Host {
 }
 
 impl Slots {
-    /// Text the containers carry: `image` plus the two fields they bake.
+    /// Text the containers carry: image ID plus the mounts they bake.
     pub fn stamp(&self, image: &str) -> Result<Stamp> {
         Ok(Stamp {
             image: image.to_string(),
             mounts: text(&self.mounts)?,
-            env: text(&self.env)?,
         })
-    }
-
-    /// First field that differs. `None` when the two sets match.
-    pub fn drift(&self, other: &Self) -> Option<&'static str> {
-        match (self.workers == other.workers, self.mounts == other.mounts) {
-            (false, _) => Some("field `workers`"),
-            (_, false) => Some("field `mounts`"),
-            _ => (self.env != other.env).then_some("field `env`"),
-        }
-    }
-}
-
-impl Stamp {
-    /// First field that differs. `None` when the container carries this stamp.
-    pub fn drift(&self, other: &Self) -> Option<&'static str> {
-        match (self.image == other.image, self.mounts == other.mounts) {
-            (false, _) => Some("field `image`"),
-            (_, false) => Some("field `mounts`"),
-            _ => (self.env != other.env).then_some("field `env`"),
-        }
     }
 }
 
@@ -274,7 +254,7 @@ env:
     }
 
     #[test]
-    fn stamps_mounts_and_env() {
+    fn stamps_mounts() {
         let host = Host::parse(FILE, EXAMPLE).expect("example must parse");
         let stamp = host
             .slots
@@ -285,6 +265,5 @@ env:
             "{}",
             stamp.mounts
         );
-        assert_eq!(stamp.env, "[\"ANTHROPIC_API_KEY\"]");
     }
 }

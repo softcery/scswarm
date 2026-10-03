@@ -3,16 +3,17 @@ use std::thread;
 
 use crate::board::{Board, Row};
 use crate::config::Config;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::event;
 use crate::git::{self, Git};
-use crate::host::{Host, Remote, Slots};
+use crate::host::{Host, Remote, Stamp};
 use crate::paths::Project;
+use crate::podman;
 use crate::pool::{Job, Pool};
-use crate::slot;
 use crate::state::{self, State};
 
-/// Fetch, derive, fill idle slots with pending rows in board order, sleep. Until killed.
+/// Fetch, converge slots, fill idle slots with pending rows in board order, sleep.
+/// Until killed.
 pub fn serve(repo: &Git, project: &Project) -> Result<()> {
     Server::open(repo, project)?.run()
 }
@@ -22,34 +23,22 @@ struct Server<'a> {
     project: &'a Project,
     pool: Pool,
     host: Host,
-    /// Slot set the pool opened with. Later edit of it is drift.
-    slots: Slots,
     /// Remote last written to the bare repo.
     origin: Option<Remote>,
     /// Trunk tip last reported.
     head: String,
-    /// Fetch fault last reported.
+    /// Skip cause last reported.
     skipped: Option<String>,
 }
 
 impl<'a> Server<'a> {
-    /// Config precedes slot check: image name lives on trunk.
     fn open(repo: &'a Git, project: &'a Project) -> Result<Self> {
-        let host = Host::load(project)?;
-        let mut origin = None;
-        sync(repo, &host.remote, &mut origin)?;
-        let config = Config::from_trunk(repo)?;
-        let stamp = host.slots.stamp(&config.image_name(repo, project)?)?;
-        slot::verify(project, &host.slots, &stamp)?;
-        let pool = Pool::open(repo, project, &host.slots)?;
-        let slots = host.slots.clone();
         Ok(Self {
             repo,
             project,
-            pool,
-            host,
-            slots,
-            origin,
+            pool: Pool::open(repo, project),
+            host: Host::load(project)?,
+            origin: None,
             head: String::new(),
             skipped: None,
         })
@@ -59,7 +48,7 @@ impl<'a> Server<'a> {
         loop {
             self.cycle()?;
             thread::sleep(self.host.poll);
-            self.reload()?;
+            self.reload();
         }
     }
 
@@ -68,60 +57,79 @@ impl<'a> Server<'a> {
         let Some(sha) = self.trunk() else {
             return Ok(());
         };
-        if sha != self.head {
-            event::fetch(&sha);
-            self.head.clone_from(&sha);
-        }
         let config = Arc::new(Config::from_trunk(self.repo)?);
+        let Some(stamp) = self.stamp(&config)? else {
+            return Ok(());
+        };
+        self.skipped = None;
+        let mut idle = self.pool.converge(&self.host.slots, &stamp)?.into_iter();
         let board = Board::from_trunk(self.repo, &config)?;
         let states = state::derive(&board, self.repo)?;
         for (index, row) in board.rows().iter().enumerate() {
             if !pending(&states[index]) || self.pool.holds(&row.id) {
                 continue;
             }
-            let Some(slot) = self.pool.idle() else {
+            let Some(slot) = idle.next() else {
                 return Ok(());
             };
-            self.pool
-                .assign(slot, job(&board, &states, index, &config, &sha))?;
+            let env = &self.host.slots.env;
+            let job = job(&board, &states, index, &config, &sha, env);
+            self.pool.assign(slot, job)?;
         }
         Ok(())
     }
 
     /// Trunk tip after fetch. `None` when git refuses: absent branch or lost checkout
-    /// costs one cycle, not the loop. One report per cause.
+    /// costs one cycle, not the loop.
     fn trunk(&mut self) -> Option<String> {
-        match sync(self.repo, &self.host.remote, &mut self.origin) {
+        let fetched = sync(self.repo, &self.host.remote, &mut self.origin);
+        match fetched {
             Ok(sha) => {
-                self.skipped = None;
+                if sha != self.head {
+                    event::fetch(&sha);
+                    self.head.clone_from(&sha);
+                }
                 Some(sha)
             }
             Err(why) => {
-                let cause = why.to_string();
-                if self.skipped.as_deref() != Some(&cause) {
-                    event::skip(&why);
-                    self.skipped = Some(cause);
-                }
+                self.skip(&why);
                 None
             }
         }
     }
 
-    /// Reread host file each cycle. Unreadable: keep last good copy, editor mid-save
-    /// must not stop the loop. Changed slot set: stop, `init` writes that set.
-    fn reload(&mut self) -> Result<()> {
-        let host = match Host::load(self.project) {
-            Ok(host) => host,
-            Err(why) => {
-                event::stale(&why);
-                return Ok(());
+    /// Stamp every slot must carry. `None` when the trunk names an image the host
+    /// lacks: no slot runs work on an image no one declared.
+    fn stamp(&mut self, config: &Config) -> Result<Option<Stamp>> {
+        let image = config.image_name(self.repo, self.project)?;
+        match podman::image_id(&image)? {
+            Some(id) => self.host.slots.stamp(&id).map(Some),
+            None => {
+                self.skip(&Error::Failed(format!(
+                    "image {image} is absent: run `scswarm init {}`",
+                    self.project
+                )));
+                Ok(None)
             }
-        };
-        if let Some(field) = self.slots.drift(&host.slots) {
-            return Err(slot::drifted(self.project, field));
         }
-        self.host = host;
-        Ok(())
+    }
+
+    /// One report per cause.
+    fn skip(&mut self, why: &Error) {
+        let cause = why.to_string();
+        if self.skipped.as_deref() != Some(&cause) {
+            event::skip(why);
+            self.skipped = Some(cause);
+        }
+    }
+
+    /// Reread host file each cycle. Unreadable: keep last good copy, editor mid-save
+    /// must not stop the loop.
+    fn reload(&mut self) {
+        match Host::load(self.project) {
+            Ok(host) => self.host = host,
+            Err(why) => event::stale(&why),
+        }
     }
 }
 
@@ -144,12 +152,20 @@ fn pending(state: &State) -> bool {
     matches!(*state, State::Ready | State::Running)
 }
 
-fn job(board: &Board, states: &[State], index: usize, config: &Arc<Config>, base: &str) -> Job {
+fn job(
+    board: &Board,
+    states: &[State],
+    index: usize,
+    config: &Arc<Config>,
+    base: &str,
+    env: &[String],
+) -> Job {
     let row = &board.rows()[index];
     Job {
         row: row.clone(),
         config: Arc::clone(config),
         stack: stack(board, states, row),
+        env: env.to_vec(),
         base: base.to_string(),
     }
 }

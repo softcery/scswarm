@@ -35,7 +35,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    #[command(about = "Create bare repo, slot worktrees, image and containers")]
+    #[command(about = "Create bare repo and image")]
     Init { project: String },
     #[command(about = "Run scheduler and workers until stopped")]
     Serve { project: String },

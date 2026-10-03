@@ -26,7 +26,19 @@ pub fn commit(id: &str, sha: &str) {
     println!("commit task={id} sha={}", short(sha));
 }
 
-/// Cycle passed over: git refused the trunk.
+pub fn attach(slot: usize) {
+    println!("attach slot={slot}");
+}
+
+pub fn create(slot: usize) {
+    println!("create slot={slot}");
+}
+
+pub fn remove(slot: usize) {
+    println!("remove slot={slot}");
+}
+
+/// Cycle passed over: trunk or its image unreachable.
 pub fn skip(why: &Error) {
     eprintln!("skip cause={why}");
 }

@@ -4,22 +4,17 @@ use crate::git::{self, Git};
 use crate::host::{Host, Remote};
 use crate::paths::{self, Project};
 use crate::podman;
-use crate::slot::{self, Slot};
 
 const HEAD: &str = "HEAD";
 
-/// Bare repo, image, one worktree and container per slot. Safe to run again.
+/// Bare repo and image. `serve` builds the slots from both. Safe to run again,
+/// `serve` running or not.
 pub fn init(project: &Project) -> Result<()> {
     let host = Host::load(project)?;
     let repo = repo(project, &host.remote)?;
     let config = Config::from_trunk(&repo)?;
-    let stamp = host.slots.stamp(&build(&repo, project, &config)?)?;
-    println!("image {}", stamp.image);
-    for index in 0..host.slots.workers {
-        let slot = Slot::create(&repo, project, index, &host.slots, &stamp)?;
-        println!("slot {index} {}", slot.path().display());
-    }
-    slot::prune(&repo, project, host.slots.workers)
+    println!("image {}", image(&repo, project, &config)?);
+    Ok(())
 }
 
 /// Bare repo of a project already built by `init`.
@@ -45,17 +40,24 @@ fn repo(project: &Project, remote: &Remote) -> Result<Git> {
     Ok(repo)
 }
 
+/// Build the trunk Containerfile, or pull a named image the host lacks.
+fn image(repo: &Git, project: &Project, config: &Config) -> Result<String> {
+    let name = config.image_name(repo, project)?;
+    if config.builds_image(repo)? {
+        build(repo, project, config, &name)?;
+    } else if !podman::image_exists(&name)? {
+        podman::pull(&name)?;
+    }
+    Ok(name)
+}
+
 /// Context is throwaway worktree of trunk ref: image content has a commit behind
 /// it. Untracked and ignored files stay out.
-fn build(repo: &Git, project: &Project, config: &Config) -> Result<String> {
-    let name = config.image_name(repo, project)?;
-    if !config.builds_image(repo)? {
-        return Ok(name);
-    }
+fn build(repo: &Git, project: &Project, config: &Config, name: &str) -> Result<()> {
     let tree = paths::build(project)?;
     repo.worktree_remove(&tree)?;
     repo.worktree_add(&tree, git::TRUNK)?;
-    let built = podman::build(&name, &tree.join(&config.image), &tree);
+    let built = podman::build(name, &tree.join(&config.image), &tree);
     repo.worktree_remove(&tree)?;
-    built.map(|()| name)
+    built
 }

@@ -16,6 +16,8 @@ const NAME: &str = "scswarm";
 const LOCAL: &str = "localhost";
 /// Tag podman adds to a name that carries none. It reports the full form back.
 const LATEST: &str = "latest";
+/// Prefix some podman replies put on an image ID.
+const DIGEST: &str = "sha256:";
 const READ: &str = "ro";
 const WRITE: &str = "rw";
 /// SELinux hosts deny a container every host label. `z` relabels the bind shared.
@@ -25,14 +27,12 @@ const SLEEP: &str = "--entrypoint=sleep";
 const FOREVER: &str = "infinity";
 /// Reaping PID 1. `sleep` reaps none, so forks stay zombies.
 const INIT: &str = "--init";
-/// Slot fields the container bakes. `serve` reads them back and compares.
+/// Host file field the container bakes. `serve` reads it back and compares.
 const MOUNTS_LABEL: &str = "scswarm.mounts";
-const ENV_LABEL: &str = "scswarm.env";
 
 /// One long-lived container per slot. Sole owner of podman arguments.
 pub struct Container {
     name: String,
-    env: Vec<String>,
 }
 
 /// Binds of slot container, plus stamp it carries.
@@ -45,23 +45,10 @@ pub struct Spec<'a> {
 }
 
 impl Container {
-    pub fn slot(project: &Project, index: usize, env: &[String]) -> Self {
+    pub fn slot(project: &Project, index: usize) -> Self {
         Self {
             name: name(project, index),
-            env: env.to_vec(),
         }
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn exists(&self) -> Result<bool> {
-        probe(&[
-            "container".to_string(),
-            "exists".to_string(),
-            self.name.clone(),
-        ])
     }
 
     /// Drop container of this name, create and start from `spec`.
@@ -92,7 +79,6 @@ impl Container {
             "--userns=keep-id".to_string(),
             format!("--workdir={worktree}"),
             format!("--label={MOUNTS_LABEL}={}", spec.stamp.mounts),
-            format!("--label={ENV_LABEL}={}", spec.stamp.env),
             bind(&worktree, &worktree, WRITE),
             bind(&repo, &repo, READ),
         ];
@@ -105,13 +91,14 @@ impl Container {
         Ok(args)
     }
 
-    /// Command running `argv` in container, at host path `dir`.
-    pub fn exec(&self, dir: &Path, argv: &[String]) -> Result<Command> {
+    /// Command running `argv` in container, at host path `dir`, with host
+    /// variables `env`.
+    pub fn exec(&self, dir: &Path, env: &[String], argv: &[String]) -> Result<Command> {
         let mut command = Command::new(BIN);
         command
             .arg("exec")
             .arg(format!("--workdir={}", paths::arg(dir)?));
-        for name in &self.env {
+        for name in env {
             present(name)?;
             command.arg(format!("--env={name}"));
         }
@@ -147,6 +134,29 @@ pub fn image_exists(image: &str) -> Result<bool> {
     probe(&["image".to_string(), "exists".to_string(), image.to_string()])
 }
 
+/// ID of a local image. `None` when absent.
+pub fn image_id(image: &str) -> Result<Option<String>> {
+    if !image_exists(image)? {
+        return Ok(None);
+    }
+    let id = proc::run(
+        BIN,
+        here(),
+        &[
+            "image".to_string(),
+            "inspect".to_string(),
+            "--format={{.Id}}".to_string(),
+            image.to_string(),
+        ],
+    )?;
+    Ok(Some(bare_id(id.trim())))
+}
+
+/// Fetch an image from its registry. Output streams to operator.
+pub fn pull(image: &str) -> Result<()> {
+    proc::stream(BIN, here(), &["pull".to_string(), image.to_string()])
+}
+
 /// Build project Containerfile. Output streams to operator.
 pub fn build(tag: &str, file: &Path, context: &Path) -> Result<()> {
     let args = [
@@ -164,7 +174,6 @@ pub fn tag(project: &Project) -> String {
 }
 
 /// Image name in the form podman reports: an untagged name reads as `:latest`.
-/// Both sides of a stamp pass here, or every start would read as drift.
 pub fn image_ref(name: &str) -> String {
     let tagged = name
         .rsplit('/')
@@ -181,7 +190,7 @@ pub fn image_ref(name: &str) -> String {
 struct Listed {
     #[serde(rename = "Names")]
     names: Vec<String>,
-    #[serde(rename = "Image")]
+    #[serde(rename = "ImageID")]
     image: String,
     #[serde(rename = "Labels")]
     labels: Option<BTreeMap<String, String>>,
@@ -203,12 +212,16 @@ impl Listed {
                 .unwrap_or_default()
         };
         let stamp = Stamp {
-            image: image_ref(&self.image),
+            image: bare_id(&self.image),
             mounts: label(MOUNTS_LABEL),
-            env: label(ENV_LABEL),
         };
         Some((index, stamp))
     }
+}
+
+/// Image ID with no digest prefix. Both sides of a stamp pass here.
+fn bare_id(id: &str) -> String {
+    id.strip_prefix(DIGEST).unwrap_or(id).to_string()
 }
 
 fn name(project: &Project, index: usize) -> String {
@@ -268,7 +281,7 @@ mod tests {
     #[test]
     fn reaps_with_init_and_binds_worktree_rw_repo_ro() {
         let project = Project::try_from("alpha").expect("name must parse");
-        let container = Container::slot(&project, 2, &[]);
+        let container = Container::slot(&project, 2);
         let mounts = [Mount {
             host: "/records".to_string(),
             guest: "/mnt".to_string(),
@@ -276,7 +289,6 @@ mod tests {
         let stamp = Stamp {
             image: "swarm:latest".to_string(),
             mounts: "[\"/records:/mnt\"]".to_string(),
-            env: "[]".to_string(),
         };
         let args = container
             .run_args(&Spec {

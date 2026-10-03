@@ -1,7 +1,7 @@
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::git::{self, Git};
 use crate::host::{Slots, Stamp};
 use crate::paths::{self, Project};
@@ -22,7 +22,8 @@ pub struct Slot {
 }
 
 impl Slot {
-    /// Worktree and container of one slot. `init` alone creates.
+    /// Worktree and container of one slot. Standing worktree stays, container is
+    /// replaced.
     pub fn create(
         repo: &Git,
         project: &Project,
@@ -34,7 +35,7 @@ impl Slot {
         if !path.join(WORKTREE_LINK).exists() {
             repo.worktree_add(&path, git::TRUNK)?;
         }
-        let slot = Self::bind(project, index, path, &slots.env);
+        let slot = Self::bind(project, index, path);
         slot.container.create(&Spec {
             worktree: &slot.path,
             repo: repo.root(),
@@ -45,20 +46,10 @@ impl Slot {
         Ok(slot)
     }
 
-    /// Bind to worktree and container `init` made; absent slot is drift. Restart
-    /// kills what a killed `serve` left running inside.
-    pub fn attach(project: &Project, index: usize, env: &[String]) -> Result<Self> {
-        let path = paths::slot(project, index)?;
-        if !path.join(WORKTREE_LINK).exists() {
-            return Err(missing(project, &format!("worktree {}", path.display())));
-        }
-        let slot = Self::bind(project, index, path, env);
-        if !slot.container.exists()? {
-            return Err(missing(
-                project,
-                &format!("container {}", slot.container.name()),
-            ));
-        }
+    /// Bind to a slot `survey` found whole. Restart kills what a killed `serve`
+    /// left running inside.
+    pub fn attach(project: &Project, index: usize) -> Result<Self> {
+        let slot = Self::bind(project, index, paths::slot(project, index)?);
         slot.container.restart()?;
         slot.release()?;
         Ok(slot)
@@ -125,52 +116,31 @@ impl Slot {
         self.git.commit(message)
     }
 
-    fn bind(project: &Project, index: usize, path: PathBuf, env: &[String]) -> Self {
+    fn bind(project: &Project, index: usize, path: PathBuf) -> Self {
         Self {
             git: Git::at(path.clone()),
             path,
-            container: Container::slot(project, index, env),
+            container: Container::slot(project, index),
         }
     }
 }
 
-/// Slot set against host file: numbers, image, fields each container baked. Runs
-/// before any worker opens.
-pub fn verify(project: &Project, slots: &Slots, stamp: &Stamp) -> Result<()> {
-    let made = podman::slots(project)?;
-    let held: BTreeSet<usize> = made.keys().copied().collect();
-    if held != (0..slots.workers).collect() {
-        return Err(drifted(project, "field `workers`"));
+/// Every slot on the machine with the stamp its container carries. `None`: half
+/// a slot, container or worktree absent. The two list apart: either outlives the other.
+pub fn survey(project: &Project) -> Result<BTreeMap<usize, Option<Stamp>>> {
+    let mut held: BTreeMap<usize, Option<Stamp>> = paths::slot_dirs(project)?
+        .into_iter()
+        .map(|index| (index, None))
+        .collect();
+    for (index, stamp) in podman::slots(project)? {
+        let whole = paths::slot(project, index)?.join(WORKTREE_LINK).exists();
+        held.insert(index, whole.then_some(stamp));
     }
-    if let Some(field) = made.values().find_map(|made| stamp.drift(made)) {
-        return Err(drifted(project, field));
-    }
-    if !podman::image_exists(&stamp.image)? {
-        return Err(missing(project, &format!("image {}", stamp.image)));
-    }
-    Ok(())
+    Ok(held)
 }
 
-/// Drop every slot at or above `keep`. `init` alone destroys. Containers and
-/// directories list apart: either outlives the other.
-pub fn prune(repo: &Git, project: &Project, keep: usize) -> Result<()> {
-    let mut held: BTreeSet<usize> = podman::slots(project)?.into_keys().collect();
-    held.extend(paths::slot_dirs(project)?);
-    for index in held.into_iter().filter(|&index| index >= keep) {
-        podman::remove(project, index)?;
-        repo.worktree_remove(&paths::slot(project, index)?)?;
-        println!("dropped slot {index}");
-    }
-    Ok(())
-}
-
-/// Machine no longer holds what host file declares. `init` writes that set, so stop.
-pub fn drifted(project: &Project, what: &str) -> Error {
-    Error::Failed(format!(
-        "slot set differs from the host file at {what}: run `scswarm init {project}`"
-    ))
-}
-
-fn missing(project: &Project, what: &str) -> Error {
-    Error::Failed(format!("{what} is absent: run `scswarm init {project}`"))
+/// Drop container and worktree of one slot. Either may be absent.
+pub fn remove(repo: &Git, project: &Project, index: usize) -> Result<()> {
+    podman::remove(project, index)?;
+    repo.worktree_remove(&paths::slot(project, index)?)
 }

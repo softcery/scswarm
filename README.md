@@ -37,7 +37,7 @@ cargo install --path .
 
 3. Commit them on the trunk branch. The swarm reads them from there, never from your working tree.
 
-4. Build the slot set:
+4. Build the bare repo and image:
 
    ```
    scswarm init PROJECT
@@ -112,7 +112,7 @@ What this machine gives the swarm. Never committed.
 | `env` | host environment variable names forwarded into every container. Credentials ride here |
 | `poll` | seconds between loop cycles. Absent = 5 |
 
-`path`, `trunk` and `poll` reload each cycle. `workers`, `mounts` and `env` bake into the containers: change one, run `init` again. `serve` exits 2 when reality and the file disagree.
+Every field reloads each cycle. `serve` creates missing slots, drops slots at or above `workers`, and rebuilds a slot whose container holds old `mounts` or image. A busy slot finishes its row first. `env` applies from the next row on, with no rebuild.
 
 ### `scswarm.yaml` in the project root
 
@@ -238,14 +238,14 @@ The board. YAML sequence, read and never written by the tool. Empty board: `[]`.
 `PROJECT` is the stem of the host file. The working directory means nothing.
 
 ```
-scswarm init PROJECT       bare repo, image, slot worktrees and containers
+scswarm init PROJECT       bare repo and image; safe while `serve` runs
 scswarm serve PROJECT      foreground loop; run under systemd
 scswarm status PROJECT     one line per row: id, state, branch, worker
 scswarm log PROJECT ID     transcripts, one block per try or commit: merge session, then row session
 scswarm reset PROJECT ID   delete swarm/<id>, every dependant branch, their land refs and marks
 ```
 
-Exit codes: 0 ok, 1 input invalid, 2 git or podman failure. Drift between the host file and the slot set exits 2; the fix is `init`. A git or podman failure inside a slot also stops `serve` with exit 2 and marks no row.
+Exit codes: 0 ok, 1 input invalid, 2 git or podman failure. A git or podman failure inside a slot also stops `serve` with exit 2 and marks no row.
 
 ## Run under systemd
 
@@ -263,7 +263,9 @@ systemctl --user enable --now scswarm@PROJECT
 
 **Rerun a task.** Stop `serve`, run `scswarm reset PROJECT ID`, start `serve`. A worker holding that task recreates the refs at its next commit, so stop it first.
 
-**Change workers, mounts or env.** Stop `serve`, edit the host file, run `init`, start `serve`. `init` replaces every slot container and drops the slots at or above `workers`.
+**Change workers, mounts or env.** If `workers` grows past `ARG WORKERS` of the Containerfile, raise that value, commit it on the trunk, and run `init` first. Then edit the host file. `serve` applies it on the next cycle, slot by slot as each goes idle.
+
+**Change the image.** Commit the Containerfile on the trunk, run `init`. `serve` rebuilds each slot on the new image ID as it goes idle. An absent image skips every cycle with `skip cause=image ... is absent`.
 
 **Credential expired.** Every row it touches fails after 3 tries. Fix the credential, restart `serve`, then `reset` each marked row.
 

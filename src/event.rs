@@ -38,6 +38,25 @@ pub fn remove(slot: usize) {
     println!("remove slot={slot}");
 }
 
+/// Last cause of one fault kind. A repeat stays quiet.
+#[derive(Default)]
+pub struct Latch(Option<String>);
+
+impl Latch {
+    pub fn report(&mut self, why: &Error, emit: fn(&Error)) {
+        let cause = why.to_string();
+        if self.0.as_deref() != Some(&cause) {
+            emit(why);
+            self.0 = Some(cause);
+        }
+    }
+
+    /// Fault gone: its next cause reports again.
+    pub fn clear(&mut self) {
+        self.0 = None;
+    }
+}
+
 /// Cycle passed over: trunk or its image unreachable.
 pub fn skip(why: &Error) {
     eprintln!("skip cause={why}");

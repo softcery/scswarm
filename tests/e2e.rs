@@ -35,6 +35,7 @@ fn slot_set_follows_host_file_live() {
     drains(&swarm);
     holds(&swarm);
     keeps_containers_on_env(&swarm);
+    reports_stale_once(&swarm);
     rolls_image(&swarm);
     let creates = swarm
         .lines()
@@ -116,6 +117,21 @@ fn keeps_containers_on_env(swarm: &Swarm) {
         before,
         "`env` edit must keep every container"
     );
+}
+
+/// Broken host file across cycles: one `stale` line, last good copy runs on.
+fn reports_stale_once(swarm: &Swarm) {
+    let from = swarm.mark();
+    fs::write(host_file(), "workers: [").expect("host file must be writable");
+    thread::sleep(CYCLES);
+    let stale = swarm.lines()[from..]
+        .iter()
+        .filter(|line| line.starts_with("stale "))
+        .count();
+    assert_eq!(stale, 1, "a repeated host file fault must report once");
+    swarm.host(3, &["HOME"]);
+    thread::sleep(CYCLES);
+    swarm.quiet(from);
 }
 
 /// `init` during `serve` with a changed image: each slot rebuilds once its row

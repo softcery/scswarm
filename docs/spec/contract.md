@@ -99,7 +99,7 @@ poll: 5
 - Every field reloads on the next cycle.
 - `serve` converges slots each cycle, at start too: creates each missing slot below `workers`, drops each slot at or above it, rebuilds each slot whose container differs in `mounts` or image ID. A busy slot changes after its row ends. `init` writes no slot.
 - `env` names apply from the next row on. No container bakes them.
-- Absent or unparsable at start: exit 1. Unparsable later: `serve` reports `stale`, keeps the last good copy, keeps running.
+- Absent or unparsable at start: exit 1. Unparsable later: `serve` reports `stale` once per cause, keeps the last good copy, keeps running.
 
 ## `scswarm.yaml`
 

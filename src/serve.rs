@@ -4,7 +4,7 @@ use std::thread;
 use crate::board::{Board, Row};
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::event;
+use crate::event::{self, Latch};
 use crate::git::{self, Git};
 use crate::host::{Host, Remote, Stamp};
 use crate::paths::Project;
@@ -27,8 +27,9 @@ struct Server<'a> {
     origin: Option<Remote>,
     /// Trunk tip last reported.
     head: String,
-    /// Skip cause last reported.
-    skipped: Option<String>,
+    skipped: Latch,
+    /// Host file fault, kept apart: it repeats while cycles pass.
+    stale: Latch,
 }
 
 impl<'a> Server<'a> {
@@ -40,7 +41,8 @@ impl<'a> Server<'a> {
             host: Host::load(project)?,
             origin: None,
             head: String::new(),
-            skipped: None,
+            skipped: Latch::default(),
+            stale: Latch::default(),
         })
     }
 
@@ -61,7 +63,7 @@ impl<'a> Server<'a> {
         let Some(stamp) = self.stamp(&config)? else {
             return Ok(());
         };
-        self.skipped = None;
+        self.skipped.clear();
         let mut idle = self.pool.converge(&self.host.slots, &stamp)?.into_iter();
         let board = Board::from_trunk(self.repo, &config)?;
         let states = state::derive(&board, self.repo)?;
@@ -92,7 +94,7 @@ impl<'a> Server<'a> {
                 Some(sha)
             }
             Err(why) => {
-                self.skip(&why);
+                self.skipped.report(&why, event::skip);
                 None
             }
         }
@@ -105,21 +107,13 @@ impl<'a> Server<'a> {
         match podman::image_id(&image)? {
             Some(id) => self.host.slots.stamp(&id).map(Some),
             None => {
-                self.skip(&Error::Failed(format!(
+                let why = Error::Failed(format!(
                     "image {image} is absent: run `scswarm init {}`",
                     self.project
-                )));
+                ));
+                self.skipped.report(&why, event::skip);
                 Ok(None)
             }
-        }
-    }
-
-    /// One report per cause.
-    fn skip(&mut self, why: &Error) {
-        let cause = why.to_string();
-        if self.skipped.as_deref() != Some(&cause) {
-            event::skip(why);
-            self.skipped = Some(cause);
         }
     }
 
@@ -127,8 +121,11 @@ impl<'a> Server<'a> {
     /// must not stop the loop.
     fn reload(&mut self) {
         match Host::load(self.project) {
-            Ok(host) => self.host = host,
-            Err(why) => event::stale(&why),
+            Ok(host) => {
+                self.host = host;
+                self.stale.clear();
+            }
+            Err(why) => self.stale.report(&why, event::stale),
         }
     }
 }

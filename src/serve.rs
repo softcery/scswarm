@@ -59,13 +59,14 @@ impl<'a> Server<'a> {
         let Some(sha) = self.trunk() else {
             return Ok(());
         };
-        let config = Arc::new(Config::from_trunk(self.repo)?);
+        let Some((config, board)) = self.inputs()? else {
+            return Ok(());
+        };
         let Some(stamp) = self.stamp(&config)? else {
             return Ok(());
         };
         self.skipped.clear();
         let mut idle = self.pool.converge(&self.host.slots, &stamp)?.into_iter();
-        let board = Board::from_trunk(self.repo, &config)?;
         let states = state::derive(&board, self.repo)?;
         for (index, row) in board.rows().iter().enumerate() {
             if !pending(&states[index]) || self.pool.holds(&row.id) {
@@ -97,6 +98,23 @@ impl<'a> Server<'a> {
                 self.skipped.report(&why, event::skip);
                 None
             }
+        }
+    }
+
+    /// Config and board at the trunk tip. `None` when either is invalid: a bad push
+    /// skips cycles until fixed, rows in flight run on. Git failing stays fatal.
+    fn inputs(&mut self) -> Result<Option<(Arc<Config>, Board)>> {
+        let read = Config::from_trunk(self.repo).and_then(|config| {
+            let board = Board::from_trunk(self.repo, &config)?;
+            Ok((Arc::new(config), board))
+        });
+        match read {
+            Ok(read) => Ok(Some(read)),
+            Err(why @ Error::Invalid(_)) => {
+                self.skipped.report(&why, event::skip);
+                Ok(None)
+            }
+            Err(why) => Err(why),
         }
     }
 

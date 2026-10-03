@@ -61,7 +61,7 @@ Step kinds:
 
 - Lookup: step field, then `defaults.<kind>` of `scswarm.yaml`, then the default above. Agent commit reads `defaults.prompt`.
 - A literal commit takes no other field.
-- `serve` and `status` exit 1 and name the row by `id`, or by its place when `id` is absent, on any of:
+- `status` exits 1 and names the row by `id`, or by its place when `id` is absent, on any of the cases below. `serve` reports the same text as `skip`, once per cause, assigns no row, and lets rows in flight finish; the next valid trunk tip resumes work:
   - empty `id`, or one git refuses as a ref
   - duplicate `id`
   - unknown id in `after`, or a loop of ids through `after`
@@ -164,7 +164,7 @@ scswarm log PROJECT ID     transcript, one block per try or commit: prompt, comm
 scswarm reset PROJECT ID   delete swarm/<id>, every dependant branch, their land refs and marks
 ```
 
-Exit codes: 0 ok, 1 input invalid (config, board, unknown id), 2 git or podman failure. A git or podman failure inside a slot exits `serve` 2.
+Exit codes: 0 ok, 1 input invalid (config, board, unknown id), 2 git or podman failure. `serve` exits 1 only on a host file invalid at start: an invalid config or board on the trunk skips the cycle. A git or podman failure inside a slot exits `serve` 2.
 
 ## Container
 

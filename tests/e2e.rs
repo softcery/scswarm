@@ -36,6 +36,7 @@ fn slot_set_follows_host_file_live() {
     holds(&swarm);
     keeps_containers_on_env(&swarm);
     reports_stale_once(&swarm);
+    survives_bad_board(&swarm);
     rolls_image(&swarm);
     let creates = swarm
         .lines()
@@ -131,6 +132,27 @@ fn reports_stale_once(swarm: &Swarm) {
     assert_eq!(stale, 1, "a repeated host file fault must report once");
     swarm.host(3, &["HOME"]);
     thread::sleep(CYCLES);
+    swarm.quiet(from);
+}
+
+/// Broken board pushed mid-row: one `skip`, the row lands, a fixed board resumes.
+fn survives_bad_board(swarm: &Swarm) {
+    let from = swarm.mark();
+    swarm.rerun(&["row-1"], from);
+    swarm.commit("SWARM.yaml", "- id: [\n", "e2e: broken board");
+    swarm.wait("skip cause=SWARM.yaml", from);
+    swarm.wait("land task=row-1", from);
+    thread::sleep(CYCLES);
+    let skips = swarm.lines()[from..]
+        .iter()
+        .filter(|line| line.starts_with("skip "))
+        .count();
+    assert_eq!(skips, 1, "a repeated board fault must report once");
+    swarm.commit("SWARM.yaml", &board(), "e2e: board fixed");
+    let fixed = swarm.mark();
+    swarm.wait("fetch trunk=", fixed);
+    swarm.rerun(&["row-2"], fixed);
+    swarm.wait("land task=row-2", fixed);
     swarm.quiet(from);
 }
 

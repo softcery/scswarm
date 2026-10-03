@@ -231,7 +231,7 @@ The board. YAML sequence, read and never written by the tool. Empty board: `[]`.
 | `timeout` | seconds before a try is killed | none |
 | `continue_on_error` | `run` alone: move on after spent tries | false |
 
-`serve` and `status` exit 1 and name the row on a duplicate id, an unknown id in `after`, a dependency loop, an unknown agent, or an id git refuses as a ref. A bad step names the row, the step number and the field.
+`status` exits 1 and names the row on a duplicate id, an unknown id in `after`, a dependency loop, an unknown agent, or an id git refuses as a ref. A bad step names the row, the step number and the field. `serve` reports the same text once as `skip`, starts no row, and lets rows in flight finish until a fixed board reaches the trunk.
 
 ## Commands
 

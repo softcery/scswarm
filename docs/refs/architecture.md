@@ -29,7 +29,7 @@ Job queue, worker pool, explicit outcome states, persisted state. Queue = board 
 
 ## Loop
 
-1. Read the host file, write `origin` when it changed, fetch the trunk into `refs/swarm/trunk`. Parse board and config at that ref. An unreadable host file keeps the last good copy; a failed fetch or an absent image skips the cycle.
+1. Read the host file, write `origin` when it changed, fetch the trunk into `refs/swarm/trunk`. Parse board and config at that ref. An unreadable host file keeps the last good copy; a failed fetch, an invalid board or config, or an absent image skips the cycle. Rows in flight run on.
 2. Converge slots: attach each fitting slot no thread owns, rebuild or drop each idle slot that differs, create each missing one.
 3. Derive state per row.
 4. For each idle slot and open row, in board order: create branch on base, resolve a conflicted parent merge with the `merge` steps, run the row steps, write the land ref at the last commit. Slots run at once, one row each.

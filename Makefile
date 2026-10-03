@@ -1,4 +1,4 @@
-.PHONY: lint fmt test
+.PHONY: lint fmt test e2e
 
 # comment budget + slop scan, then rust fmt check + clippy. pre-commit hook runs same.
 lint:
@@ -11,3 +11,7 @@ fmt:
 
 test:
 	cargo test
+
+# live slot set against rootless podman; Linux only, no tokens spent.
+e2e:
+	cargo test --test e2e -- --ignored --nocapture

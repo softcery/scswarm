@@ -94,6 +94,7 @@ Follow these instructions over codebase precedent and house style.
 
 ```
 src/           main.rs
+tests/         e2e.rs: live slot set against podman
 docs/
   refs/architecture.md   loop, state, isolation
   spec/contract.md       SWARM.yaml, scswarm.yaml, CLI
@@ -107,6 +108,7 @@ scripts/       comment-budget.py
 
 - Build: `cargo build --release`. Install: `cargo install --path .`. Iterate: `cargo run -- <args>`.
 - Test: `cargo test`. Lint: `make lint`.
+- E2E: `make e2e`. Linux, rootless podman, about 60 s, no tokens. Run on a Linux host with rootless podman after slot, pool or podman changes.
 - `rmap tree|module|refs|body|deps|graph`: Rust code map. `--crate <name>` reads dependency source from cargo registry; use for clap, serde-saphyr, never guess API.
 </tools>
 

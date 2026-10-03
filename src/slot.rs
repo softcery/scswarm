@@ -21,38 +21,43 @@ pub struct Slot {
     container: Container,
 }
 
-impl Slot {
-    /// Worktree and container of one slot. Standing worktree stays, container is
-    /// replaced.
-    pub fn create(
-        repo: &Git,
-        project: &Project,
-        index: usize,
-        slots: &Slots,
-        stamp: &Stamp,
-    ) -> Result<Self> {
-        let path = paths::slot(project, index)?;
-        if !path.join(WORKTREE_LINK).exists() {
-            repo.worktree_add(&path, git::TRUNK)?;
-        }
-        let slot = Self::bind(project, index, path);
-        slot.container.create(&Spec {
-            worktree: &slot.path,
-            repo: repo.root(),
-            mounts: &slots.mounts,
-            stamp,
-        })?;
-        slot.release()?;
-        Ok(slot)
+/// Worktree and container of one slot. Standing worktree stays, container is
+/// replaced.
+pub fn create(
+    repo: &Git,
+    project: &Project,
+    index: usize,
+    slots: &Slots,
+    stamp: &Stamp,
+) -> Result<()> {
+    let slot = Slot::open(project, index)?;
+    if !slot.path.join(WORKTREE_LINK).exists() {
+        repo.worktree_add(&slot.path, git::TRUNK)?;
     }
+    slot.container.create(&Spec {
+        worktree: &slot.path,
+        repo: repo.root(),
+        mounts: &slots.mounts,
+        stamp,
+    })?;
+    slot.release()
+}
 
-    /// Bind to a slot `survey` found whole. Restart kills what a killed `serve`
-    /// left running inside.
-    pub fn attach(project: &Project, index: usize) -> Result<Self> {
-        let slot = Self::bind(project, index, paths::slot(project, index)?);
-        slot.container.restart()?;
-        slot.release()?;
-        Ok(slot)
+/// Take over a whole slot: kill what a dead worker left, free its branch.
+pub fn attach(project: &Project, index: usize) -> Result<()> {
+    let slot = Slot::open(project, index)?;
+    slot.container.restart()?;
+    slot.release()
+}
+
+impl Slot {
+    pub fn open(project: &Project, index: usize) -> Result<Self> {
+        let path = paths::slot(project, index)?;
+        Ok(Self {
+            git: Git::at(path.clone()),
+            path,
+            container: Container::slot(project, index),
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -63,8 +68,8 @@ impl Slot {
         &self.container
     }
 
-    /// Build `branch` from `base` plus merge of `stack`, named last: crash mid-merge
-    /// leaves no branch. Branch standing holds a cut-short session: drop, build again.
+    /// Build `branch` from commit `base` plus merge of `stack`, named last: crash
+    /// mid-merge leaves no branch. Standing branch is a cut-short session: rebuild.
     pub fn checkout(
         &self,
         branch: &str,
@@ -114,14 +119,6 @@ impl Slot {
 
     pub fn commit(&self, message: &str) -> Result<String> {
         self.git.commit(message)
-    }
-
-    fn bind(project: &Project, index: usize, path: PathBuf) -> Self {
-        Self {
-            git: Git::at(path.clone()),
-            path,
-            container: Container::slot(project, index),
-        }
     }
 }
 

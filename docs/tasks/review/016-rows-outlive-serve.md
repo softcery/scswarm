@@ -23,7 +23,7 @@ Locks: `std::fs::File::lock` (flock), no file written.
 | Lock | Target | Holder, span |
 |---|---|---|
 | slot | slot worktree dir | worker, whole life |
-| row | `~/swarm/log/<project>/<id>/` | worker, before `checkout` to exit. Covers gap between `checkout` dropping old branch and naming new one |
+| row | `~/swarm/log/<project>/<id>/` | `serve` takes it before spawn, worker inherits it as stdin, holds to exit. Covers spawn-to-lock gap and gap between `checkout` dropping old branch and naming new one |
 | project | bare repo dir | `serve`, whole life. Second `serve` exits 2, names first |
 
 Kernel drops lock on holder death. Crash leaves nothing to clean.
@@ -51,8 +51,8 @@ Unit file: `KillMode=process`. `systemctl stop` ends `serve` only; rows in fligh
 
 1. `config.rs`, `board.rs`: read at given rev; `from_trunk` calls it with `git::TRUNK`.
 2. `lock.rs`: `hold(dir)` blocking, `held(dir)` probe. Sole caller of `File::lock`.
-3. `work.rs`: `work` subcommand. Take slot and row locks, bind slot, run today's `attempt`, exit 0 or 2.
-4. `pool.rs`: children per slot, no threads. `busy`, `holds` from children and locks. `attach` once per slot. `reap` replaces `collect`. `assign` spawns `std::env::current_exe()` with work argv.
+3. `work.rs`: `work` subcommand. Adopt row lock from stdin, take slot lock, bind slot, run today's `attempt`, exit 0 or 2.
+4. `pool.rs`: children per slot, no threads. `busy`, `holds` from children and locks. `attach` once per slot. `reap` replaces `collect`. `assign` spawns binary path resolved once at `Pool::open` with work argv: Linux `current_exe` names replaced binary `<path> (deleted)` (Fedora, 2026-10-03).
 5. `serve.rs`: project lock at open. `job` becomes `work` argv.
 6. `main.rs`: hidden `Work` command.
 7. `systemd/scswarm@.service`: `KillMode=process`.
@@ -68,7 +68,7 @@ Unit file: `KillMode=process`. `systemctl stop` ends `serve` only; rows in fligh
 - `systemctl stop` leaves rows in flight running. Hard stop: `systemctl --user kill --kill-whom=all scswarm@<project>`.
 - systemd logs "left-over process" per restart while workers run. Expected under `KillMode=process`.
 - Upgrade: rows started before it finish on old binary. Git refs and branch names must read same in both versions.
-- After `cargo install`, `current_exe` names new file: old `serve` assigning before its restart spawns new worker.
+- After `cargo install`, path resolved at `serve` start names new file: old `serve` assigning before its restart spawns new worker.
 - First rollout costs rows in flight: old binary has no locks, old unit kills cgroup. Roll out on idle project, or accept replays.
 - Locks need local filesystem. `~/swarm` on NFS breaks flock.
 - Worker hung forever holds slot forever. Step `timeout` bounds a try; hang outside a step, for example in git, does not end.

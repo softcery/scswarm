@@ -1,8 +1,8 @@
-//! Live slot set against rootless podman. Board holds `run` and literal commit
+//! Live slot set and `serve` restart against rootless podman. Board holds `run` and literal commit
 //! steps only: no agent call, no credential, no token spent.
 
 use std::env;
-use std::fs::{self, File};
+use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
 use std::process::{Child, Command, Output};
 use std::thread;
@@ -38,6 +38,7 @@ fn slot_set_follows_host_file_live() {
     reports_stale_once(&swarm);
     survives_bad_board(&swarm);
     rolls_image(&swarm);
+    outlives_serve(&mut swarm);
     let creates = swarm
         .lines()
         .iter()
@@ -181,6 +182,41 @@ fn rolls_image(swarm: &Swarm) {
     }
 }
 
+/// SIGKILL on `serve` mid-row: the worker runs on and a new `serve` waits on its
+/// locks. The row lands once, on the same container, one try per step.
+fn outlives_serve(swarm: &mut Swarm) {
+    let from = swarm.mark();
+    swarm.rerun(&["row-1"], from);
+    swarm.wait("step task=row-1 step=1", from);
+    let before = swarm.containers();
+    swarm.kill();
+    let restarted = swarm.mark();
+    swarm.serve();
+    swarm.wait("fetch trunk=", restarted);
+    let second = command()
+        .args(["serve", PROJECT])
+        .output()
+        .expect("second `scswarm serve` must start");
+    assert_eq!(second.status.code(), Some(2), "second `serve` must exit 2");
+    let why = String::from_utf8_lossy(&second.stderr);
+    assert!(why.contains("another `scswarm serve"), "{why}");
+    swarm.wait("land task=row-1", from);
+    let count = |needle: &str| {
+        swarm.lines()[from..]
+            .iter()
+            .filter(|line| line.starts_with(needle))
+            .count()
+    };
+    assert_eq!(count("assign task=row-1 "), 1, "row must not reassign");
+    assert_eq!(count("step task=row-1 "), 1, "row must not replay");
+    assert_eq!(count("attempt task=row-1 "), 0, "step must take one try");
+    assert_eq!(
+        swarm.containers(),
+        before,
+        "restart must keep every container"
+    );
+}
+
 /// Scratch project: checkout, host file, `serve` log. Drop removes every trace,
 /// pass or fail.
 struct Swarm {
@@ -218,8 +254,14 @@ impl Swarm {
         fs::write(&file, text).expect("host file must be writable");
     }
 
+    /// Log opens in append mode: a worker that outlives its `serve` writes to the
+    /// end too.
     fn serve(&mut self) {
-        let log = File::create(&self.log).expect("log must be writable");
+        let log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.log)
+            .expect("log must be writable");
         let child = command()
             .args(["serve", PROJECT])
             .stdout(log.try_clone().expect("log handle must clone"))
@@ -227,6 +269,13 @@ impl Swarm {
             .spawn()
             .expect("`scswarm serve` must start");
         self.serve = Some(child);
+    }
+
+    /// SIGKILL: no cleanup runs in `serve`.
+    fn kill(&mut self) {
+        let mut serve = self.serve.take().expect("`serve` must run");
+        serve.kill().expect("`serve` must take SIGKILL");
+        serve.wait().expect("`serve` must be reaped");
     }
 
     fn tool(&self, args: &[&str]) {

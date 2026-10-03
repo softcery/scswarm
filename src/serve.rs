@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::thread;
 
 use crate::board::{Board, Row};
@@ -8,13 +7,20 @@ use crate::event::{self, Latch};
 use crate::git::{self, Git};
 use crate::host::{Host, Remote, Stamp};
 use crate::paths::Project;
-use crate::podman;
-use crate::pool::{Job, Pool};
+use crate::pool::Pool;
 use crate::state::{self, State};
+use crate::work::Job;
+use crate::{lock, podman};
 
-/// Fetch, converge slots, fill idle slots with pending rows in board order, sleep.
-/// Until killed.
+/// Fetch, converge slots, spawn a worker per idle slot and pending row in board
+/// order, sleep. Until killed. Bare repo lock keeps it one per project.
 pub fn serve(repo: &Git, project: &Project) -> Result<()> {
+    let _sole = lock::take(repo.root())?.ok_or_else(|| {
+        Error::Failed(format!(
+            "bare repo {} is held: another `scswarm serve {project}` runs",
+            repo.root().display()
+        ))
+    })?;
     Server::open(repo, project)?.run()
 }
 
@@ -37,7 +43,7 @@ impl<'a> Server<'a> {
         Ok(Self {
             repo,
             project,
-            pool: Pool::open(repo, project),
+            pool: Pool::open(repo, project)?,
             host: Host::load(project)?,
             origin: None,
             head: String::new(),
@@ -55,11 +61,11 @@ impl<'a> Server<'a> {
     }
 
     fn cycle(&mut self) -> Result<()> {
-        self.pool.collect()?;
+        self.pool.reap()?;
         let Some(sha) = self.trunk() else {
             return Ok(());
         };
-        let Some((config, board)) = self.inputs()? else {
+        let Some((config, board)) = self.inputs(&sha)? else {
             return Ok(());
         };
         let Some(stamp) = self.stamp(&config)? else {
@@ -69,15 +75,19 @@ impl<'a> Server<'a> {
         let mut idle = self.pool.converge(&self.host.slots, &stamp)?.into_iter();
         let states = state::derive(&board, self.repo)?;
         for (index, row) in board.rows().iter().enumerate() {
-            if !pending(&states[index]) || self.pool.holds(&row.id) {
+            if !pending(&states[index]) || self.pool.holds(&row.id)? {
                 continue;
             }
             let Some(slot) = idle.next() else {
                 return Ok(());
             };
-            let env = &self.host.slots.env;
-            let job = job(&board, &states, index, &config, &sha, env);
-            self.pool.assign(slot, job)?;
+            self.pool.assign(Job {
+                slot,
+                id: row.id.clone(),
+                base: sha.clone(),
+                stack: stack(&board, &states, row),
+                env: self.host.slots.env.clone(),
+            })?;
         }
         Ok(())
     }
@@ -101,12 +111,13 @@ impl<'a> Server<'a> {
         }
     }
 
-    /// Config and board at the trunk tip. `None` when either is invalid: a bad push
-    /// skips cycles until fixed, rows in flight run on. Git failing stays fatal.
-    fn inputs(&mut self) -> Result<Option<(Arc<Config>, Board)>> {
-        let read = Config::from_trunk(self.repo).and_then(|config| {
-            let board = Board::from_trunk(self.repo, &config)?;
-            Ok((Arc::new(config), board))
+    /// Config and board at trunk tip `sha`, the commit workers read. `None` when
+    /// either is invalid: a bad push skips cycles until fixed, rows in flight run on.
+    /// Git failing stays fatal.
+    fn inputs(&mut self, sha: &str) -> Result<Option<(Config, Board)>> {
+        let read = Config::at(self.repo, sha).and_then(|config| {
+            let board = Board::at(self.repo, sha, &config)?;
+            Ok((config, board))
         });
         match read {
             Ok(read) => Ok(Some(read)),
@@ -165,24 +176,6 @@ fn sync(repo: &Git, remote: &Remote, origin: &mut Option<Remote>) -> Result<Stri
 /// session was cut short: it replays from base.
 fn pending(state: &State) -> bool {
     matches!(*state, State::Ready | State::Running)
-}
-
-fn job(
-    board: &Board,
-    states: &[State],
-    index: usize,
-    config: &Arc<Config>,
-    base: &str,
-    env: &[String],
-) -> Job {
-    let row = &board.rows()[index];
-    Job {
-        row: row.clone(),
-        config: Arc::clone(config),
-        stack: stack(board, states, row),
-        env: env.to_vec(),
-        base: base.to_string(),
-    }
 }
 
 /// Base is trunk. Each landed unmerged parent rides in as merge, so branch starts

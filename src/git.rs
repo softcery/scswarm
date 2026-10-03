@@ -63,9 +63,9 @@ impl Git {
         run(&self.root, &["fetch", "--prune", "--quiet"]).map(drop)
     }
 
-    /// True when the revision holds `path`.
+    /// True when `rev` holds `path`.
     pub fn has_path(&self, rev: &str, path: &str) -> Result<bool> {
-        let listing = run(&self.root, &["ls-tree", &refname(rev), "--", path])?;
+        let listing = run(&self.root, &["ls-tree", rev, "--", path])?;
         Ok(!listing.trim().is_empty())
     }
 
@@ -74,7 +74,7 @@ impl Git {
         if !self.has_path(rev, path)? {
             return Ok(None);
         }
-        run(&self.root, &["show", &format!("{}:{path}", refname(rev))]).map(Some)
+        run(&self.root, &["show", &format!("{rev}:{path}")]).map(Some)
     }
 
     pub fn branch_exists(&self, branch: &str) -> Result<bool> {
@@ -84,7 +84,7 @@ impl Git {
 
     /// Commit sha `rev` points at. Errors when no such ref.
     pub fn tip(&self, rev: &str) -> Result<String> {
-        run(&self.root, &["rev-parse", &refname(rev)]).map(|sha| sha.trim().to_string())
+        run(&self.root, &["rev-parse", rev]).map(|sha| sha.trim().to_string())
     }
 
     /// Commit `name` points at. `None` when no such ref.
@@ -105,11 +105,7 @@ impl Git {
     }
 
     pub fn is_ancestor(&self, commit: &str, rev: &str) -> Result<bool> {
-        let ancestor = refname(rev);
-        probe(
-            &self.root,
-            &["merge-base", "--is-ancestor", commit, &ancestor],
-        )
+        probe(&self.root, &["merge-base", "--is-ancestor", commit, rev])
     }
 
     pub fn head(&self) -> Result<String> {
@@ -138,10 +134,7 @@ impl Git {
 
     /// Drop every local change, then put `rev` in the worktree under no branch.
     pub fn detach_at(&self, rev: &str) -> Result<()> {
-        run(
-            &self.root,
-            &["checkout", "--force", "--detach", &refname(rev)],
-        )?;
+        run(&self.root, &["checkout", "--force", "--detach", rev])?;
         run(&self.root, &["clean", "--force", "-d"]).map(drop)
     }
 
@@ -181,11 +174,7 @@ impl Git {
     pub fn worktree_add(&self, path: &Path, rev: &str) -> Result<()> {
         run(&self.root, &["worktree", "prune"])?;
         let path = paths::arg(path)?;
-        run(
-            &self.root,
-            &["worktree", "add", "--detach", &path, &refname(rev)],
-        )
-        .map(drop)
+        run(&self.root, &["worktree", "add", "--detach", &path, rev]).map(drop)
     }
 
     /// Drop worktree: directory, then registration. Prune reads registration, so
@@ -224,11 +213,12 @@ pub fn valid_ref(name: &str) -> bool {
         && name.split('/').all(part)
 }
 
-/// Full ref name: bare branch name can also read as a path. `refs/` prefix stands.
-fn refname(rev: &str) -> String {
-    match rev.starts_with(REFS) {
-        true => rev.to_string(),
-        false => format!("{HEADS}{rev}"),
+/// Full ref of a branch: bare name can also read as a path. `refs/` prefix stands.
+/// A `rev` argument, full ref or commit, passes as given.
+fn refname(branch: &str) -> String {
+    match branch.starts_with(REFS) {
+        true => branch.to_string(),
+        false => format!("{HEADS}{branch}"),
     }
 }
 

@@ -54,9 +54,14 @@ struct Written {
 
 impl Config {
     pub fn from_trunk(git: &Git) -> Result<Self> {
+        Self::at(git, git::TRUNK)
+    }
+
+    /// Settings at `rev`, full ref or commit.
+    pub fn at(git: &Git, rev: &str) -> Result<Self> {
         let text = git
-            .show(git::TRUNK, FILE)?
-            .ok_or_else(|| invalid("absent from the trunk branch"))?;
+            .show(rev, FILE)?
+            .ok_or_else(|| invalid(&format!("absent at `{rev}`")))?;
         Self::parse(&text)
     }
 

@@ -17,7 +17,7 @@ pub struct Board {
 }
 
 /// One row is one session: own steps, one branch, one land ref.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Row {
     /// Key of the row: branch, land ref, fail mark, transcript dir.
     pub id: String,
@@ -29,9 +29,14 @@ pub struct Row {
 
 impl Board {
     pub fn from_trunk(git: &Git, config: &Config) -> Result<Self> {
+        Self::at(git, git::TRUNK, config)
+    }
+
+    /// Board at `rev`, full ref or commit.
+    pub fn at(git: &Git, rev: &str, config: &Config) -> Result<Self> {
         let text = git
-            .show(git::TRUNK, FILE)?
-            .ok_or_else(|| Error::Invalid(format!("{FILE}: absent from the trunk branch")))?;
+            .show(rev, FILE)?
+            .ok_or_else(|| Error::Invalid(format!("{FILE}: absent at `{rev}`")))?;
         Self::parse(&text, config)
     }
 
@@ -52,6 +57,10 @@ impl Board {
 
     pub fn rows(&self) -> &[Row] {
         &self.rows
+    }
+
+    pub fn row(&self, id: &str) -> Option<&Row> {
+        self.rows.iter().find(|row| row.id == id)
     }
 }
 

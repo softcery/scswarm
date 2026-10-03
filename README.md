@@ -67,12 +67,14 @@ Every `poll` seconds, 5 by default, the loop:
 1. Fetches the trunk branch of the checkout at `path` into ref `refs/swarm/trunk`.
 2. Parses `SWARM.yaml` and `scswarm.yaml` at that ref.
 3. Derives the state of every row from git: blocked, ready, running, failed, landed, done.
-4. Gives each ready row a free slot.
+4. Starts one worker process, `scswarm work`, per ready row and free slot.
 5. Sleeps.
 
 A slot is a git worktree at `~/swarm/slot/<project>/<n>` plus one long-lived container `scswarm-<project>-<n>`.
 
 One row is one session of scripted steps: agent prompts, shell `run` steps, and commit steps. The host commits at each commit step and writes ref `refs/swarm/land/<id>` at the last one. A branch with no land ref holds a session cut short: the next cycle drops the branch and replays the row from base.
+
+Workers outlive `serve`. A restart or an upgrade leaves rows in flight running; the new `serve` waits on their locks.
 
 Rows stack. A task whose parent landed but is not merged branches off that parent, so a chain builds while you sleep.
 
@@ -259,9 +261,13 @@ systemctl --user enable --now scswarm@PROJECT
 
 **Row shows `failed`.** Read `scswarm log PROJECT ID` for the failing step. A failed row waits for a new trunk tip, so it costs one attempt per push, not one per cycle. To rerun without a push, run `reset`.
 
-**`serve` exits with `slot N stopped`.** Git or podman failed inside that slot. No row got a fail mark. Read the cause in the journal and fix the machine. systemd starts `serve` again, which restarts every slot container, and the rows in flight replay.
+**`serve` exits with `slot N stopped`.** Git or podman failed inside that slot. No row got a fail mark. Read the cause in the journal and fix the machine. Workers on other slots run on. systemd starts `serve` again, which restarts each slot container the first cycle it finds the slot idle, and the stopped row replays.
 
-**Rerun a task.** Stop `serve`, run `scswarm reset PROJECT ID`, start `serve`. A worker holding that task recreates the refs at its next commit, so stop it first.
+**Rerun a task.** Wait until `status` shows no worker for it, then run `scswarm reset PROJECT ID`. A worker running that task recreates the refs at its next commit. Stopping `serve` stops no worker.
+
+**Upgrade.** Run `cargo install --path .`, then `systemctl --user restart scswarm@PROJECT`. Rows in flight finish on the old binary. New rows start on the new one.
+
+**Stop.** `systemctl --user stop scswarm@PROJECT` ends `serve` alone: rows in flight finish, no new row starts. To end every worker too, run `systemctl --user kill --kill-whom=all scswarm@PROJECT`. Their rows replay from base on the next start.
 
 **Change workers, mounts or env.** If `workers` grows past `ARG WORKERS` of the Containerfile, raise that value, commit it on the trunk, and run `init` first. Then edit the host file. `serve` applies it on the next cycle, slot by slot as each goes idle.
 
@@ -276,11 +282,10 @@ systemctl --user enable --now scswarm@PROJECT
 - Reads the board from the trunk branch only. A row on any other branch stays invisible.
 - A row's failure or crash costs its whole step list. The replay starts from base.
 - `status` prints one line per row, so a task written as three rows reads as three lines.
-- One `serve` per project. Two share the slot worktrees and fight over the same branches. Nothing locks them.
 - A task stacked on a rejected parent needs `reset`.
 - One configured agent means one model both writes and audits the work.
 - A step with no `timeout` runs without limit. No token budget: agent flags in `exec` carry any cap.
-- The container restarts after every try and when `serve` starts. A server a step needs starts and stops inside one `run`.
+- The container restarts after every try and the first time a `serve` finds its slot idle. A server a step needs starts and stops inside one `run`.
 - A podman fault inside `exec` exits 125 and counts as a failed try. A step command that exits 125 reads the same.
 - The transcript keeps full stdout and stderr of every try. Redirect big output to a file.
 - Slots share the CPU, so timings from a `run` step carry noise from other slots. Set `workers: 1`, or lock inside the script.
@@ -289,6 +294,9 @@ systemctl --user enable --now scswarm@PROJECT
 - Mounts use the host path inside the container, so a podman machine must share that path.
 - A conflicting stack costs one merge session per trunk tip, then the row waits.
 - The merge check reads `MERGE_HEAD`. An agent that commits conflict markers passes it.
+- `systemctl stop` leaves rows in flight running.
+- Locks sit on `~/swarm`, which must be a local filesystem. NFS breaks them.
+- A worker hung outside a step holds its slot until killed.
 
 ## Build
 

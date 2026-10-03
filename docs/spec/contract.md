@@ -140,15 +140,22 @@ merge:
 - No `merge` block, a failed merge session, or a conflict left after it: the tool aborts the merge, names no branch, and reports the parent and the files. The row fails and waits for a new trunk tip.
 - A `git merge` error with no `MERGE_HEAD` is git failing, not a conflict: no `merge` steps run.
 - Worktree per slot: `~/swarm/slot/<project>/<n>`. Never inside the project checkout.
-- A slot detaches its worktree when a row ends or fails, and again when `serve` opens it. A branch left checked out by a crash blocks every other slot.
+- A slot detaches its worktree when a row ends or fails, and again when `serve` attaches it. A branch left checked out by a crash blocks every other slot.
 - One commit per commit step, no trailer. The host stages with `add --all`: ignored files miss every commit. A commit step with no diff commits empty, so state still moves.
 - Ref `refs/swarm/land/<id>` holds the last commit of the row. It is the sole record of finished work: no commit message carries state.
 - Ready: not started, every `after` landed or done. Running: branch stands, no land ref. Landed: land ref set. Done: the land commit is an ancestor of the trunk.
 - Failed: ref `refs/swarm/fail/<id>` holds the trunk tip the last attempt ran against, and no land ref stands. `serve` skips the row while that tip stands, so a broken row costs one attempt per trunk tip, not one per cycle. The mark sits outside `refs/heads/`, so it lists as no branch and pushes with none.
-- A branch with no land ref holds a session cut short. `serve` reads it as running, hands it to a slot, and the slot deletes the branch and replays the row from base.
+- A branch with no land ref holds a session cut short, unless a worker holds the row lock. `serve` reads it as running, hands it to a slot, and the worker deletes the branch and replays the row from base.
 - A landed row clears its own mark. `reset <id>` clears branch, land ref and mark of the row and of every dependant.
 - A try fails on non-zero exit, a signal, `timeout`, a blank agent commit reply, or no `session_id` from an agent with `resume`. A step whose tries are spent fails the row and marks it, except a `run` step with `continue_on_error`.
-- A git or podman failure in a slot is no row failure. It writes no mark: `serve` exits 2, and the row replays on the next start.
+- A git or podman failure in a slot is no row failure. It writes no mark: the worker exits 2, `serve` exits 2, and the row replays on the next start. Workers on other slots run on.
+- Locks: flock on 3 standing directories, no file written. The kernel drops a lock when its holder dies, so a crash leaves nothing to clean.
+
+| Lock | Directory | Holder | `serve` while held |
+|---|---|---|---|
+| slot | `~/swarm/slot/<project>/<n>` | worker, whole life | no attach, restart, rebuild, drop or assign |
+| row | `~/swarm/log/<project>/<id>/` | `serve` takes it before spawn, worker inherits it as stdin and holds it to exit | no assign. Held from spawn, so no restart of `serve` reads the row free while its worker lives |
+| project | `~/swarm/<project>.git` | `serve`, whole life | a second `serve` exits 2 |
 
 ## CLI
 
@@ -162,13 +169,21 @@ scswarm status PROJECT     one line per row: id, state, branch, worker
 scswarm log PROJECT ID     transcript, one block per try or commit: prompt, command or commit
                              message, then reply, stdout, stderr, faults
 scswarm reset PROJECT ID   delete swarm/<id>, every dependant branch, their land refs and marks
+scswarm work PROJECT --slot N --row ID --base SHA [--merge BRANCH]... [--env NAME]...
+                           internal, hidden from --help: one row attempt; `serve` spawns one per
+                             assignment. Reads board and config at SHA, branches from SHA, merges
+                             each BRANCH in order, forwards each NAME
 ```
 
-Exit codes: 0 ok, 1 input invalid (config, board, unknown id), 2 git or podman failure. `serve` exits 1 only on a host file invalid at start: an invalid config or board on the trunk skips the cycle. A git or podman failure inside a slot exits `serve` 2.
+Exit codes: 0 ok, 1 input invalid (config, board, unknown id), 2 git or podman failure. `serve` exits 1 only on a host file invalid at start: an invalid config or board on the trunk skips the cycle. `work` exits 0 once it writes the land ref or the fail mark, 2 on a git or podman failure. A worker exit other than 0 exits `serve` 2.
+
+`work` argv and stdin bind across versions: a `serve` started before `cargo install` spawns the new binary. Stdin holds the row lock: `work` refuses a stdin that is not that directory. A change to either needs a release note.
+
+`serve` spawns each worker with stdout and stderr shared, so worker lines reach the same journal, also after `serve` dies. A worker whose `serve` died runs to its end; the process manager reaps it. `systemctl stop` and `restart` end `serve` alone under the shipped unit, `KillMode=process`: rows in flight finish, no new row starts.
 
 ## Container
 
-Rootless podman, `--userns=keep-id`, one long-lived container per slot, named `scswarm-<project>-<n>`. It sleeps; every try of a prompt, `run` or agent commit step is one `podman exec`, then `podman restart --time=0`. The restart kills every process the try left, so a background job never reaches the next step or the commit. `serve` restarts each container a killed `serve` left when it attaches the slot, so a process left inside never reaches the next row. Mounts: slot worktree rw at same path, bare repo ro at same path, `mounts` rw. Every bind carries the `z` flag, so an SELinux host relabels it shared. Credentials arrive as `env` names. Network on. Agent runs with its own permission checks off.
+Rootless podman, `--userns=keep-id`, one long-lived container per slot, named `scswarm-<project>-<n>`. It sleeps; every try of a prompt, `run` or agent commit step is one `podman exec`, then `podman restart --time=0`. The restart kills every process the try left, so a background job never reaches the next step or the commit. `serve` restarts each container once per life, the first cycle it finds the slot idle, so a process a dead worker left inside never reaches the next row. Mounts: slot worktree rw at same path, bare repo ro at same path, `mounts` rw. Every bind carries the `z` flag, so an SELinux host relabels it shared. Credentials arrive as `env` names. Network on. Agent runs with its own permission checks off.
 
 Git inside the container is read-only: the index sits under the bare repo. `git status`, `git log`, `git diff` work. `git add`, `git mv`, `git commit`, `git checkout` fail with `Read-only file system`. Host stages every change with `add --all` at each commit step, so a plain `mv` lands. Project prompts and command files must not ask the agent for a git write.
 
@@ -193,16 +208,22 @@ Image: `image` names a Containerfile on the trunk, built as `localhost/scswarm/<
 - A trunk change leaves running rows on their old base. A trunk without a row's landed commit reads that row as `landed` again, not `done`.
 - Chained rows on a moved trunk take the newer base, so a chain can hold a trunk merge.
 - Mounts use the host path inside the container, so the podman machine must share that path.
-- `env` values come from the `serve` process. A refreshed credential needs a restart.
+- `env` values come from the `serve` process; workers inherit them. A refreshed credential needs a `serve` restart, and rows in flight keep the old value.
 - A row that fails waits for a new trunk tip. A parent that lands while the trunk stands still leaves it waiting: move the trunk or run `reset`.
 - A step with no `timeout` runs without limit. No cap counts tokens.
 - A podman fault inside `exec` exits 125 and counts as a failed try. A step command that exits 125 reads the same: `sh -c` passes the code through.
 - The transcript keeps full stdout and stderr of every try. Redirect big output to a file.
-- A git or podman failure in one slot stops `serve`. Every row in flight replays from base.
+- A git or podman failure in one slot stops `serve`. That row replays from base; rows on other slots run on.
 - A kill between the failure and the mark write loses the mark. The row runs once more.
 - A kill between the commit and the land ref write leaves a branch the next cycle replays.
-- Stop `serve` before `reset`. A worker running that row recreates the refs at its next commit.
-- One `serve` per project. Two share the slot worktrees and fight over the same branches.
+- `reset` a row only while no worker runs it. A running worker recreates the refs at its next commit, and stopping `serve` stops no worker.
+- `systemctl stop` leaves rows in flight running. Hard stop: `systemctl --user kill --kill-whom=all scswarm@<project>`.
+- systemd logs a left-over process line per running worker at each restart. Expected under `KillMode=process`.
+- Ctrl-C in a terminal reaches the whole process group: `serve` and its workers stop.
+- Rows started before an upgrade finish on the old binary. Branch, land ref and fail mark names must read the same in both versions.
+- A worker takes the slot lock after spawn. A new `serve` started before then can attach that slot or run another row on it first; the worker waits for the lock, then runs. A slot dropped in that wait fails the worker with exit 2, and the row replays.
+- Locks need a local filesystem. `~/swarm` on NFS breaks flock.
+- A hung worker holds its slot until killed. Step `timeout` bounds a try; a hang outside a step, for example in git, has no bound.
 - A conflicting stack costs one merge session per trunk tip, then the row waits.
 - The merge check reads `MERGE_HEAD`. An agent that commits conflict markers passes it.
 - Slot pick is the lowest idle index, so a chained row can land on a cold build cache.

@@ -10,6 +10,9 @@ ExecStart=%h/.cargo/bin/scswarm serve %i
 EnvironmentFile=-%h/.config/scswarm/env
 Restart=always
 RestartSec=5
+# Stop and restart end `serve` alone: rows in flight finish on their workers.
+# Hard stop: systemctl --user kill --kill-whom=all scswarm@%i
+KillMode=process
 
 [Install]
 WantedBy=default.target

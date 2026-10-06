@@ -84,6 +84,8 @@ workers: 3
 mounts:
   - ~/alpha/records:/records
   - ~/.cargo/registry:/cargo/registry
+devices:
+  - /dev/dri
 env:
   - ANTHROPIC_API_KEY
 poll: 5
@@ -93,11 +95,12 @@ poll: 5
 - `trunk`: branch of that checkout every task branch starts from. Any name git takes as a ref.
 - `workers`: slot count. One worktree, one container each.
 - `mounts`: extra `host:container` binds, rw. Both sides absolute; host side takes `~/` for home. Build caches ride here.
+- `devices`: host device paths, absolute, each passed as `--device` at the same path. A GPU rides here. A bind in `mounts` cannot carry a device: the `z` relabel of a device node fails.
 - `env`: host environment variable names forwarded into every container. Credentials ride here. Value never reaches an argument list.
 - `poll`: seconds between loop cycles, 1 or more. Absent = 5.
 - These fields cannot sit in `scswarm.yaml`: `trunk` names the branch that file is read from, and the rest changes with the machine.
 - Every field reloads on the next cycle.
-- `serve` converges slots each cycle, at start too: creates each missing slot below `workers`, drops each slot at or above it, rebuilds each slot whose container differs in `mounts` or image ID. A busy slot changes after its row ends. `init` writes no slot.
+- `serve` converges slots each cycle, at start too: creates each missing slot below `workers`, drops each slot at or above it, rebuilds each slot whose container differs in `mounts`, `devices` or image ID. A busy slot changes after its row ends. `init` writes no slot.
 - `env` names apply from the next row on. No container bakes them.
 - Absent or unparsable at start: exit 1. Unparsable later: `serve` reports `stale` once per cause, keeps the last good copy, keeps running.
 
@@ -183,7 +186,7 @@ Exit codes: 0 ok, 1 input invalid (config, board, unknown id), 2 git or podman f
 
 ## Container
 
-Rootless podman, `--userns=keep-id`, one long-lived container per slot, named `scswarm-<project>-<n>`. It sleeps; every try of a prompt, `run` or agent commit step is one `podman exec`, then `podman restart --time=0`. The restart kills every process the try left, so a background job never reaches the next step or the commit. `serve` restarts each container once per life, the first cycle it finds the slot idle, so a process a dead worker left inside never reaches the next row. Mounts: slot worktree rw at same path, bare repo ro at same path, `mounts` rw. Every bind carries the `z` flag, so an SELinux host relabels it shared. Credentials arrive as `env` names. Network on. Agent runs with its own permission checks off.
+Rootless podman, `--userns=keep-id`, one long-lived container per slot, named `scswarm-<project>-<n>`. It sleeps; every try of a prompt, `run` or agent commit step is one `podman exec`, then `podman restart --time=0`. The restart kills every process the try left, so a background job never reaches the next step or the commit. `serve` restarts each container once per life, the first cycle it finds the slot idle, so a process a dead worker left inside never reaches the next row. Mounts: slot worktree rw at same path, bare repo ro at same path, `mounts` rw. Every bind carries the `z` flag, so an SELinux host relabels it shared. `devices` pass as `--device`, with no relabel. Credentials arrive as `env` names. Network on. Agent runs with its own permission checks off.
 
 Git inside the container is read-only: the index sits under the bare repo. `git status`, `git log`, `git diff` work. `git add`, `git mv`, `git commit`, `git checkout` fail with `Read-only file system`. Host stages every change with `add --all` at each commit step, so a plain `mv` lands. Project prompts and command files must not ask the agent for a git write.
 
@@ -203,7 +206,7 @@ Image: `image` names a Containerfile on the trunk, built as `localhost/scswarm/<
 - A slot due to drop or rebuild waits for its row to end. A long row holds the old slot past the change.
 - While slots rebuild, rows run on old and new image at once.
 - The image build context is the trunk ref. A build that reads an untracked or ignored file fails after that file leaves the ref.
-- Containers carry the `mounts` they baked as a label. A release that changes that text rebuilds every slot as it goes idle.
+- Containers carry the `mounts` and `devices` they baked as labels. A release that changes that text rebuilds every slot as it goes idle.
 - `init` pulls a named image only when the host lacks it. A new push under the same tag needs `podman pull`.
 - A trunk change leaves running rows on their old base. A trunk without a row's landed commit reads that row as `landed` again, not `done`.
 - Chained rows on a moved trunk take the newer base, so a chain can hold a trunk merge.

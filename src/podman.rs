@@ -29,6 +29,7 @@ const FOREVER: &str = "infinity";
 const INIT: &str = "--init";
 /// Host file field the container bakes. `serve` reads it back and compares.
 const MOUNTS_LABEL: &str = "scswarm.mounts";
+const DEVICES_LABEL: &str = "scswarm.devices";
 
 /// One long-lived container per slot. Sole owner of podman arguments.
 pub struct Container {
@@ -41,6 +42,7 @@ pub struct Spec<'a> {
     /// Bare repo: worktree gitdir and common dir sit under it.
     pub repo: &'a Path,
     pub mounts: &'a [Mount],
+    pub devices: &'a [String],
     pub stamp: &'a Stamp,
 }
 
@@ -67,7 +69,7 @@ impl Container {
         ])
     }
 
-    /// Worktree rw, bare repo ro, project mounts rw. Every path is the host path.
+    /// Worktree rw, bare repo ro, mounts rw, devices by `--device`: a device node takes no relabel.
     fn run_args(&self, spec: &Spec) -> Result<Vec<String>> {
         let worktree = paths::arg(spec.worktree)?;
         let repo = paths::arg(spec.repo)?;
@@ -79,11 +81,15 @@ impl Container {
             "--userns=keep-id".to_string(),
             format!("--workdir={worktree}"),
             format!("--label={MOUNTS_LABEL}={}", spec.stamp.mounts),
+            format!("--label={DEVICES_LABEL}={}", spec.stamp.devices),
             bind(&worktree, &worktree, WRITE),
             bind(&repo, &repo, READ),
         ];
         for mount in spec.mounts {
             args.push(bind(&mount.host, &mount.guest, WRITE));
+        }
+        for device in spec.devices {
+            args.push(format!("--device={device}"));
         }
         args.push(SLEEP.to_string());
         args.push(spec.stamp.image.clone());
@@ -214,6 +220,7 @@ impl Listed {
         let stamp = Stamp {
             image: bare_id(&self.image),
             mounts: label(MOUNTS_LABEL),
+            devices: label(DEVICES_LABEL),
         };
         Some((index, stamp))
     }
@@ -289,12 +296,14 @@ mod tests {
         let stamp = Stamp {
             image: "swarm:latest".to_string(),
             mounts: "[\"/records:/mnt\"]".to_string(),
+            devices: "[\"/dev/dri\"]".to_string(),
         };
         let args = container
             .run_args(&Spec {
                 worktree: Path::new("/slot/2"),
                 repo: Path::new("/repo.git"),
                 mounts: &mounts,
+                devices: &["/dev/dri".to_string()],
                 stamp: &stamp,
             })
             .expect("utf-8 paths must build arguments");
@@ -304,6 +313,7 @@ mod tests {
         assert!(holds("--volume=/slot/2:/slot/2:rw,z"), "{args:?}");
         assert!(holds("--volume=/repo.git:/repo.git:ro,z"), "{args:?}");
         assert!(holds("--volume=/records:/mnt:rw,z"), "{args:?}");
+        assert!(holds("--device=/dev/dri"), "{args:?}");
         assert!(
             holds("--label=scswarm.mounts=[\"/records:/mnt\"]"),
             "{args:?}"

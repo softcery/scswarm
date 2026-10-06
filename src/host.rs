@@ -36,6 +36,8 @@ pub struct Remote {
 pub struct Slots {
     pub workers: usize,
     pub mounts: Vec<Mount>,
+    /// Host device paths each container gets at the same path.
+    pub devices: Vec<String>,
     /// Host environment variables each exec gets. Credentials ride here.
     pub env: Vec<String>,
 }
@@ -47,6 +49,7 @@ pub struct Stamp {
     /// Image ID: a rebuild under the same name reads as a change.
     pub image: String,
     pub mounts: String,
+    pub devices: String,
 }
 
 /// One bind: absolute host path, absolute container path. Both sides rw.
@@ -66,6 +69,8 @@ struct Written {
     workers: usize,
     #[serde(default)]
     mounts: Vec<Mount>,
+    #[serde(default)]
+    devices: Vec<String>,
     #[serde(default)]
     env: Vec<String>,
     #[serde(default)]
@@ -89,11 +94,12 @@ impl Host {
 }
 
 impl Slots {
-    /// Text the containers carry: image ID plus the mounts they bake.
+    /// Text the containers carry: image ID plus the mounts and devices they bake.
     pub fn stamp(&self, image: &str) -> Result<Stamp> {
         Ok(Stamp {
             image: image.to_string(),
             mounts: text(&self.mounts)?,
+            devices: text(&self.devices)?,
         })
     }
 }
@@ -127,7 +133,23 @@ impl Written {
                 "field `poll` must be seconds, 1 or more, or stay absent",
             ));
         }
+        self.check_devices(file)?;
         self.check_env(file)
+    }
+
+    fn check_devices(&self, file: &str) -> Result<()> {
+        for (index, path) in self.devices.iter().enumerate() {
+            if !path.starts_with('/') {
+                return Err(invalid(
+                    file,
+                    &format!(
+                        "field `devices` entry {} must hold an absolute host path",
+                        index + 1
+                    ),
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn check_env(&self, file: &str) -> Result<()> {
@@ -166,6 +188,7 @@ impl Written {
             slots: Slots {
                 workers: self.workers,
                 mounts,
+                devices: self.devices,
                 env: self.env,
             },
             poll: Duration::from_secs(self.poll.unwrap_or(POLL)),
@@ -226,6 +249,8 @@ trunk: blahblah
 workers: 3
 mounts:
   - ~/alpha/records:/records
+devices:
+  - /dev/dri
 env:
   - ANTHROPIC_API_KEY
 ";
@@ -241,6 +266,7 @@ env:
         assert_eq!(host.remote.trunk, "blahblah");
         assert_eq!(host.slots.workers, 3);
         assert_eq!(host.slots.mounts[0].guest, "/records");
+        assert_eq!(host.slots.devices, ["/dev/dri"]);
         assert_eq!(host.slots.env, ["ANTHROPIC_API_KEY"]);
     }
 

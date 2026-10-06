@@ -111,10 +111,11 @@ What this machine gives the swarm. Never committed.
 | `trunk` | branch every task branch starts from |
 | `workers` | slot count |
 | `mounts` | extra `host:container` binds, read-write. Build caches ride here |
+| `devices` | host device paths passed as `--device`, for example `/dev/dri` for a GPU |
 | `env` | host environment variable names forwarded into every container. Credentials ride here |
 | `poll` | seconds between loop cycles. Absent = 5 |
 
-Every field reloads each cycle. `serve` creates missing slots, drops slots at or above `workers`, and rebuilds a slot whose container holds old `mounts` or image. A busy slot finishes its row first. `env` applies from the next row on, with no rebuild.
+Every field reloads each cycle. `serve` creates missing slots, drops slots at or above `workers`, and rebuilds a slot whose container holds old `mounts`, `devices` or image. A busy slot finishes its row first. `env` applies from the next row on, with no rebuild.
 
 ### `scswarm.yaml` in the project root
 
@@ -269,7 +270,7 @@ systemctl --user enable --now scswarm@PROJECT
 
 **Stop.** `systemctl --user stop scswarm@PROJECT` ends `serve` alone: rows in flight finish, no new row starts. To end every worker too, run `systemctl --user kill --kill-whom=all scswarm@PROJECT`. Their rows replay from base on the next start.
 
-**Change workers, mounts or env.** If `workers` grows past `ARG WORKERS` of the Containerfile, raise that value, commit it on the trunk, and run `init` first. Then edit the host file. `serve` applies it on the next cycle, slot by slot as each goes idle.
+**Change workers, mounts, devices or env.** If `workers` grows past `ARG WORKERS` of the Containerfile, raise that value, commit it on the trunk, and run `init` first. Then edit the host file. `serve` applies it on the next cycle, slot by slot as each goes idle.
 
 **Change the image.** Commit the Containerfile on the trunk, run `init`. `serve` rebuilds each slot on the new image ID as it goes idle. An absent image skips every cycle with `skip cause=image ... is absent`.
 

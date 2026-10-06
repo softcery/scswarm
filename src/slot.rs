@@ -38,6 +38,7 @@ pub fn create(
         worktree: &slot.path,
         repo: repo.root(),
         mounts: &slots.mounts,
+        devices: &slots.devices,
         stamp,
     })?;
     slot.release()

@@ -37,7 +37,7 @@ pub struct Remote {
 pub struct Slots {
     pub workers: usize,
     pub mounts: Vec<Mount>,
-    /// Host device paths each container gets at the same path.
+    /// Host device nodes each container gets at the same path. Resolved at load.
     pub devices: Vec<String>,
     /// Host environment variables each exec gets. Credentials ride here.
     pub env: Vec<String>,
@@ -95,12 +95,12 @@ impl Host {
 }
 
 impl Slots {
-    /// Text the containers carry: image ID plus the mounts and device nodes they bake.
+    /// Text the containers carry: image ID plus the mounts and devices they bake.
     pub fn stamp(&self, image: &str) -> Result<Stamp> {
         Ok(Stamp {
             image: image.to_string(),
             mounts: text(&self.mounts)?,
-            devices: text(&device::nodes(&self.devices)?)?,
+            devices: text(&self.devices)?,
         })
     }
 }
@@ -169,7 +169,7 @@ impl Written {
         Ok(())
     }
 
-    /// Resolve home paths once: later readers hold real paths.
+    /// Resolve home paths and device nodes once: later readers hold real paths.
     fn split(self) -> Result<Host> {
         let mounts = self
             .mounts
@@ -189,7 +189,7 @@ impl Written {
             slots: Slots {
                 workers: self.workers,
                 mounts,
-                devices: self.devices,
+                devices: device::nodes(&self.devices)?,
                 env: self.env,
             },
             poll: Duration::from_secs(self.poll.unwrap_or(POLL)),
@@ -251,7 +251,7 @@ workers: 3
 mounts:
   - ~/alpha/records:/records
 devices:
-  - /dev/dri
+  - /dev/null
 env:
   - ANTHROPIC_API_KEY
 ";
@@ -267,7 +267,7 @@ env:
         assert_eq!(host.remote.trunk, "blahblah");
         assert_eq!(host.slots.workers, 3);
         assert_eq!(host.slots.mounts[0].guest, "/records");
-        assert_eq!(host.slots.devices, ["/dev/dri"]);
+        assert_eq!(host.slots.devices, ["/dev/null"]);
         assert_eq!(host.slots.env, ["ANTHROPIC_API_KEY"]);
     }
 
@@ -282,8 +282,7 @@ env:
 
     #[test]
     fn stamps_mounts() {
-        let text = EXAMPLE.replace("/dev/dri", "/dev/null");
-        let host = Host::parse(FILE, &text).expect("example must parse");
+        let host = Host::parse(FILE, EXAMPLE).expect("example must parse");
         let stamp = host
             .slots
             .stamp("localhost/scswarm/alpha")

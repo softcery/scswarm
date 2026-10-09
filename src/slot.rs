@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::device;
 use crate::error::Result;
 use crate::git::{self, Git};
 use crate::host::{Slots, Stamp};
@@ -39,7 +38,7 @@ pub fn create(
         worktree: &slot.path,
         repo: repo.root(),
         mounts: &slots.mounts,
-        devices: &device::nodes(&slots.devices)?,
+        devices: &slots.devices,
         stamp,
     })?;
     slot.release()

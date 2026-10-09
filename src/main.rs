@@ -1,6 +1,7 @@
 mod board;
 mod call;
 mod config;
+mod device;
 mod error;
 mod event;
 mod git;

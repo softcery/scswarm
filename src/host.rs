@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::device;
 use crate::error::{Error, Result};
 use crate::git;
 use crate::paths::{self, Project};
@@ -94,12 +95,12 @@ impl Host {
 }
 
 impl Slots {
-    /// Text the containers carry: image ID plus the mounts and devices they bake.
+    /// Text the containers carry: image ID plus the mounts and device nodes they bake.
     pub fn stamp(&self, image: &str) -> Result<Stamp> {
         Ok(Stamp {
             image: image.to_string(),
             mounts: text(&self.mounts)?,
-            devices: text(&self.devices)?,
+            devices: text(&device::nodes(&self.devices)?)?,
         })
     }
 }
@@ -281,7 +282,8 @@ env:
 
     #[test]
     fn stamps_mounts() {
-        let host = Host::parse(FILE, EXAMPLE).expect("example must parse");
+        let text = EXAMPLE.replace("/dev/dri", "/dev/null");
+        let host = Host::parse(FILE, &text).expect("example must parse");
         let stamp = host
             .slots
             .stamp("localhost/scswarm/alpha")
@@ -291,5 +293,6 @@ env:
             "{}",
             stamp.mounts
         );
+        assert_eq!(stamp.devices, "[\"/dev/null\"]");
     }
 }

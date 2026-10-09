@@ -95,12 +95,12 @@ poll: 5
 - `trunk`: branch of that checkout every task branch starts from. Any name git takes as a ref.
 - `workers`: slot count. One worktree, one container each.
 - `mounts`: extra `host:container` binds, rw. Both sides absolute; host side takes `~/` for home. Build caches ride here.
-- `devices`: host device paths, absolute, each passed as `--device` at the same path. A GPU rides here. A bind in `mounts` cannot carry a device: the `z` relabel of a device node fails.
+- `devices`: host device paths, absolute. A folder stands for each device node under it, symlinks skipped. Each node passes as `--device` at the same path. A GPU rides here. A bind in `mounts` cannot carry a device: the `z` relabel of a device node fails.
 - `env`: host environment variable names forwarded into every container. Credentials ride here. Value never reaches an argument list.
 - `poll`: seconds between loop cycles, 1 or more. Absent = 5.
 - These fields cannot sit in `scswarm.yaml`: `trunk` names the branch that file is read from, and the rest changes with the machine.
 - Every field reloads on the next cycle.
-- `serve` converges slots each cycle, at start too: creates each missing slot below `workers`, drops each slot at or above it, rebuilds each slot whose container differs in `mounts`, `devices` or image ID. A busy slot changes after its row ends. `init` writes no slot.
+- `serve` converges slots each cycle, at start too: creates each missing slot below `workers`, drops each slot at or above it, rebuilds each slot whose container differs in `mounts`, device nodes or image ID. A GPU node renumbered at boot rebuilds the slot. A busy slot changes after its row ends. `init` writes no slot.
 - `env` names apply from the next row on. No container bakes them.
 - Absent or unparsable at start: exit 1. Unparsable later: `serve` reports `stale` once per cause, keeps the last good copy, keeps running.
 
@@ -206,7 +206,7 @@ Image: `image` names a Containerfile on the trunk, built as `localhost/scswarm/<
 - A slot due to drop or rebuild waits for its row to end. A long row holds the old slot past the change.
 - While slots rebuild, rows run on old and new image at once.
 - The image build context is the trunk ref. A build that reads an untracked or ignored file fails after that file leaves the ref.
-- Containers carry the `mounts` and `devices` they baked as labels. A release that changes that text rebuilds every slot as it goes idle.
+- Containers carry the `mounts` and device nodes they baked as labels. A release that changes that text rebuilds every slot as it goes idle.
 - `init` pulls a named image only when the host lacks it. A new push under the same tag needs `podman pull`.
 - A trunk change leaves running rows on their old base. A trunk without a row's landed commit reads that row as `landed` again, not `done`.
 - Chained rows on a moved trunk take the newer base, so a chain can hold a trunk merge.

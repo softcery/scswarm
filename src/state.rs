@@ -39,16 +39,25 @@ pub fn derive(board: &Board, git: &Git) -> Result<Vec<State>> {
         .iter()
         .map(|row| row_own(git, &row.id, &tip))
         .collect::<Result<Vec<Option<State>>>>()?;
-    Ok(board
+    Ok(standing(board, &own))
+}
+
+/// Own state gated by parents. Branch with no land ref waits on parents like
+/// fresh row, so stale branch from old board starts no early run.
+fn standing(board: &Board, own: &[Option<State>]) -> Vec<State> {
+    board
         .rows()
         .iter()
-        .zip(&own)
-        .map(|(row, state)| match state {
-            Some(state) => *state,
-            None if row.after.iter().all(|&parent| settled(own[parent])) => State::Ready,
-            None => State::Blocked,
+        .zip(own)
+        .map(|(row, state)| {
+            let free = row.after.iter().all(|&parent| settled(own[parent]));
+            match state {
+                Some(State::Running) | None if !free => State::Blocked,
+                Some(state) => *state,
+                None => State::Ready,
+            }
         })
-        .collect())
+        .collect()
 }
 
 impl fmt::Display for State {
@@ -81,4 +90,37 @@ fn row_own(git: &Git, id: &str, tip: &str) -> Result<Option<State>> {
 /// Parent a dependant can branch from.
 fn settled(state: Option<State>) -> bool {
     matches!(state, Some(State::Landed | State::Done))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    const CONFIG: &str = "\
+image: Containerfile.swarm
+default_agent: claude
+agents:
+  claude:
+    exec: claude -p
+commit: Message only.
+";
+
+    const BOARD: &str = "\
+- id: one
+  steps: [Work., {commit: Work.}]
+- id: two
+  after: [one]
+  steps: [Work., {commit: Work.}]
+";
+
+    #[test]
+    fn stale_branch_waits_on_parent() {
+        let config = Config::parse(CONFIG).expect("test config must parse");
+        let board = Board::parse(BOARD, &config).expect("test board must parse");
+        let stale = standing(&board, &[None, Some(State::Running)]);
+        assert_eq!(stale, [State::Ready, State::Blocked]);
+        let replay = standing(&board, &[Some(State::Landed), Some(State::Running)]);
+        assert_eq!(replay, [State::Landed, State::Running]);
+    }
 }

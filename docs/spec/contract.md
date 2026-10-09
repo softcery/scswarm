@@ -146,9 +146,9 @@ merge:
 - A slot detaches its worktree when a row ends or fails, and again when `serve` attaches it. A branch left checked out by a crash blocks every other slot.
 - One commit per commit step, no trailer. The host stages with `add --all`: ignored files miss every commit. A commit step with no diff commits empty, so state still moves.
 - Ref `refs/swarm/land/<id>` holds the last commit of the row. It is the sole record of finished work: no commit message carries state.
-- Ready: not started, every `after` landed or done. Running: branch stands, no land ref. Landed: land ref set. Done: the land commit is an ancestor of the trunk.
+- Ready: not started, every `after` landed or done. Running: branch stands, no land ref, every `after` landed or done. Blocked: any `after` not landed or done, and no land ref. Landed: land ref set. Done: the land commit is an ancestor of the trunk.
 - Failed: ref `refs/swarm/fail/<id>` holds the trunk tip the last attempt ran against, and no land ref stands. `serve` skips the row while that tip stands, so a broken row costs one attempt per trunk tip, not one per cycle. The mark sits outside `refs/heads/`, so it lists as no branch and pushes with none.
-- A branch with no land ref holds a session cut short, unless a worker holds the row lock. `serve` reads it as running, hands it to a slot, and the worker deletes the branch and replays the row from base.
+- A branch with no land ref holds a session cut short, unless a worker holds the row lock. Once its parents settle, `serve` reads it as running, hands it to a slot, and the worker deletes the branch and replays the row from base.
 - A landed row clears its own mark. `reset <id>` clears branch, land ref and mark of the row and of every dependant.
 - A try fails on non-zero exit, a signal, `timeout`, a blank agent commit reply, or no `session_id` from an agent with `resume`. A step whose tries are spent fails the row and marks it, except a `run` step with `continue_on_error`.
 - A git or podman failure in a slot is no row failure. It writes no mark: the worker exits 2, `serve` exits 2, and the row replays on the next start. Workers on other slots run on.

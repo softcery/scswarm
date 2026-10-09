@@ -72,7 +72,7 @@ Every `poll` seconds, 5 by default, the loop:
 
 A slot is a git worktree at `~/swarm/slot/<project>/<n>` plus one long-lived container `scswarm-<project>-<n>`.
 
-One row is one session of scripted steps: agent prompts, shell `run` steps, and commit steps. The host commits at each commit step and writes ref `refs/swarm/land/<id>` at the last one. A branch with no land ref holds a session cut short: the next cycle drops the branch and replays the row from base.
+One row is one session of scripted steps: agent prompts, shell `run` steps, and commit steps. The host commits at each commit step and writes ref `refs/swarm/land/<id>` at the last one. A branch with no land ref holds a session cut short: once its `after` rows land, the next cycle drops the branch and replays the row from base.
 
 Workers outlive `serve`. A restart or an upgrade leaves rows in flight running; the new `serve` waits on their locks.
 

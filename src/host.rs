@@ -283,10 +283,7 @@ env:
     #[test]
     fn stamps_mounts() {
         let host = Host::parse(FILE, EXAMPLE).expect("example must parse");
-        let stamp = host
-            .slots
-            .stamp("localhost/scswarm/alpha")
-            .expect("stamp");
+        let stamp = host.slots.stamp("localhost/scswarm/alpha").expect("stamp");
         assert!(
             stamp.mounts.ends_with("alpha/records:/records\"]"),
             "{}",

@@ -41,6 +41,11 @@ chmod +x .git/hooks/pre-commit
 
 A phrase on the `TELLS` list in the script fails the check. Pass `--strict` to fail on warnings too.
 
+## Propose a change
+
+- Bug or small fix: open a GitHub issue.
+- New behavior or a design change: write an RFC. Flow and template: [docs/rfcs/README.md](docs/rfcs/README.md).
+
 ## Design rules
 
 - Read [docs/refs/architecture.md](docs/refs/architecture.md) and [docs/spec/contract.md](docs/spec/contract.md) first.

@@ -72,12 +72,13 @@ Apply to everything: chat, docs, comments, commit messages, PR descriptions. Nev
 - Use no memory system. No `~/.claude/projects/.../memory/`, no `MEMORY.md`, no per-fact files. Take context from code, git log, conversation.
 - Create no scheduled tasks. No `/loop`, cron, `ScheduleWakeup`, background timers.
 - Review `./docs/refs/` and `./docs/spec/` before decisions.
+- Tracker: designs are RFCs under `./docs/rfcs/`, bugs are GitHub issues of `softcery/scswarm`, read with `gh issue`.
 - Put no references to plans/docs/specs in codebase or comments. Add nothing that gets stale.
 - Never re-read sources already in context.
 - Never use cat/sed for file reading. Use Read tool. Use `rmap` over find/ls/tree/grep for Rust layout.
 - Write minimal must-have tests only. Write no tests for data, config. In doubt, write no test.
 - Keep no backwards compatibility or hash stability across changes.
-- Stay on current branch. Never switch.
+- Do not switch branches without user permission.
 - Spawn no subagents without user request or permission. Ask first when needed.
 - Write docs as claim, number, source. No prose. Rewrite with `/deslop`. Delete superseded docs. Never enter unmeasured claim into ref.
 - Docs: state known limits and failure modes, not only what works. Name destination in link text. Put alt text on meaningful images. Never carry meaning by bold/color/position alone.
@@ -99,6 +100,7 @@ tests/         e2e.rs: live slot set and `serve` restart against podman
 docs/
   refs/architecture.md   loop, state, isolation
   spec/contract.md       SWARM.yaml, scswarm.yaml, CLI
+  rfcs/                  accepted designs not yet built; flow in README.md
 scripts/       comment-budget.py
 ```
 </index>

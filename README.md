@@ -299,13 +299,9 @@ systemctl --user enable --now scswarm@PROJECT
 - Locks sit on `~/swarm`, which must be a local filesystem. NFS breaks them.
 - A worker hung outside a step holds its slot until killed.
 
-## Build
+## Contributing
 
-```
-cargo build --release
-cargo test
-make lint
-```
+Build, checks and design rules: [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY.md).
 
 ## License
 

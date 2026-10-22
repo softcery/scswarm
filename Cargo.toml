@@ -6,6 +6,7 @@ rust-version = "1.89"
 description = "Autonomous task swarm: board in git, worker per worktree and container, agent sessions as scripted turns."
 authors = ["Elijah Atamas"]
 license = "MIT"
+repository = "https://github.com/softcery/scswarm"
 publish = false
 
 [[bin]]

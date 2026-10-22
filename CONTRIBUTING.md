@@ -50,6 +50,21 @@ A phrase on the `TELLS` list in the script fails the check. Pass `--strict` to f
 - Error messages name the field, the expected format and the shape of the value received. They never echo the raw value or a secret.
 - Write tests for behavior only. Write no tests for data or config.
 
-## Commit messages
+## Commit messages, pull request and issue titles
 
-Subject line: `area: change`, lowercase, for example `host: resolve the device nodes once at load`.
+Follow [Conventional Commits 1.0.0 (conventionalcommits.org)](https://www.conventionalcommits.org/en/v1.0.0/): `type(scope): description`, lowercase, no period.
+
+| Type | Use for |
+|---|---|
+| `feat` | new behavior |
+| `fix` | bug fix |
+| `perf` | speed or resource use, same behavior |
+| `refactor` | code change with no behavior change |
+| `test` | tests alone |
+| `docs` | docs alone |
+| `build` | `Cargo.toml`, `Makefile`, toolchain, Containerfile |
+| `chore` | anything else, no `src/` change |
+
+- Scope is the module, for example `host` for `src/host.rs`, or an area: `slot`, `steps`, `status`.
+- A change to the CLI, `SWARM.yaml`, `scswarm.yaml` or the host file that breaks existing setups takes `!` after the scope and a `BREAKING CHANGE:` footer.
+- Example: `fix(host): resolve the device nodes once at load`.

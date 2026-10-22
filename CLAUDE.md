@@ -67,6 +67,7 @@ Apply to everything: chat, docs, comments, commit messages, PR descriptions. Nev
 ## Rules
 - Run `make lint` before every commit, not after every change. Pre-commit hook runs same target. Land commits only on clean lint.
   - Comment budget: file warn 15% / fail 20% chars; blocks warn >2 / fail >4 lines; tree warn 13% / fail 15%. `--strict` fails warnings. Covers py/ts/tsx/js/jsx/rs + md.
+- Commit messages, PR and issue titles: Conventional Commits, `type(scope): description`. Types and scopes in `CONTRIBUTING.md`.
 - Give no time/day/hour estimates for engineering effort.
 - Use no memory system. No `~/.claude/projects/.../memory/`, no `MEMORY.md`, no per-fact files. Take context from code, git log, conversation.
 - Create no scheduled tasks. No `/loop`, cron, `ScheduleWakeup`, background timers.

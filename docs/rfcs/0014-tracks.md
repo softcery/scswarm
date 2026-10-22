@@ -79,9 +79,9 @@ poll: 5
 | `refs/swarm/heads/*` | fetched remote branches | VM |
 | `swarm/<track>/<id>` | row in progress | VM |
 | `<to>` | track output | pushed, no force |
-| `refs/swarm/land/<track>/<id>` | row's last commit | pushed |
-| `refs/swarm/fail/<track>/<id>/track` | track tip of the failed attempt | pushed |
-| `refs/swarm/fail/<track>/<id>/to` | `to` tip of the failed attempt | pushed |
+| `refs/swarm/land/<track>/<id>` | row's last commit | pushed with force |
+| `refs/swarm/fail/<track>/<id>/track` | track tip of the failed attempt | pushed with force |
+| `refs/swarm/fail/<track>/<id>/to` | `to` tip of the failed attempt | pushed with force |
 
 Fetch refspec: `+refs/heads/*:refs/swarm/heads/*`.
 
@@ -93,7 +93,7 @@ Fetch refspec: `+refs/heads/*:refs/swarm/heads/*`.
 4. Pick rows for free slots: highest `priority` first; tracks of equal priority take turns; file order inside a track. No preemption.
 5. Worker: build `image` from the `to` tip, create `swarm/<track>/<id>` at the `to` tip, run steps, write the land ref.
 6. Merge the row into `to`. If `to` moved, merge; on conflict, run `merge` steps in the row's own session.
-7. Push `to` without force, then the land ref. If the push is rejected, fetch, merge, push again.
+7. Push `to` without force, then the land ref with force. If the `to` push is rejected, fetch, merge, push again.
 
 ### States
 
@@ -158,4 +158,10 @@ Slice 2, after slice 1 lands: `priority` in step 6 and the `env` list in step 1.
 - A row that needs another track's output names that track's `to` as `from`. `after` never crosses tracks.
 - A 429 usage limit fails rows of every track that shares the credential. Per-team `env` limits the blast to one team.
 - Push needs a deploy key or token on the VM, never in a container.
-- Unverified: GitHub accepts pushes to `refs/swarm/*` from a deploy key on every plan.
+- GitHub accepts `refs/swarm/*` from a write deploy key. Checked 2026-10-22, private repo on a personal account, ssh, git push:
+  - create of `refs/swarm/land/laser/bolt`, `refs/swarm/fail/laser/burn/track` and `refs/swarm/fail/laser/burn/to`: accepted
+  - fetch `+refs/swarm/*:refs/swarm/*` in a fresh clone: 3 refs
+  - `GET /repos/{owner}/{repo}/branches`: lists `main` and `feat-x` alone, so the refs stay out of the web UI branch list
+  - non-force update of `refs/swarm/land/laser/bolt` to a non-descendant: `! [rejected] (non-fast-forward)`, so land and fail refs need force
+  - delete with `git push origin :<ref>`: accepted
+- Unverified: organization repos, GitHub Enterprise, and branch rulesets that target all refs.

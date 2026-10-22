@@ -5,6 +5,7 @@ edition = "2021"
 rust-version = "1.89"
 description = "Autonomous task swarm: board in git, worker per worktree and container, agent sessions as scripted turns."
 authors = ["Elijah Atamas"]
+license = "MIT"
 publish = false
 
 [[bin]]

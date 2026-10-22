@@ -306,3 +306,7 @@ cargo build --release
 cargo test
 make lint
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).

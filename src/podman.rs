@@ -12,8 +12,6 @@ use crate::proc;
 
 const BIN: &str = "podman";
 const NAME: &str = "scswarm";
-/// Host image store. Keeps built image apart from remote image of same name.
-const LOCAL: &str = "localhost";
 /// Tag podman adds to a name that carries none. It reports the full form back.
 const LATEST: &str = "latest";
 /// Prefix some podman replies put on an image ID.
@@ -30,6 +28,9 @@ const INIT: &str = "--init";
 /// Host file field the container bakes. `serve` reads it back and compares.
 const MOUNTS_LABEL: &str = "scswarm.mounts";
 const DEVICES_LABEL: &str = "scswarm.devices";
+
+/// What a build or pull gave: image ID, or the last line podman printed on failure.
+pub type Made = std::result::Result<String, String>;
 
 /// One long-lived container per slot. Sole owner of podman arguments.
 pub struct Container {
@@ -131,6 +132,11 @@ pub fn slots(project: &Project) -> Result<BTreeMap<usize, Stamp>> {
     Ok(held.iter().filter_map(|one| one.slot(&prefix)).collect())
 }
 
+/// Stamp the container of one slot carries. `None` when absent.
+pub fn stamp(project: &Project, index: usize) -> Result<Option<Stamp>> {
+    Ok(slots(project)?.remove(&index))
+}
+
 /// Drop the container of one slot. Does nothing when absent.
 pub fn remove(project: &Project, index: usize) -> Result<()> {
     drop_container(&name(project, index))
@@ -158,25 +164,19 @@ pub fn image_id(image: &str) -> Result<Option<String>> {
     Ok(Some(bare_id(id.trim())))
 }
 
-/// Fetch an image from its registry. Output streams to operator.
-pub fn pull(image: &str) -> Result<()> {
-    proc::stream(BIN, here(), &["pull".to_string(), image.to_string()])
+/// Fetch an image from its registry.
+pub fn pull(image: &str) -> Result<Made> {
+    made(&["pull".to_string(), "--quiet".to_string(), image.to_string()])
 }
 
-/// Build project Containerfile. Output streams to operator.
-pub fn build(tag: &str, file: &Path, context: &Path) -> Result<()> {
-    let args = [
+/// Build a Containerfile. The image takes no tag: a slot runs it by ID.
+pub fn build(file: &Path, context: &Path) -> Result<Made> {
+    made(&[
         "build".to_string(),
-        format!("--tag={tag}"),
+        "--quiet".to_string(),
         format!("--file={}", paths::arg(file)?),
         paths::arg(context)?,
-    ];
-    proc::stream(BIN, here(), &args)
-}
-
-/// Image tag for project that ships a Containerfile.
-pub fn tag(project: &Project) -> String {
-    image_ref(&format!("{LOCAL}/{NAME}/{project}"))
+    ])
 }
 
 /// Image name in the form podman reports: an untagged name reads as `:latest`.
@@ -224,6 +224,18 @@ impl Listed {
         };
         Some((index, stamp))
     }
+}
+
+/// Build or pull: `--quiet` prints the image ID last on stdout.
+fn made(args: &[String]) -> Result<Made> {
+    let out = proc::answer(BIN, here(), args)?;
+    if !out.status.success() {
+        return Ok(Err(proc::last_line(&out)));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    Ok(Ok(bare_id(
+        stdout.lines().last().unwrap_or_default().trim(),
+    )))
 }
 
 /// Image ID with no digest prefix. Both sides of a stamp pass here.
@@ -277,10 +289,7 @@ mod tests {
 
     #[test]
     fn reads_an_untagged_name_as_latest() {
-        assert_eq!(
-            image_ref("localhost/scswarm/hex"),
-            "localhost/scswarm/hex:latest"
-        );
+        assert_eq!(image_ref("localhost/hex"), "localhost/hex:latest");
         assert_eq!(image_ref("docker.io/a/b:1.2"), "docker.io/a/b:1.2");
         assert_eq!(image_ref("reg.example:5000/b"), "reg.example:5000/b:latest");
     }

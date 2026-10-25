@@ -4,6 +4,7 @@ use std::path::Path;
 
 use crate::error::{Error, Result};
 use crate::paths::{self, Project, MERGE_LOG, RUN_LOG};
+use crate::state::Key;
 use crate::transcript::Entry;
 
 const PROMPT: &str = ">";
@@ -13,20 +14,20 @@ const REPLY: &str = "<";
 const STDERR: &str = "2>";
 const FAULT: &str = "!";
 
-/// Print the transcripts of one task: the merge session first, then the row.
-pub fn log(project: &Project, id: &str) -> Result<()> {
+/// Print the transcripts of one row: the row session first, then the merge into `to`.
+pub fn log(project: &Project, key: &Key) -> Result<()> {
     let mut printed = false;
-    for name in [MERGE_LOG, RUN_LOG] {
-        let Some(transcript) = read(&paths::transcript(project, id, name)?)? else {
+    for name in [RUN_LOG, MERGE_LOG] {
+        let Some(transcript) = read(&paths::transcript(project, key, name)?)? else {
             continue;
         };
         printed = true;
         print!("{}", render(name, &transcript));
     }
     if !printed {
-        let dir = paths::transcripts(project, id)?;
+        let dir = paths::transcripts(project, key)?;
         return Err(Error::Invalid(format!(
-            "id `{id}` must name a task that ran a session: {} holds no transcript",
+            "row `{key}` must name a row that ran a session: {} holds no transcript",
             dir.display()
         )));
     }

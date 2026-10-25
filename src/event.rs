@@ -1,29 +1,52 @@
+use std::collections::BTreeSet;
+use std::fmt::Display;
+
 use crate::error::Error;
 
 /// Sole writer of `serve` loop lines. Progress on stdout, faults on stderr.
 /// journald stamps each line, so none carries a time field.
-pub fn fetch(sha: &str) {
-    println!("fetch trunk={}", short(sha));
+pub fn fetch(track: &str, tip: &str, to: &str) {
+    println!("fetch track={track} tip={} to={}", short(tip), short(to));
 }
 
-pub fn assign(id: &str, slot: usize) {
-    println!("assign task={id} slot={slot}");
+pub fn open(track: &str, to: &str, sha: &str) {
+    println!("open track={track} to={to} sha={}", short(sha));
 }
 
-pub fn merge(id: &str, parent: &str) {
-    println!("merge task={id} parent={parent}");
+pub fn mirror(refs: usize) {
+    println!("mirror refs={refs}");
 }
 
-pub fn step(id: &str, number: usize) {
-    println!("step task={id} step={number}");
+pub fn assign(key: impl Display, slot: usize) {
+    println!("assign row={key} slot={slot}");
 }
 
-pub fn attempt(id: &str, number: usize, attempt: usize, fault: &str) {
-    println!("attempt task={id} step={number} try={attempt} cause={fault}");
+pub fn merge(key: impl Display, parent: &str) {
+    println!("merge row={key} parent={parent}");
 }
 
-pub fn commit(id: &str, sha: &str) {
-    println!("commit task={id} sha={}", short(sha));
+pub fn step(key: impl Display, number: usize) {
+    println!("step row={key} step={number}");
+}
+
+pub fn attempt(key: impl Display, number: usize, attempt: usize, fault: &str) {
+    println!("attempt row={key} step={number} try={attempt} cause={fault}");
+}
+
+pub fn commit(key: impl Display, sha: &str) {
+    println!("commit row={key} sha={}", short(sha));
+}
+
+pub fn land(key: impl Display) {
+    println!("land row={key}");
+}
+
+pub fn push(key: impl Display, to: &str, sha: &str) {
+    println!("push row={key} to={to} sha={}", short(sha));
+}
+
+pub fn fail(key: impl Display, why: &str) {
+    eprintln!("fail row={key} cause={why}");
 }
 
 pub fn attach(slot: usize) {
@@ -38,26 +61,23 @@ pub fn remove(slot: usize) {
     println!("remove slot={slot}");
 }
 
-/// Last cause of one fault kind. A repeat stays quiet.
+/// Causes of one fault kind last reported. A repeat stays quiet.
 #[derive(Default)]
-pub struct Latch(Option<String>);
+pub struct Latch(BTreeSet<String>);
 
 impl Latch {
-    pub fn report(&mut self, why: &Error, emit: fn(&Error)) {
-        let cause = why.to_string();
-        if self.0.as_deref() != Some(&cause) {
-            emit(why);
-            self.0 = Some(cause);
+    pub fn report(&mut self, faults: &[Error], emit: fn(&Error)) {
+        let causes: BTreeSet<String> = faults.iter().map(Error::to_string).collect();
+        for why in faults {
+            if !self.0.contains(&why.to_string()) {
+                emit(why);
+            }
         }
-    }
-
-    /// Fault gone: its next cause reports again.
-    pub fn clear(&mut self) {
-        self.0 = None;
+        self.0 = causes;
     }
 }
 
-/// Cycle passed over: trunk or its image unreachable.
+/// Cycle or track passed over.
 pub fn skip(why: &Error) {
     eprintln!("skip cause={why}");
 }
@@ -65,14 +85,6 @@ pub fn skip(why: &Error) {
 /// Host file unreadable: loop runs on last good copy.
 pub fn stale(why: &Error) {
     eprintln!("stale cause={why}");
-}
-
-pub fn land(id: &str) {
-    println!("land task={id}");
-}
-
-pub fn fail(id: &str, why: &str) {
-    eprintln!("fail task={id} cause={why}");
 }
 
 fn short(sha: &str) -> String {

@@ -1,19 +1,19 @@
+use std::collections::BTreeMap;
 use std::thread;
 
-use crate::board::{Board, Row};
-use crate::config::Config;
+use crate::board::{self, Track};
 use crate::error::{Error, Result};
 use crate::event::{self, Latch};
-use crate::git::{self, Git};
-use crate::host::{Host, Remote, Stamp};
+use crate::git::{self, Git, Push};
+use crate::host::Host;
+use crate::lock;
 use crate::paths::Project;
-use crate::pool::Pool;
-use crate::state::{self, State};
+use crate::pool::{self, Pool, Queue};
+use crate::state::{self, Snapshot, State};
 use crate::work::Job;
-use crate::{lock, podman};
 
-/// Fetch, converge slots, spawn a worker per idle slot and pending row in board
-/// order, sleep. Until killed. Bare repo lock keeps it one per project.
+/// Fetch, read every track, spawn a worker per idle slot and queued row, sleep.
+/// Until killed. Bare repo lock keeps it one per project.
 pub fn serve(repo: &Git, project: &Project) -> Result<()> {
     let _sole = lock::take(repo.root())?.ok_or_else(|| {
         Error::Failed(format!(
@@ -29,12 +29,15 @@ struct Server<'a> {
     project: &'a Project,
     pool: Pool,
     host: Host,
-    /// Remote last written to the bare repo.
-    origin: Option<Remote>,
-    /// Trunk tip last reported.
-    head: String,
+    /// Remote URL last written to the bare repo.
+    origin: Option<String>,
+    /// Track tip and base last reported, by track name.
+    tips: BTreeMap<String, (String, String)>,
+    /// Kept refs at the last mirror. `None`: a restart mirrors once.
+    mirrored: Option<BTreeMap<String, String>>,
+    /// One latch per fault kind.
     skipped: Latch,
-    /// Host file fault, kept apart: it repeats while cycles pass.
+    offline: Latch,
     stale: Latch,
 }
 
@@ -46,8 +49,10 @@ impl<'a> Server<'a> {
             pool: Pool::open(repo, project)?,
             host: Host::load(project)?,
             origin: None,
-            head: String::new(),
+            tips: BTreeMap::new(),
+            mirrored: None,
             skipped: Latch::default(),
+            offline: Latch::default(),
             stale: Latch::default(),
         })
     }
@@ -62,88 +67,123 @@ impl<'a> Server<'a> {
 
     fn cycle(&mut self) -> Result<()> {
         self.pool.reap()?;
-        let Some(sha) = self.trunk() else {
+        let unfetched = self.sync().err();
+        let unmirrored = self.mirror().err();
+        let fetched = unfetched.is_none();
+        let faults: Vec<Error> = [unfetched, unmirrored].into_iter().flatten().collect();
+        self.offline.report(&faults, event::skip);
+        if !fetched {
             return Ok(());
-        };
-        let Some((config, board)) = self.inputs(&sha)? else {
-            return Ok(());
-        };
-        let Some(stamp) = self.stamp(&config)? else {
-            return Ok(());
-        };
-        self.skipped.clear();
-        let mut idle = self.pool.converge(&self.host.slots, &stamp)?.into_iter();
-        let states = state::derive(&board, self.repo)?;
-        for (index, row) in board.rows().iter().enumerate() {
-            if !pending(&states[index]) || self.pool.holds(&row.id)? {
-                continue;
-            }
-            let Some(slot) = idle.next() else {
-                return Ok(());
-            };
+        }
+        let (snapshots, faults) = self.read()?;
+        self.skipped.report(&faults, event::skip);
+        self.report(&snapshots);
+        let idle = self.pool.converge(self.host.workers)?;
+        let queues: Vec<Queue> = snapshots.iter().map(queue).collect();
+        for ((at, row), slot) in pool::schedule(&queues, idle.len()).into_iter().zip(idle) {
+            let snapshot = &snapshots[at];
+            let track = &snapshot.track;
             self.pool.assign(Job {
                 slot,
-                id: row.id.clone(),
-                base: sha.clone(),
-                stack: stack(&board, &states, row),
-                env: self.host.slots.env.clone(),
+                track: track.name.clone(),
+                id: snapshot.board.rows()[row].id.clone(),
+                track_tip: track.tip.clone(),
+                base: snapshot.base.clone(),
+                env: self.host.env(&track.name).to_vec(),
+                mounts: self.host.mounts.clone(),
+                devices: self.host.devices.clone(),
             })?;
         }
         Ok(())
     }
 
-    /// Trunk tip after fetch. `None` when git refuses: absent branch or lost checkout
-    /// costs one cycle, not the loop.
-    fn trunk(&mut self) -> Option<String> {
-        let fetched = sync(self.repo, &self.host.remote, &mut self.origin);
-        match fetched {
-            Ok(sha) => {
-                if sha != self.head {
-                    event::fetch(&sha);
-                    self.head.clone_from(&sha);
+    /// Write origin on change, fetch, heal hand-edited repo with one retry. A
+    /// refusal costs one cycle, not the loop.
+    fn sync(&mut self) -> Result<()> {
+        if self.origin.as_ref() != Some(&self.host.remote) {
+            self.repo.set_origin(&self.host.remote)?;
+            self.origin = Some(self.host.remote.clone());
+        }
+        if self.repo.fetch().is_err() {
+            self.repo.set_origin(&self.host.remote)?;
+            self.repo.fetch()?;
+        }
+        Ok(())
+    }
+
+    /// Kept refs to the remote, when changed.
+    fn mirror(&mut self) -> Result<()> {
+        let kept = self.repo.refs(git::KEPT)?;
+        if self.mirrored.as_ref() == Some(&kept) {
+            return Ok(());
+        }
+        self.repo.mirror_kept()?;
+        event::mirror(kept.len());
+        self.mirrored = Some(kept);
+        Ok(())
+    }
+
+    /// Every track that passes its checks, with rows and states, plus the fault of
+    /// each track skipped. Git failing stays fatal.
+    fn read(&self) -> Result<(Vec<Snapshot>, Vec<Error>)> {
+        let scan = board::scan(self.repo, &self.host.tracks)?;
+        let mut faults = scan.faults;
+        let mut snapshots = Vec::new();
+        let held = |key: &state::Key| self.pool.holds(key);
+        for track in scan.tracks {
+            match self.open_to(&track) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(why @ Error::Invalid(_)) => {
+                    faults.push(why);
+                    continue;
                 }
-                Some(sha)
+                Err(why) => return Err(why),
             }
-            Err(why) => {
-                self.skipped.report(&why, event::skip);
-                None
+            match state::snapshot(self.repo, track, &held) {
+                Ok(snapshot) => snapshots.push(snapshot),
+                Err(why @ Error::Invalid(_)) => faults.push(why),
+                Err(why) => return Err(why),
             }
+        }
+        Ok((snapshots, faults))
+    }
+
+    /// True once `to` stands: made here at its start and pushed, when absent.
+    /// `false`: another push made it first, the next fetch reads it.
+    fn open_to(&self, track: &Track) -> Result<bool> {
+        if self
+            .repo
+            .commit_of(&git::remote_branch(&track.to))?
+            .is_some()
+        {
+            return Ok(true);
+        }
+        let start = track.start(self.repo)?;
+        match self.repo.push(&start, &track.to)? {
+            Push::Done => {
+                event::open(&track.name, &track.to, &start);
+                Ok(true)
+            }
+            Push::Behind => Ok(false),
+            Push::Declined(why) => Err(track.invalid(&format!(
+                "field `to` must name a branch the remote lets this host make: {why}"
+            ))),
         }
     }
 
-    /// Config and board at trunk tip `sha`, the commit workers read. `None` when
-    /// either is invalid: a bad push skips cycles until fixed, rows in flight run on.
-    /// Git failing stays fatal.
-    fn inputs(&mut self, sha: &str) -> Result<Option<(Config, Board)>> {
-        let read = Config::at(self.repo, sha).and_then(|config| {
-            let board = Board::at(self.repo, sha, &config)?;
-            Ok((config, board))
-        });
-        match read {
-            Ok(read) => Ok(Some(read)),
-            Err(why @ Error::Invalid(_)) => {
-                self.skipped.report(&why, event::skip);
-                Ok(None)
+    /// One `fetch` line per track whose tip or base moved.
+    fn report(&mut self, snapshots: &[Snapshot]) {
+        let mut tips = BTreeMap::new();
+        for snapshot in snapshots {
+            let name = &snapshot.track.name;
+            let now = (snapshot.track.tip.clone(), snapshot.base.clone());
+            if self.tips.get(name) != Some(&now) {
+                event::fetch(name, &now.0, &now.1);
             }
-            Err(why) => Err(why),
+            tips.insert(name.clone(), now);
         }
-    }
-
-    /// Stamp every slot must carry. `None` when the trunk names an image the host
-    /// lacks: no slot runs work on an image no one declared.
-    fn stamp(&mut self, config: &Config) -> Result<Option<Stamp>> {
-        let image = config.image_name(self.repo, self.project)?;
-        match podman::image_id(&image)? {
-            Some(id) => self.host.slots.stamp(&id).map(Some),
-            None => {
-                let why = Error::Failed(format!(
-                    "image {image} is absent: run `scswarm init {}`",
-                    self.project
-                ));
-                self.skipped.report(&why, event::skip);
-                Ok(None)
-            }
-        }
+        self.tips = tips;
     }
 
     /// Reread host file each cycle. Unreadable: keep last good copy, editor mid-save
@@ -152,38 +192,27 @@ impl<'a> Server<'a> {
         match Host::load(self.project) {
             Ok(host) => {
                 self.host = host;
-                self.stale.clear();
+                self.stale.report(&[], event::stale);
             }
-            Err(why) => self.stale.report(&why, event::stale),
+            Err(why) => self.stale.report(&[why], event::stale),
         }
     }
 }
 
-/// Write origin on change, fetch, heal hand-edited repo with one retry.
-fn sync(repo: &Git, remote: &Remote, origin: &mut Option<Remote>) -> Result<String> {
-    if origin.as_ref() != Some(remote) {
-        repo.set_origin(&remote.path, &remote.trunk)?;
-        *origin = Some(remote.clone());
+/// Queued rows of one track: new rows, rows cut short, rows whose land commit
+/// left `to`.
+fn queue(snapshot: &Snapshot) -> Queue {
+    let rows = |state: State| {
+        snapshot
+            .states
+            .iter()
+            .enumerate()
+            .filter(move |(_, held)| **held == state)
+            .map(|(row, _)| row)
+    };
+    Queue {
+        priority: snapshot.track.priority,
+        running: rows(State::Running).count(),
+        rows: rows(State::Queued).collect(),
     }
-    if repo.fetch().is_err() {
-        repo.set_origin(&remote.path, &remote.trunk)?;
-        repo.fetch()?;
-    }
-    repo.tip(git::TRUNK)
-}
-
-/// Ready rows start. A running row holds a branch no land ref names, so its
-/// session was cut short: it replays from base.
-fn pending(state: &State) -> bool {
-    matches!(*state, State::Ready | State::Running)
-}
-
-/// Base is trunk. Each landed unmerged parent rides in as merge, so branch starts
-/// with work it waits on.
-fn stack(board: &Board, states: &[State], row: &Row) -> Vec<String> {
-    row.after
-        .iter()
-        .filter(|&&parent| states[parent] == State::Landed)
-        .map(|&parent| state::branch(&board.rows()[parent].id))
-        .collect()
 }

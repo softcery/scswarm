@@ -1,25 +1,25 @@
-use crate::board::Board;
+use crate::board;
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::git::Git;
-use crate::state;
+use crate::git::{self, Git};
+use crate::state::{self, Key};
 
-/// Delete the branch, land ref and fail mark of `id` and of every row that waits
-/// on it, straight or through others.
-pub fn reset(repo: &Git, id: &str) -> Result<()> {
-    let config = Config::from_trunk(repo)?;
-    let board = Board::from_trunk(repo, &config)?;
+/// Delete branch, land ref and fail refs of `key` and of each dependant in its
+/// track: here, then on the remote by mirror.
+pub fn reset(repo: &Git, tracks: &str, key: &Key) -> Result<()> {
     let checkouts = repo.checkouts()?;
+    let kept = repo.refs(git::KEPT)?;
     let mut dropped = 0;
-    for task in targets(&board, id) {
-        for name in [state::land_ref(&task), state::fail_ref(&task)] {
-            if repo.ref_commit(&name)?.is_some() {
+    for row in targets(repo, tracks, key)? {
+        let [on_track, on_to] = row.fail_refs();
+        for name in [row.land_ref(), on_track, on_to] {
+            if kept.contains_key(&name) {
                 repo.ref_delete(&name)?;
                 println!("deleted {name}");
                 dropped += 1;
             }
         }
-        let branch = state::branch(&task);
+        let branch = row.branch();
         if !repo.branch_exists(&branch)? {
             continue;
         }
@@ -32,73 +32,28 @@ pub fn reset(repo: &Git, id: &str) -> Result<()> {
     }
     if dropped == 0 {
         return Err(Error::Invalid(format!(
-            "id `{id}` must name a task with a branch, land ref or fail mark: none of `{}` or its dependants has one",
-            state::branch(id)
+            "row `{key}` must name a row with a branch, land ref or fail ref: none of `{}` or its dependants has one",
+            key.branch()
         )));
     }
-    Ok(())
+    repo.mirror_kept()
 }
 
-/// `id`, then every dependant. Id off the board stands alone:
-/// no row can name it, or the board fails to parse.
-fn targets(board: &Board, id: &str) -> Vec<String> {
-    let rows = board.rows();
-    let Some(root) = rows.iter().position(|row| row.id == id) else {
-        return vec![id.to_string()];
+/// `key`, then every dependant in its track. A row off every track stands alone:
+/// no row can name it.
+fn targets(repo: &Git, tracks: &str, key: &Key) -> Result<Vec<Key>> {
+    let scan = board::scan(repo, tracks)?;
+    let Some(track) = scan
+        .tracks
+        .into_iter()
+        .find(|track| track.name == key.track)
+    else {
+        return Ok(vec![key.clone()]);
     };
-    let mut marked = vec![false; rows.len()];
-    marked[root] = true;
-    let mut grown = true;
-    while grown {
-        grown = false;
-        for (index, row) in rows.iter().enumerate() {
-            if marked[index] || !row.after.iter().any(|&parent| marked[parent]) {
-                continue;
-            }
-            marked[index] = true;
-            grown = true;
-        }
-    }
-    rows.iter()
-        .zip(marked)
-        .filter(|(_, hit)| *hit)
-        .map(|(row, _)| row.id.clone())
-        .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const CONFIG: &str = "\
-image: Containerfile.swarm
-default_agent: claude
-agents:
-  claude:
-    exec: claude -p
-commit: Message only.
-";
-
-    /// Third row waits on the first through the second, fourth waits on nothing.
-    const BOARD: &str = "\
-- id: one
-  steps: [Work., {commit: Work.}]
-- id: two
-  after: [one]
-  steps: [Work., {commit: Work.}]
-- id: three
-  after: [two]
-  steps: [Work., {commit: Work.}]
-- id: four
-  steps: [Work., {commit: Work.}]
-";
-
-    #[test]
-    fn walks_dependants() {
-        let config = Config::parse(CONFIG).expect("test config must parse");
-        let board = Board::parse(BOARD, &config).expect("test board must parse");
-        assert_eq!(targets(&board, "one"), ["one", "two", "three"]);
-        assert_eq!(targets(&board, "four"), ["four"]);
-        assert_eq!(targets(&board, "gone"), ["gone"]);
-    }
+    let board = track.board(&Config::at(repo, &state::base(repo, &track)?)?)?;
+    let ids = board.dependants(&key.id);
+    Ok(match ids.is_empty() {
+        true => vec![key.clone()],
+        false => ids.iter().map(|id| Key::new(&key.track, id)).collect(),
+    })
 }

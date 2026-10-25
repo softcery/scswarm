@@ -11,7 +11,7 @@ RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} && npm cache
 RUN useradd --uid 1001 --create-home dev
 USER dev
 
-# Project name and slot count of the host file. `init` passes no build argument.
+# Project name and slot count of the host file. The worker passes no build argument.
 ARG PROJECT=scswarm
 ARG WORKERS=2
 

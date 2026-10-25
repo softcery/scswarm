@@ -1,5 +1,4 @@
 use std::fs;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -12,39 +11,37 @@ use crate::yaml;
 
 /// Seconds between loop cycles when the host file sets none.
 const POLL: u64 = 5;
+/// Glob character that stands for any run of characters in `env` field `match`.
+const ANY: char = '*';
 
 /// What the swarm runs on. Only reader of the host file.
 #[derive(Debug)]
 pub struct Host {
-    pub remote: Remote,
-    pub slots: Slots,
-    /// Pause between loop cycles. Reloads each cycle.
-    pub poll: Duration,
-}
-
-/// Trunk source, reloaded each cycle. Fields become `remote.origin.url` and
-/// `remote.origin.fetch`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Remote {
-    /// Project checkout the bare repo fetches from. Repo root, `~/` resolved.
-    pub path: PathBuf,
-    /// Branch of the checkout every task branch starts from.
-    pub trunk: String,
-}
-
-/// Slot set the host file declares. `serve` converges the machine to it each cycle.
-#[derive(Debug)]
-pub struct Slots {
+    /// Git URL or path the bare repo fetches from and pushes to. `~/` resolved.
+    pub remote: String,
+    /// Branch name prefix of every track branch.
+    pub tracks: String,
     pub workers: usize,
     pub mounts: Vec<Mount>,
     /// Host device nodes each container gets at the same path. Resolved at load.
     pub devices: Vec<String>,
-    /// Host environment variables each exec gets. Credentials ride here.
-    pub env: Vec<String>,
+    /// Ordered rules: the first rule whose `match` takes a track names its variables.
+    pub env: Vec<Credential>,
+    /// Pause between loop cycles. Reloads each cycle.
+    pub poll: Duration,
 }
 
-/// What a slot container bakes, as text. A container carries it, `serve` compares
-/// it back.
+/// Host variables forwarded into the containers of every track `pattern` matches.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Credential {
+    #[serde(rename = "match")]
+    pub pattern: String,
+    pub names: Vec<String>,
+}
+
+/// What a slot container bakes, as text. A container carries it, the worker
+/// compares it back.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Stamp {
     /// Image ID: a rebuild under the same name reads as a change.
@@ -61,19 +58,19 @@ pub struct Mount {
     pub guest: String,
 }
 
-/// Host file as written. Splits into `Remote` and `Slots` once checked.
+/// Host file as written. Settles into `Host` once checked.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Written {
-    path: String,
-    trunk: String,
+    remote: String,
+    tracks: String,
     workers: usize,
     #[serde(default)]
     mounts: Vec<Mount>,
     #[serde(default)]
     devices: Vec<String>,
     #[serde(default)]
-    env: Vec<String>,
+    env: Vec<Credential>,
     #[serde(default)]
     poll: Option<u64>,
 }
@@ -90,34 +87,42 @@ impl Host {
     pub fn parse(file: &str, text: &str) -> Result<Self> {
         let written: Written = yaml::parse(file, text)?;
         written.check(file)?;
-        written.split()
+        written.settle()
+    }
+
+    /// Variables of the first rule that matches `track`. No match: none.
+    pub fn env(&self, track: &str) -> &[String] {
+        self.env
+            .iter()
+            .find(|rule| matches(&rule.pattern, track))
+            .map_or(&[], |rule| &rule.names)
     }
 }
 
-impl Slots {
-    /// Text the containers carry: image ID plus the mounts and devices they bake.
-    pub fn stamp(&self, image: &str) -> Result<Stamp> {
-        Ok(Stamp {
+impl Stamp {
+    /// Text a container carries: image ID plus the mounts and devices it bakes.
+    pub fn new(image: &str, mounts: &[Mount], devices: &[String]) -> Result<Self> {
+        Ok(Self {
             image: image.to_string(),
-            mounts: text(&self.mounts)?,
-            devices: text(&self.devices)?,
+            mounts: text(&mounts)?,
+            devices: text(&devices)?,
         })
     }
 }
 
 impl Written {
     fn check(&self, file: &str) -> Result<()> {
-        if !self.path.starts_with('/') && !self.path.starts_with("~/") {
+        if self.remote.trim().is_empty() {
             return Err(invalid(
                 file,
-                "field `path` must hold the project repo root, absolute or under `~/`",
+                "field `remote` must hold a git URL or a repo path",
             ));
         }
-        if !git::valid_ref(&self.trunk) {
+        if self.tracks.is_empty() || !git::valid_ref(&format!("{}x", self.tracks)) {
             return Err(invalid(
                 file,
                 &format!(
-                    "field `trunk` must name a branch git takes: {}",
+                    "field `tracks` must hold a branch name prefix git takes, not empty: {}",
                     git::REF_RULE
                 ),
             ));
@@ -154,15 +159,23 @@ impl Written {
     }
 
     fn check_env(&self, file: &str) -> Result<()> {
-        for (index, name) in self.env.iter().enumerate() {
-            let plain = |letter: char| letter.is_ascii_alphanumeric() || letter == '_';
-            if name.is_empty() || !name.chars().all(plain) {
+        let plain = |letter: char| letter.is_ascii_alphanumeric() || letter == '_';
+        for (index, rule) in self.env.iter().enumerate() {
+            let entry = format!("field `env` entry {}", index + 1);
+            if rule.pattern.is_empty() {
                 return Err(invalid(
                     file,
-                    &format!(
-                        "field `env` entry {} must name a host environment variable",
-                        index + 1
-                    ),
+                    &format!("{entry}: field `match` must hold a track name glob"),
+                ));
+            }
+            if rule
+                .names
+                .iter()
+                .any(|name| name.is_empty() || !name.chars().all(plain))
+            {
+                return Err(invalid(
+                    file,
+                    &format!("{entry}: field `names` must list host environment variables"),
                 ));
             }
         }
@@ -170,7 +183,7 @@ impl Written {
     }
 
     /// Resolve home paths and device nodes once: later readers hold real paths.
-    fn split(self) -> Result<Host> {
+    fn settle(self) -> Result<Host> {
         let mounts = self
             .mounts
             .into_iter()
@@ -182,16 +195,12 @@ impl Written {
             })
             .collect::<Result<Vec<Mount>>>()?;
         Ok(Host {
-            remote: Remote {
-                path: PathBuf::from(paths::expand(&self.path)?),
-                trunk: self.trunk,
-            },
-            slots: Slots {
-                workers: self.workers,
-                mounts,
-                devices: device::nodes(&self.devices)?,
-                env: self.env,
-            },
+            remote: paths::expand(&self.remote)?,
+            tracks: self.tracks,
+            workers: self.workers,
+            mounts,
+            devices: device::nodes(&self.devices)?,
+            env: self.env,
             poll: Duration::from_secs(self.poll.unwrap_or(POLL)),
         })
     }
@@ -224,10 +233,30 @@ impl From<Mount> for String {
     }
 }
 
+/// `*` takes any run of characters, every other character takes itself.
+fn matches(pattern: &str, name: &str) -> bool {
+    let mut parts = pattern.split(ANY);
+    let first = parts.next().unwrap_or_default();
+    let Some(mut rest) = name.strip_prefix(first) else {
+        return false;
+    };
+    let middle: Vec<&str> = parts.collect();
+    let Some((last, middle)) = middle.split_last() else {
+        return rest.is_empty();
+    };
+    for part in middle {
+        match rest.find(part) {
+            Some(at) => rest = &rest[at + part.len()..],
+            None => return false,
+        }
+    }
+    rest.len() >= last.len() && rest.ends_with(last)
+}
+
 /// Stamp text a container carries as a label. JSON: the YAML reader only reads.
 fn text<T: Serialize>(value: &T) -> Result<String> {
     serde_json::to_string(value)
-        .map_err(|why| Error::Failed(format!("slot set must serialise: {why}")))
+        .map_err(|why| Error::Failed(format!("slot binds must serialise: {why}")))
 }
 
 fn shaped(got: &str) -> String {
@@ -245,50 +274,46 @@ mod tests {
     const FILE: &str = "/home/dev/.config/scswarm/alpha.yaml";
 
     const EXAMPLE: &str = "\
-path: ~/alpha
-trunk: blahblah
+remote: git@github.com:org/alpha.git
+tracks: track/
 workers: 3
 mounts:
   - ~/alpha/records:/records
 devices:
   - /dev/null
 env:
-  - ANTHROPIC_API_KEY
+  - match: ai-*
+    names: [AI_TOKEN]
+  - match: '*'
+    names: [ANTHROPIC_API_KEY]
 ";
 
     #[test]
     fn parses_contract_example() {
         let host = Host::parse(FILE, EXAMPLE).expect("example must parse");
-        assert!(
-            host.remote.path.ends_with("alpha"),
-            "{:?}",
-            host.remote.path
-        );
-        assert_eq!(host.remote.trunk, "blahblah");
-        assert_eq!(host.slots.workers, 3);
-        assert_eq!(host.slots.mounts[0].guest, "/records");
-        assert_eq!(host.slots.devices, ["/dev/null"]);
-        assert_eq!(host.slots.env, ["ANTHROPIC_API_KEY"]);
+        assert_eq!(host.remote, "git@github.com:org/alpha.git");
+        assert_eq!(host.tracks, "track/");
+        assert_eq!(host.workers, 3);
+        assert_eq!(host.mounts[0].guest, "/records");
+        assert_eq!(host.devices, ["/dev/null"]);
+    }
+
+    #[test]
+    fn first_matching_rule_names_the_variables() {
+        let host = Host::parse(FILE, EXAMPLE).expect("example must parse");
+        assert_eq!(host.env("ai-search"), ["AI_TOKEN"]);
+        assert_eq!(host.env("net"), ["ANTHROPIC_API_KEY"]);
+        assert!(matches("a*b*c", "axxbyyc"));
+        assert!(!matches("a*b", "ab-c"));
+        assert!(!matches("net", "network"));
     }
 
     #[test]
     fn names_the_bad_field() {
-        let text = EXAMPLE.replace("trunk: blahblah", "trunk: two words");
+        let text = EXAMPLE.replace("tracks: track/", "tracks: two words/");
         let why = Host::parse(FILE, &text)
-            .expect_err("a trunk of two words must fail")
+            .expect_err("a prefix with a space must fail")
             .to_string();
-        assert!(why.contains("field `trunk`"), "{why}");
-    }
-
-    #[test]
-    fn stamps_mounts() {
-        let host = Host::parse(FILE, EXAMPLE).expect("example must parse");
-        let stamp = host.slots.stamp("localhost/scswarm/alpha").expect("stamp");
-        assert!(
-            stamp.mounts.ends_with("alpha/records:/records\"]"),
-            "{}",
-            stamp.mounts
-        );
-        assert_eq!(stamp.devices, "[\"/dev/null\"]");
+        assert!(why.contains("field `tracks`"), "{why}");
     }
 }

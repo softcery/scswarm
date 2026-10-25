@@ -9,8 +9,33 @@ use crate::step::{self, Steps};
 use crate::yaml;
 
 pub const FILE: &str = "SWARM.yaml";
+/// Length range of a commit sha git resolves.
+const SHA: std::ops::RangeInclusive<usize> = 4..=40;
 
-/// Project task list. Read only: no write path here.
+/// Tracks that pass their checks, and the fault of each that fails.
+pub struct Scan {
+    pub tracks: Vec<Track>,
+    pub faults: Vec<Error>,
+}
+
+/// One track branch: what to run, from where, into which branch. Read only.
+#[derive(Debug)]
+pub struct Track {
+    /// Branch name minus the host file `tracks` prefix. Keys every row.
+    pub name: String,
+    /// Track branch commit the file comes from.
+    pub tip: String,
+    /// Branch the work belongs to.
+    pub from: String,
+    /// Commit `to` starts at. `None`: tip of `from` when `to` is made.
+    pub at: Option<String>,
+    /// Output branch: rows start at its tip and merge back into it.
+    pub to: String,
+    pub priority: i32,
+    drafts: Vec<Draft>,
+}
+
+/// Rows of one track, settled against `scswarm.yaml` at the `to` tip.
 #[derive(Debug)]
 pub struct Board {
     rows: Vec<Row>,
@@ -19,7 +44,6 @@ pub struct Board {
 /// One row is one session: own steps, one branch, one land ref.
 #[derive(Debug)]
 pub struct Row {
-    /// Key of the row: branch, land ref, fail mark, transcript dir.
     pub id: String,
     /// Row indices this row waits for, resolved at parse time.
     pub after: Vec<usize>,
@@ -27,47 +51,74 @@ pub struct Row {
     pub steps: Steps,
 }
 
-impl Board {
-    pub fn from_trunk(git: &Git, config: &Config) -> Result<Self> {
-        Self::at(git, git::TRUNK, config)
-    }
-
-    /// Board at `rev`, full ref or commit.
-    pub fn at(git: &Git, rev: &str, config: &Config) -> Result<Self> {
-        let text = git
-            .show(rev, FILE)?
-            .ok_or_else(|| Error::Invalid(format!("{FILE}: absent at `{rev}`")))?;
-        Self::parse(&text, config)
-    }
-
-    pub fn parse(text: &str, config: &Config) -> Result<Self> {
-        let written: Vec<Written> = yaml::parse(FILE, text)?;
-        for (at, row) in written.iter().enumerate() {
-            row.check(at, config)?;
+/// Read every track branch under `prefix`. A failed check skips that track alone.
+pub fn scan(git: &Git, prefix: &str) -> Result<Scan> {
+    let branches = git.branches()?;
+    let mut scan = Scan {
+        tracks: Vec::new(),
+        faults: Vec::new(),
+    };
+    for (branch, tip) in &branches {
+        let Some(name) = branch.strip_prefix(prefix) else {
+            continue;
+        };
+        let read = Track::at(git, name, tip).and_then(|track| {
+            track.check_prefix(prefix)?;
+            Ok(track)
+        });
+        match read {
+            Ok(track) => scan.tracks.push(track),
+            Err(why @ Error::Invalid(_)) => scan.faults.push(why),
+            Err(why) => return Err(why),
         }
-        let index = index_ids(&written)?;
-        let rows = written
-            .iter()
-            .enumerate()
-            .map(|(at, row)| row.row(at, &index, config))
-            .collect::<Result<Vec<Row>>>()?;
-        check_loops(&rows)?;
-        Ok(Self { rows })
     }
+    scan.part_shared_to();
+    Ok(scan)
+}
 
-    pub fn rows(&self) -> &[Row] {
-        &self.rows
+impl Scan {
+    /// Two tracks on one `to` would push over each other: both skip.
+    fn part_shared_to(&mut self) {
+        let mut names: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for track in &self.tracks {
+            names.entry(&track.to).or_default().push(&track.name);
+        }
+        let shared: BTreeMap<String, String> = names
+            .into_iter()
+            .filter(|(_, names)| names.len() > 1)
+            .map(|(to, names)| (to.to_string(), names.join(", ")))
+            .collect();
+        let (kept, parted): (Vec<Track>, Vec<Track>) = std::mem::take(&mut self.tracks)
+            .into_iter()
+            .partition(|track| !shared.contains_key(&track.to));
+        self.tracks = kept;
+        for track in parted {
+            self.faults.push(track.invalid(&format!(
+                "field `to` must name a branch no other track names: tracks {} name it",
+                shared[&track.to]
+            )));
+        }
     }
+}
 
-    pub fn row(&self, id: &str) -> Option<&Row> {
-        self.rows.iter().find(|row| row.id == id)
-    }
+/// Track file as written.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Written {
+    from: String,
+    #[serde(default)]
+    at: Option<String>,
+    to: String,
+    #[serde(default)]
+    priority: i32,
+    #[serde(default)]
+    rows: Vec<Draft>,
 }
 
 /// Row as written. Absent `id` still names its place, so both fields default.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Written {
+struct Draft {
     #[serde(default)]
     id: String,
     #[serde(default)]
@@ -78,23 +129,174 @@ struct Written {
     steps: Vec<step::Written>,
 }
 
-impl Written {
-    fn check(&self, at: usize, config: &Config) -> Result<()> {
-        if self.id.is_empty() {
-            return Err(self.bad(at, "field `id` must not be empty"));
+impl Track {
+    /// Track file at commit `tip` of the branch of track `name`.
+    pub fn at(git: &Git, name: &str, tip: &str) -> Result<Self> {
+        let text = git
+            .show(tip, FILE)?
+            .ok_or_else(|| Error::Invalid(format!("{}: absent at `{tip}`", label(name))))?;
+        Self::parse(name, tip, &text)
+    }
+
+    /// Checks what the file alone states.
+    pub fn parse(name: &str, tip: &str, text: &str) -> Result<Self> {
+        if !one_name(name) {
+            let got = match name.contains('/') {
+                true => "a name with `/`",
+                false => "a name git refuses",
+            };
+            return Err(Error::Invalid(format!(
+                "track branch: name past the `tracks` prefix must hold no `/` and pass as a ref: {}; got {got}",
+                git::REF_RULE
+            )));
         }
-        if !git::valid_ref(&self.id) {
-            return Err(self.bad(
-                at,
-                &format!(
-                    "field `id` must hold a name git takes as a ref: {}",
+        let written: Written = yaml::parse(&label(name), text)?;
+        let track = Self {
+            name: name.to_string(),
+            tip: tip.to_string(),
+            from: written.from,
+            at: written.at,
+            to: written.to,
+            priority: written.priority,
+            drafts: written.rows,
+        };
+        track.check_file()?;
+        Ok(track)
+    }
+
+    /// Settle every row against the project file at the base of the rows.
+    pub fn board(&self, config: &Config) -> Result<Board> {
+        let index = self.index()?;
+        let rows = self
+            .drafts
+            .iter()
+            .enumerate()
+            .map(|(at, draft)| self.row(at, draft, &index, config))
+            .collect::<Result<Vec<Row>>>()?;
+        Ok(Board { rows })
+    }
+
+    /// Commit `to` starts at: `at` on `from`, else the `from` tip. Read until `to`
+    /// stands; then `from` and `at` start nothing.
+    pub fn start(&self, git: &Git) -> Result<String> {
+        let from = git
+            .commit_of(&git::remote_branch(&self.from))?
+            .ok_or_else(|| self.invalid("field `from` must name a branch of the remote"))?;
+        let Some(at) = &self.at else {
+            return Ok(from);
+        };
+        let at = git
+            .commit_of(at)?
+            .ok_or_else(|| self.invalid("field `at` must name a commit of the remote"))?;
+        match git.is_ancestor(&at, &from)? {
+            true => Ok(at),
+            false => Err(self.invalid("field `at` must name a commit on `from`")),
+        }
+    }
+
+    fn check_file(&self) -> Result<()> {
+        for (field, value) in [("from", &self.from), ("to", &self.to)] {
+            if !git::valid_ref(value) {
+                return Err(self.invalid(&format!(
+                    "field `{field}` must name a branch git takes: {}",
                     git::REF_RULE
-                ),
+                )));
+            }
+        }
+        if self.to == self.from {
+            return Err(self.invalid(
+                "field `to` must name a branch other than `from`: rows push to `to`, humans merge it into `from`",
             ));
         }
-        if !config.knows_agent(self.agent(config)) {
+        let hex = |at: &str| SHA.contains(&at.len()) && at.chars().all(|c| c.is_ascii_hexdigit());
+        if self.at.as_deref().is_some_and(|at| !hex(at)) {
+            return Err(self.invalid(&format!(
+                "field `at` must hold a commit sha of {} to {} hex digits, or stay absent",
+                SHA.start(),
+                SHA.end()
+            )));
+        }
+        for (at, draft) in self.drafts.iter().enumerate() {
+            if draft.id.is_empty() {
+                return Err(self.bad(at, draft, "field `id` must not be empty"));
+            }
+            if !one_name(&draft.id) {
+                return Err(self.bad(
+                    at,
+                    draft,
+                    &format!(
+                        "field `id` must hold no `/` and pass as a ref: {}",
+                        git::REF_RULE
+                    ),
+                ));
+            }
+        }
+        let index = self.index()?;
+        let after = self
+            .drafts
+            .iter()
+            .enumerate()
+            .map(|(at, draft)| self.after(at, draft, &index))
+            .collect::<Result<Vec<Vec<usize>>>>()?;
+        self.check_loops(&after)
+    }
+
+    /// `to` outside the track branches.
+    fn check_prefix(&self, prefix: &str) -> Result<()> {
+        match self.to.starts_with(prefix) {
+            true => Err(self.invalid(&format!(
+                "field `to` must name a branch outside the `tracks` prefix `{prefix}`"
+            ))),
+            false => Ok(()),
+        }
+    }
+
+    fn index(&self) -> Result<BTreeMap<&str, usize>> {
+        let mut index = BTreeMap::new();
+        for (at, draft) in self.drafts.iter().enumerate() {
+            if let Some(first) = index.insert(draft.id.as_str(), at) {
+                return Err(self.bad(
+                    at,
+                    draft,
+                    &format!(
+                        "field `id` must be unique in the track: row {} holds it too",
+                        first + 1
+                    ),
+                ));
+            }
+        }
+        Ok(index)
+    }
+
+    fn after(&self, at: usize, draft: &Draft, index: &BTreeMap<&str, usize>) -> Result<Vec<usize>> {
+        draft
+            .after
+            .iter()
+            .map(|id| {
+                index.get(id.as_str()).copied().ok_or_else(|| {
+                    self.bad(
+                        at,
+                        draft,
+                        &format!("field `after` names id `{id}`, absent from the track"),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// Resolve `after` against the track, settle steps against `defaults`.
+    fn row(
+        &self,
+        at: usize,
+        draft: &Draft,
+        index: &BTreeMap<&str, usize>,
+        config: &Config,
+    ) -> Result<Row> {
+        let agent = draft.agent.as_deref().unwrap_or(&config.default_agent);
+        if !config.knows_agent(agent) {
             return Err(self.bad(
                 at,
+                draft,
                 &format!(
                     "field `agent` must name a key of `agents` in {}: {}",
                     crate::config::FILE,
@@ -102,71 +304,81 @@ impl Written {
                 ),
             ));
         }
-        Ok(())
-    }
-
-    fn agent<'a>(&'a self, config: &'a Config) -> &'a str {
-        self.agent.as_deref().unwrap_or(&config.default_agent)
-    }
-
-    /// Resolve `after` against the board, settle steps against `defaults`.
-    fn row(&self, at: usize, index: &BTreeMap<&str, usize>, config: &Config) -> Result<Row> {
-        let after = self
-            .after
-            .iter()
-            .map(|id| {
-                index.get(id.as_str()).copied().ok_or_else(|| {
-                    self.bad(
-                        at,
-                        &format!("field `after` names id `{id}`, absent from the board"),
-                    )
-                })
-            })
-            .collect::<Result<Vec<usize>>>()?;
-        let steps = step::settle("steps", &self.steps, &config.defaults)
-            .map_err(|what| self.bad(at, &what))?;
+        let steps = step::settle("steps", &draft.steps, &config.defaults)
+            .map_err(|what| self.bad(at, draft, &what))?;
         Ok(Row {
-            id: self.id.clone(),
-            after,
-            agent: self.agent(config).to_string(),
+            id: draft.id.clone(),
+            after: self.after(at, draft, index)?,
+            agent: agent.to_string(),
             steps,
         })
     }
 
-    fn bad(&self, at: usize, what: &str) -> Error {
-        let row = match self.id.is_empty() {
-            true => format!("row {}", at + 1),
-            false => format!("row `{}`", self.id),
-        };
-        Error::Invalid(format!("{FILE} {row}: {what}"))
-    }
-}
-
-fn index_ids(written: &[Written]) -> Result<BTreeMap<&str, usize>> {
-    let mut index = BTreeMap::new();
-    for (at, row) in written.iter().enumerate() {
-        if let Some(first) = index.insert(row.id.as_str(), at) {
-            return Err(row.bad(
-                at,
-                &format!(
-                    "field `id` must be unique on the board: row {} holds it too",
-                    first + 1
-                ),
-            ));
+    /// Row on the walk path twice = loop. Such a row never settles, so every row
+    /// behind it reads `waiting` for good.
+    fn check_loops(&self, after: &[Vec<usize>]) -> Result<()> {
+        let mut marks = vec![Mark::Fresh; after.len()];
+        let mut path = Vec::new();
+        for start in 0..after.len() {
+            if let Some(ids) = walk(after, start, &mut marks, &mut path) {
+                let ids: Vec<&str> = ids.iter().map(|&at| self.drafts[at].id.as_str()).collect();
+                return Err(self.invalid(&format!(
+                    "field `after` must name no loop: {}",
+                    ids.join(" -> ")
+                )));
+            }
         }
+        Ok(())
     }
-    Ok(index)
+
+    /// Row named by `id`, or by its place when `id` cannot name it.
+    fn bad(&self, at: usize, draft: &Draft, what: &str) -> Error {
+        let row = match one_name(&draft.id) {
+            true => format!("row `{}`", draft.id),
+            false => format!("row {}", at + 1),
+        };
+        Error::Invalid(format!("{} {row}: {what}", label(&self.name)))
+    }
+
+    /// Fault of this track, named by track and file.
+    pub fn invalid(&self, what: &str) -> Error {
+        Error::Invalid(format!("{}: {what}", label(&self.name)))
+    }
 }
 
-/// Row on the walk path twice = loop. Such a row never settles, so every row
-/// behind it reads `blocked` for good.
-fn check_loops(rows: &[Row]) -> Result<()> {
-    let mut marks = vec![Mark::Fresh; rows.len()];
-    let mut path = Vec::new();
-    for start in 0..rows.len() {
-        walk(rows, start, &mut marks, &mut path)?;
+impl Board {
+    pub fn rows(&self) -> &[Row] {
+        &self.rows
     }
-    Ok(())
+
+    pub fn row(&self, id: &str) -> Option<&Row> {
+        self.rows.iter().find(|row| row.id == id)
+    }
+
+    /// `id`, then every row that waits on it, straight or through others.
+    pub fn dependants(&self, id: &str) -> Vec<&str> {
+        let Some(root) = self.rows.iter().position(|row| row.id == id) else {
+            return Vec::new();
+        };
+        let mut marked = vec![false; self.rows.len()];
+        marked[root] = true;
+        let mut grown = true;
+        while grown {
+            grown = false;
+            for (index, row) in self.rows.iter().enumerate() {
+                if !marked[index] && row.after.iter().any(|&parent| marked[parent]) {
+                    marked[index] = true;
+                    grown = true;
+                }
+            }
+        }
+        self.rows
+            .iter()
+            .zip(marked)
+            .filter(|(_, hit)| *hit)
+            .map(|(row, _)| row.id.as_str())
+            .collect()
+    }
 }
 
 /// Depth-first walk of `after`.
@@ -177,37 +389,41 @@ enum Mark {
     Walked,
 }
 
-fn walk(rows: &[Row], at: usize, marks: &mut [Mark], path: &mut Vec<usize>) -> Result<()> {
+/// Row indices of the first loop found, from where it opens, closing row last.
+fn walk(
+    after: &[Vec<usize>],
+    at: usize,
+    marks: &mut [Mark],
+    path: &mut Vec<usize>,
+) -> Option<Vec<usize>> {
     match marks[at] {
-        Mark::Walked => return Ok(()),
-        Mark::OnPath => return Err(loop_error(rows, path, at)),
+        Mark::Walked => return None,
+        Mark::OnPath => {
+            let open = path.iter().position(|&on| on == at)?;
+            return Some(path[open..].iter().copied().chain([at]).collect());
+        }
         Mark::Fresh => {}
     }
     marks[at] = Mark::OnPath;
     path.push(at);
-    for &parent in &rows[at].after {
-        walk(rows, parent, marks, path)?;
+    for &parent in &after[at] {
+        if let Some(ids) = walk(after, parent, marks, path) {
+            return Some(ids);
+        }
     }
     path.pop();
     marks[at] = Mark::Walked;
-    Ok(())
+    None
 }
 
-/// Ids from where the loop opens, closing id last.
-fn loop_error(rows: &[Row], path: &[usize], closes: usize) -> Error {
-    let open = path
-        .iter()
-        .position(|&at| at == closes)
-        .expect("a row marked `OnPath` must sit on the path");
-    let ids: Vec<&str> = path[open..]
-        .iter()
-        .chain([&closes])
-        .map(|&at| rows[at].id.as_str())
-        .collect();
-    Error::Invalid(format!(
-        "{FILE}: field `after` must name no loop: {}",
-        ids.join(" -> ")
-    ))
+/// Track name or row id: one ref path part, so `<track>/<id>` splits one way.
+pub fn one_name(name: &str) -> bool {
+    !name.contains('/') && git::valid_ref(name)
+}
+
+/// File name in errors: track name and file.
+fn label(name: &str) -> String {
+    format!("track `{name}` {FILE}")
 }
 
 #[cfg(test)]
@@ -227,27 +443,36 @@ commit: Message only.
 ";
 
     const EXAMPLE: &str = r#"
-- id: rag-04-retriever
-  steps:
-    - |
-      Swap the retriever to hybrid BM25 plus dense.
-      Spec in docs/spec/retrieval.md.
-    - &check "Correct, clean, beautiful?"
-    - commit:
-    - run: make bench > bench/out.txt
-      timeout: 1800
-    - commit: "bench: hybrid retriever"
-- id: rag-04-review
-  after: [rag-04-retriever]
-  agent: codex
-  steps:
-    - "Read bench/out.txt. Audit the retriever swap against it. Close every gap."
-    - *check
-    - commit:
+from: main
+to: feat/laser
+priority: 10
+rows:
+  - id: rag-04-retriever
+    steps:
+      - |
+        Swap the retriever to hybrid BM25 plus dense.
+        Spec in docs/spec/retrieval.md.
+      - &check "Correct, clean, beautiful?"
+      - commit:
+      - run: make bench > bench/out.txt
+        timeout: 1800
+      - commit: "bench: hybrid retriever"
+  - id: rag-04-review
+    after: [rag-04-retriever]
+    agent: codex
+    steps:
+      - "Read bench/out.txt. Audit the retriever swap against it. Close every gap."
+      - *check
+      - commit:
 "#;
 
-    fn config() -> Config {
-        Config::parse(CONFIG).expect("test config must parse")
+    fn track(text: &str) -> Result<Track> {
+        Track::parse("laser", &"0".repeat(40), text)
+    }
+
+    fn board(text: &str) -> Result<Board> {
+        let config = Config::parse(CONFIG).expect("test config must parse");
+        track(text)?.board(&config)
     }
 
     fn prompt(step: &Step) -> &str {
@@ -259,47 +484,47 @@ commit: Message only.
 
     #[test]
     fn parses_contract_example() {
-        let board = Board::parse(EXAMPLE, &config()).expect("example must parse");
+        let parsed = track(EXAMPLE).expect("example must parse");
+        assert_eq!(
+            (parsed.from.as_str(), parsed.to.as_str()),
+            ("main", "feat/laser")
+        );
+        assert_eq!(parsed.priority, 10);
+        let board = board(EXAMPLE).expect("example must settle");
         let rows = board.rows();
-        assert_eq!(rows.len(), 2);
         assert_eq!(
             prompt(&rows[0].steps[0]),
             "Swap the retriever to hybrid BM25 plus dense.\nSpec in docs/spec/retrieval.md.\n"
         );
         assert!(matches!(rows[0].steps[3], Step::Run { .. }));
-        assert_eq!(rows[0].agent, "claude");
         assert_eq!(rows[1].after, [0]);
         assert_eq!(rows[1].agent, "codex");
-        assert_eq!(prompt(&rows[1].steps[1]), "Correct, clean, beautiful?");
+        assert_eq!(
+            board.dependants("rag-04-retriever"),
+            ["rag-04-retriever", "rag-04-review"]
+        );
     }
 
     #[test]
     fn names_the_row_and_step_of_a_bad_field() {
         let text = EXAMPLE.replace("timeout: 1800", "timeout: 0");
-        let why = Board::parse(&text, &config())
+        let why = board(&text)
             .expect_err("a zero timeout must fail")
             .to_string();
-        assert!(why.contains("row `rag-04-retriever`"), "{why}");
+        assert!(
+            why.contains("track `laser` SWARM.yaml row `rag-04-retriever`"),
+            "{why}"
+        );
         assert!(why.contains("step 4: field `timeout`"), "{why}");
-    }
-
-    #[test]
-    fn names_the_place_of_a_row_with_no_id() {
-        let text = EXAMPLE.replace("- id: rag-04-review", "- id: \"\"");
-        let why = Board::parse(&text, &config())
-            .expect_err("an empty id must fail")
-            .to_string();
-        assert!(why.contains("row 2"), "{why}");
-        assert!(why.contains("`id`"), "{why}");
     }
 
     #[test]
     fn names_the_ids_of_a_loop() {
         let text = EXAMPLE.replace(
             "- id: rag-04-retriever",
-            "- id: rag-04-retriever\n  after: [rag-04-review]",
+            "- id: rag-04-retriever\n    after: [rag-04-review]",
         );
-        let why = Board::parse(&text, &config())
+        let why = track(&text)
             .expect_err("a loop in `after` must fail")
             .to_string();
         assert!(
@@ -309,12 +534,11 @@ commit: Message only.
     }
 
     #[test]
-    fn names_the_row_that_waits_on_no_row() {
-        let text = EXAMPLE.replace("after: [rag-04-retriever]", "after: [rag-99-missing]");
-        let why = Board::parse(&text, &config())
-            .expect_err("unknown id must fail")
+    fn rejects_a_slash_in_an_id() {
+        let text = EXAMPLE.replace("- id: rag-04-review", "- id: rag/04");
+        let why = track(&text)
+            .expect_err("an id with `/` must fail")
             .to_string();
-        assert!(why.contains("row `rag-04-review`"), "{why}");
-        assert!(why.contains("`after`"), "{why}");
+        assert!(why.contains("row 2: field `id`"), "{why}");
     }
 }

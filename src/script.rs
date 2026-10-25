@@ -4,81 +4,83 @@ use crate::config::{self, Agent, Config, ID_SLOT, PARENT_SLOT};
 use crate::error::{Error, Result};
 use crate::event;
 use crate::slot::Slot;
+use crate::state::Key;
 use crate::step::{Outcome, Policy, Step, Steps};
 use crate::transcript::{Entry, Transcript};
 
 /// First character of every slot name.
 const SLOT_OPEN: char = '{';
 
-/// Run every step of one row in one session. `Done` holds the last commit.
-pub fn play(
-    slot: &Slot,
-    env: &[String],
-    config: &Config,
-    row: &Row,
-    transcript: &Transcript,
-) -> Result<Outcome<String>> {
-    Session::open(slot, env, config, row, None, transcript)?.play(&row.steps)
-}
-
-/// Hand conflicted worktree to project merge steps. No `merge` steps: nothing
-/// runs, conflict stands.
-pub fn resolve(
-    slot: &Slot,
-    env: &[String],
-    config: &Config,
-    row: &Row,
-    parent: &str,
-    transcript: &Transcript,
-) -> Result<Outcome<()>> {
-    let Some(steps) = &config.merge else {
-        return Ok(Outcome::Done(()));
-    };
-    event::merge(&row.id, parent);
-    let played = Session::open(slot, env, config, row, Some(parent), transcript)?.play(steps)?;
-    Ok(played.map(drop))
-}
-
-struct Session<'a> {
+/// Agent session of one row: the row steps, then any `merge` steps, so a merge
+/// resumes the session the row ran.
+pub struct Session<'a> {
     slot: &'a Slot,
     env: &'a [String],
+    config: &'a Config,
+    row: &'a Row,
     agent: &'a Agent,
-    /// Config `commit`: prompt of every agent commit step.
-    commit_prompt: &'a str,
-    id: &'a str,
-    transcript: &'a Transcript,
-    /// Branch merged in this session. `None` off merge.
-    parent: Option<&'a str>,
+    /// Row key: event context.
+    key: String,
     /// Session id of the agent, known from its first reply on. Spans every step.
     session: Option<String>,
 }
 
+/// Where one pass of steps writes, and the branch it merges in. `None` off merge.
+#[derive(Clone, Copy)]
+struct Pass<'p> {
+    transcript: &'p Transcript,
+    parent: Option<&'p str>,
+}
+
 impl<'a> Session<'a> {
-    fn open(
+    pub fn open(
         slot: &'a Slot,
         env: &'a [String],
         config: &'a Config,
         row: &'a Row,
-        parent: Option<&'a str>,
-        transcript: &'a Transcript,
+        key: &Key,
     ) -> Result<Self> {
         Ok(Self {
             slot,
             env,
+            config,
+            row,
             agent: agent(config, &row.agent)?,
-            commit_prompt: &config.commit,
-            id: &row.id,
-            transcript,
-            parent,
+            key: key.to_string(),
             session: None,
         })
     }
 
+    /// Every step of the row. `Done` holds the last commit.
+    pub fn play(&mut self, transcript: &Transcript) -> Result<Outcome<String>> {
+        let row = self.row;
+        let pass = Pass {
+            transcript,
+            parent: None,
+        };
+        self.run(&row.steps, pass)
+    }
+
+    /// Hand the conflicted worktree to the project `merge` steps. No `merge` steps:
+    /// nothing runs, the conflict stands.
+    pub fn resolve(&mut self, parent: &str, transcript: &Transcript) -> Result<Outcome<()>> {
+        let config = self.config;
+        let Some(steps) = &config.merge else {
+            return Ok(Outcome::Done(()));
+        };
+        event::merge(&self.key, parent);
+        let pass = Pass {
+            transcript,
+            parent: Some(parent),
+        };
+        Ok(self.run(steps, pass)?.map(drop))
+    }
+
     /// Steps in order, up to the first spent one.
-    fn play(&mut self, steps: &Steps) -> Result<Outcome<String>> {
+    fn run(&mut self, steps: &Steps, pass: Pass) -> Result<Outcome<String>> {
         let mut last = None;
         for (index, step) in steps.iter().enumerate() {
-            match self.step(index + 1, step)? {
+            match self.step(index + 1, step, pass)? {
                 Outcome::Done(commit) => last = commit.or(last),
                 Outcome::Spent(why) => return Ok(Outcome::Spent(why)),
             }
@@ -89,39 +91,45 @@ impl<'a> Session<'a> {
     }
 
     /// One step. `Done` holds sha of commit step.
-    fn step(&mut self, number: usize, step: &Step) -> Result<Outcome<Option<String>>> {
+    fn step(&mut self, number: usize, step: &Step, pass: Pass) -> Result<Outcome<Option<String>>> {
         match step {
             Step::Prompt { text, policy } => {
-                let text = self.fill(text);
-                let outcome = self.call(policy, number).ask(&self.turn(&text))?;
+                let text = self.fill(text, pass);
+                let outcome = self.call(policy, number, pass).ask(&self.turn(&text))?;
                 Ok(self.reply(outcome).map(|_| None))
             }
             Step::Run {
                 command,
                 policy,
                 continue_on_error,
-            } => Ok(match self.call(policy, number).ask(&Shell(command))? {
-                Outcome::Spent(_) if *continue_on_error => Outcome::Done(None),
-                outcome => outcome.map(|()| None),
-            }),
+            } => Ok(
+                match self.call(policy, number, pass).ask(&Shell(command))? {
+                    Outcome::Spent(_) if *continue_on_error => Outcome::Done(None),
+                    outcome => outcome.map(|()| None),
+                },
+            ),
             Step::AgentCommit { policy } => {
-                let ask = Message(self.turn(self.commit_prompt));
-                let outcome = self.call(policy, number).ask(&ask)?;
+                let ask = Message(self.turn(&self.config.commit));
+                let outcome = self.call(policy, number, pass).ask(&ask)?;
                 match self.reply(outcome) {
-                    Outcome::Done(message) => {
-                        Ok(Outcome::Done(Some(self.commit(number, message.trim())?)))
-                    }
+                    Outcome::Done(message) => Ok(Outcome::Done(Some(self.commit(
+                        number,
+                        message.trim(),
+                        pass,
+                    )?))),
                     Outcome::Spent(why) => Ok(Outcome::Spent(why)),
                 }
             }
-            Step::Commit { message } => Ok(Outcome::Done(Some(self.commit(number, message)?))),
+            Step::Commit { message } => {
+                Ok(Outcome::Done(Some(self.commit(number, message, pass)?)))
+            }
         }
     }
 
-    /// Board steps go as typed. Merge prompts take the two names the tool knows.
-    fn fill(&self, text: &str) -> String {
-        match self.parent {
-            Some(parent) => fill(text, &[(ID_SLOT, self.id), (PARENT_SLOT, parent)]),
+    /// Row steps go as typed. Merge prompts take the two names the tool knows.
+    fn fill(&self, text: &str, pass: Pass) -> String {
+        match pass.parent {
+            Some(parent) => fill(text, &[(ID_SLOT, &self.row.id), (PARENT_SLOT, parent)]),
             None => text.to_string(),
         }
     }
@@ -143,21 +151,21 @@ impl<'a> Session<'a> {
         })
     }
 
-    fn call<'c>(&'c self, policy: &'c Policy, number: usize) -> Call<'c> {
+    fn call<'c>(&'c self, policy: &'c Policy, number: usize, pass: Pass<'c>) -> Call<'c> {
         Call {
             slot: self.slot,
             env: self.env,
             policy,
-            transcript: self.transcript,
-            id: self.id,
+            transcript: pass.transcript,
+            id: &self.key,
             step: number,
         }
     }
 
-    fn commit(&self, number: usize, message: &str) -> Result<String> {
+    fn commit(&self, number: usize, message: &str, pass: Pass) -> Result<String> {
         let commit = self.slot.commit(message)?;
-        event::commit(self.id, &commit);
-        self.transcript.append(&Entry {
+        event::commit(&self.key, &commit);
+        pass.transcript.append(&Entry {
             commit: Some(commit.clone()),
             message: Some(message.to_string()),
             ..Entry::new(number)

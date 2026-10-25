@@ -6,7 +6,7 @@ agents:
     resume: --resume {session}
 commit: "Reply with the commit message for the work in this session, in Conventional Commits format per CONTRIBUTING.md. Message only."
 merge:
-  - "This worktree holds a conflicted merge of branch {parent} into the branch of task {id}. Read both sides, resolve every conflict so both intents survive, run `make lint`."
+  - "This worktree holds a conflicted merge of row {id} into branch {parent}. Read both sides, resolve every conflict so both intents survive, run `make lint`."
   - "Conflict markers gone, build and lint clean?"
   - run: make lint
   - commit:

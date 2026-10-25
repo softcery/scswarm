@@ -28,7 +28,9 @@ Facts that follow from the table:
 - A `mounts` entry shared by all slots, for example a cargo registry, lets one row change what the next row builds with.
 - The agent never writes git refs. The host commits the worktree. The gitdir mounts read-only, so the agent cannot add a hook or change git config.
 - Agent permission flags, for example `--dangerously-skip-permissions`, come from `exec` in your `scswarm.yaml`. scswarm adds none.
-- Review each `swarm/<id>` branch before you merge it. A merge runs nothing, but your next build runs the agent's code on the host.
+- Review each `to` branch before you merge it. A merge runs nothing, but your next build runs the agent's code on the host.
+- The host pushes `to` and `refs/swarm/*` with its own deploy key or token. No container sees it. Scope it to one repo.
+- A track names its `from` and `to`. Branch push rights on the remote decide who can point rows at which branch.
 
 ## Out of scope
 

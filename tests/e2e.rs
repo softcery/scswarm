@@ -1,6 +1,7 @@
-//! Live slot set and `serve` restart against rootless podman. Board holds `run` and literal commit
-//! steps only: no agent call, no credential, no token spent.
+//! Live slot set, `serve` restart and two tracks against rootless podman and a local remote.
+//! Rows hold `run` and literal commit steps only: no agent call, no credential, no token spent.
 
+use std::collections::BTreeSet;
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
@@ -9,13 +10,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const PROJECT: &str = "scswarm-e2e";
-const ROWS: [&str; 3] = ["row-1", "row-2", "row-3"];
+/// Track `a` starts from `main` and runs first; track `b` starts from `side`.
+const ROWS: [&str; 3] = ["a/row-1", "a/row-2", "a/row-3"];
+const OTHER: &str = "b/other-1";
 const ROW_SECONDS: u64 = 10;
 const WAIT: Duration = Duration::from_secs(180);
 const TICK: Duration = Duration::from_millis(200);
 /// Host file `poll` is 1 s: two cycles and a reload fit.
 const CYCLES: Duration = Duration::from_secs(3);
-const IMAGE: &str = "localhost/scswarm/scswarm-e2e:latest";
 const CONTAINERFILE: &str = "Containerfile.e2e";
 const BASE: &str = "registry.fedoraproject.org/fedora:44";
 
@@ -36,9 +38,10 @@ fn slot_set_follows_host_file_live() {
     holds(&swarm);
     keeps_containers_on_env(&swarm);
     reports_stale_once(&swarm);
-    survives_bad_board(&swarm);
+    survives_bad_track(&swarm);
     rolls_image(&swarm);
-    outlives_serve(&mut swarm);
+    let restarted = outlives_serve(&mut swarm);
+    pushes_every_track(&swarm, restarted);
     let creates = swarm
         .lines()
         .iter()
@@ -50,21 +53,22 @@ fn slot_set_follows_host_file_live() {
     );
 }
 
-/// 1 → 3 with rows waiting: new slots open on the next cycle and take them.
+/// 1 → 3 with rows waiting: new slots take them on the next cycle, priority first.
 fn grows(swarm: &Swarm) {
-    let from = swarm.wait("assign task=row-1 slot=0", 0);
+    let from = swarm.wait(&format!("assign row={} slot=0", ROWS[0]), 0);
     swarm.host(3, &[]);
     for needle in [
         "create slot=1",
         "create slot=2",
-        "assign task=row-2",
-        "assign task=row-3",
+        &format!("assign row={} ", ROWS[1]),
+        &format!("assign row={} ", ROWS[2]),
     ] {
         swarm.wait(needle, from);
     }
 }
 
-/// 3 → 1 mid-row: busy slots stay, each drops once its row lands.
+/// 3 → 1 mid-row: busy slots stay, each drops once its row lands. The track of
+/// lower priority runs once a slot frees.
 fn drains(swarm: &Swarm) {
     let from = swarm.mark();
     swarm.host(1, &[]);
@@ -82,23 +86,24 @@ fn drains(swarm: &Swarm) {
             "slot {slot} must drop after its row lands"
         );
     }
-    swarm.wait("land task=row-1", from);
+    swarm.wait(&format!("land row={}", ROWS[0]), from);
+    swarm.wait(&format!("push row={OTHER} "), from);
 }
 
 /// 3 → 1 → 3 inside one row: nothing drops, nothing rebuilds.
 fn holds(swarm: &Swarm) {
     let from = swarm.mark();
     swarm.host(3, &[]);
+    swarm.rerun(&ROWS, from);
     swarm.wait("create slot=1", from);
     swarm.wait("create slot=2", from);
-    swarm.rerun(&ROWS, from);
     let before = swarm.containers();
     let flip = swarm.mark();
     swarm.host(1, &[]);
     thread::sleep(CYCLES);
     swarm.host(3, &[]);
     for row in ROWS {
-        swarm.wait(&format!("land task={row}"), flip);
+        swarm.wait(&format!("land row={row}"), flip);
     }
     thread::sleep(CYCLES);
     swarm.quiet(flip);
@@ -111,8 +116,8 @@ fn keeps_containers_on_env(swarm: &Swarm) {
     let from = swarm.mark();
     swarm.host(3, &["HOME"]);
     thread::sleep(CYCLES);
-    swarm.rerun(&["row-1"], from);
-    swarm.wait("land task=row-1", from);
+    swarm.rerun(&ROWS[..1], from);
+    swarm.wait(&format!("land row={}", ROWS[0]), from);
     swarm.quiet(from);
     assert_eq!(
         swarm.containers(),
@@ -136,63 +141,70 @@ fn reports_stale_once(swarm: &Swarm) {
     swarm.quiet(from);
 }
 
-/// Broken board pushed mid-row: one `skip`, the row lands, a fixed board resumes.
-fn survives_bad_board(swarm: &Swarm) {
+/// Broken track file pushed mid-row: one `skip`, the row lands, a fixed file resumes.
+fn survives_bad_track(swarm: &Swarm) {
     let from = swarm.mark();
-    swarm.rerun(&["row-1"], from);
-    swarm.commit("SWARM.yaml", "- id: [\n", "e2e: broken board");
-    swarm.wait("skip cause=SWARM.yaml", from);
-    swarm.wait("land task=row-1", from);
+    swarm.rerun(&ROWS[..1], from);
+    swarm.commit_on(
+        "track/a",
+        "SWARM.yaml",
+        "from: main\nto: [\n",
+        "e2e: broken track",
+    );
+    swarm.wait("skip cause=track `a`", from);
+    swarm.wait(&format!("land row={}", ROWS[0]), from);
     thread::sleep(CYCLES);
     let skips = swarm.lines()[from..]
         .iter()
         .filter(|line| line.starts_with("skip "))
         .count();
-    assert_eq!(skips, 1, "a repeated board fault must report once");
-    swarm.commit("SWARM.yaml", &board(), "e2e: board fixed");
+    assert_eq!(skips, 1, "a repeated track fault must report once");
+    swarm.commit_on("track/a", "SWARM.yaml", &track_a(), "e2e: track fixed");
     let fixed = swarm.mark();
-    swarm.wait("fetch trunk=", fixed);
-    swarm.rerun(&["row-2"], fixed);
-    swarm.wait("land task=row-2", fixed);
+    swarm.wait("fetch track=a ", fixed);
+    swarm.rerun(&ROWS[1..2], fixed);
+    swarm.wait(&format!("push row={} ", ROWS[1]), fixed);
     swarm.quiet(from);
 }
 
-/// `init` during `serve` with a changed image: each slot rebuilds once its row
-/// lands, and all end on the new image.
+/// Containerfile change pushed on `to`: each slot builds it and remakes its
+/// container at its next row, and all end on one new image.
 fn rolls_image(swarm: &Swarm) {
-    let old = swarm.image();
-    swarm.commit(CONTAINERFILE, &containerfile(2), "e2e: image change");
+    let old = swarm.images();
+    swarm.commit_on(
+        "feat/a",
+        CONTAINERFILE,
+        &containerfile(2),
+        "e2e: image change",
+    );
     let from = swarm.mark();
     swarm.rerun(&ROWS, from);
-    swarm.tool(&["init", PROJECT]);
-    let new = swarm.image();
-    assert_ne!(old, new, "Containerfile change must build a new image ID");
     for slot in 0..3 {
-        let landed = swarm.landed_on(slot);
-        let created = swarm.wait(&format!("create slot={slot}"), from);
-        assert!(
-            created > landed,
-            "slot {slot} must rebuild after its row lands"
-        );
+        swarm.wait(&format!("create slot={slot}"), from);
     }
-    let start = Instant::now();
-    while !swarm.containers().iter().all(|line| line.ends_with(&new)) {
-        assert!(start.elapsed() < WAIT, "every slot must reach image {new}");
-        thread::sleep(TICK);
+    for row in ROWS {
+        swarm.wait(&format!("push row={row} "), from);
     }
+    let new = swarm.images();
+    assert_eq!(new.len(), 1, "every slot must run one image: {new:?}");
+    assert!(
+        old.is_disjoint(&new),
+        "Containerfile change must build a new image ID"
+    );
 }
 
-/// SIGKILL on `serve` mid-row: the worker runs on and a new `serve` waits on its
-/// locks. The row lands once, on the same container, one try per step.
-fn outlives_serve(swarm: &mut Swarm) {
+/// SIGKILL on `serve` mid-row: the worker runs on, a new `serve` waits on its
+/// locks. The row lands once, one try per step. Returns the restart line.
+fn outlives_serve(swarm: &mut Swarm) -> usize {
+    let row = ROWS[0];
     let from = swarm.mark();
-    swarm.rerun(&["row-1"], from);
-    swarm.wait("step task=row-1 step=1", from);
+    swarm.rerun(&[row], from);
+    swarm.wait(&format!("step row={row} step=1"), from);
     let before = swarm.containers();
     swarm.kill();
     let restarted = swarm.mark();
     swarm.serve();
-    swarm.wait("fetch trunk=", restarted);
+    swarm.wait("fetch track=", restarted);
     let second = command()
         .args(["serve", PROJECT])
         .output()
@@ -200,27 +212,74 @@ fn outlives_serve(swarm: &mut Swarm) {
     assert_eq!(second.status.code(), Some(2), "second `serve` must exit 2");
     let why = String::from_utf8_lossy(&second.stderr);
     assert!(why.contains("another `scswarm serve"), "{why}");
-    swarm.wait("land task=row-1", from);
+    swarm.wait(&format!("land row={row}"), from);
     let count = |needle: &str| {
         swarm.lines()[from..]
             .iter()
             .filter(|line| line.starts_with(needle))
             .count()
     };
-    assert_eq!(count("assign task=row-1 "), 1, "row must not reassign");
-    assert_eq!(count("step task=row-1 "), 1, "row must not replay");
-    assert_eq!(count("attempt task=row-1 "), 0, "step must take one try");
+    assert_eq!(
+        count(&format!("assign row={row} ")),
+        1,
+        "row must not reassign"
+    );
+    assert_eq!(count(&format!("step row={row} ")), 1, "row must not replay");
+    assert_eq!(
+        count(&format!("attempt row={row} ")),
+        0,
+        "step must take one try"
+    );
     assert_eq!(
         swarm.containers(),
         before,
         "restart must keep every container"
     );
+    restarted
 }
 
-/// Scratch project: checkout, host file, `serve` log. Drop removes every trace,
-/// pass or fail.
+/// Two tracks from two branches each push a `to` that holds every row, and a
+/// plain clone reads every row as `pushed`.
+fn pushes_every_track(swarm: &Swarm, from: usize) {
+    let pushed = swarm.wait(&format!("push row={} ", ROWS[0]), from);
+    swarm.wait("mirror refs=", pushed);
+    let clone = scratch().join("clone");
+    let remote = swarm.remote();
+    succeed(
+        git().args(["clone", "--quiet"]).arg(&remote).arg(&clone),
+        "git",
+    );
+    succeed(
+        git().arg("-C").arg(&clone).args([
+            "fetch",
+            "--quiet",
+            "origin",
+            "+refs/swarm/*:refs/swarm/*",
+        ]),
+        "git",
+    );
+    let table = succeed(
+        command()
+            .args(["status", "--tracks", "track/"])
+            .current_dir(&clone),
+        "scswarm",
+    );
+    for row in ROWS.iter().chain([&OTHER]) {
+        let line = table
+            .lines()
+            .find(|line| line.starts_with(&format!("{row} ")))
+            .unwrap_or_else(|| panic!("status must list {row}:\n{table}"));
+        assert!(
+            line.contains(" pushed "),
+            "{row} must read pushed:\n{table}"
+        );
+    }
+}
+
+/// Scratch project: bare remote, a clone that pushes to it, host file, `serve`
+/// log. Drop removes every trace, pass or fail.
 struct Swarm {
-    repo: PathBuf,
+    work: PathBuf,
     log: PathBuf,
     serve: Option<Child>,
 }
@@ -228,28 +287,51 @@ struct Swarm {
 impl Swarm {
     fn open() -> Self {
         clean();
-        let repo = scratch();
-        fs::create_dir_all(&repo).expect("scratch dir must be writable");
+        let root = scratch();
+        fs::create_dir_all(&root).expect("scratch dir must be writable");
         let swarm = Self {
-            log: repo.with_extension("log"),
-            repo,
+            work: root.join("work"),
+            log: root.join("serve.log"),
             serve: None,
         };
-        swarm.git(&["init", "--quiet", "--initial-branch=main"]);
+        succeed(
+            git()
+                .args(["init", "--quiet", "--bare"])
+                .arg(swarm.remote()),
+            "git",
+        );
+        succeed(
+            git()
+                .args(["clone", "--quiet"])
+                .arg(swarm.remote())
+                .arg(&swarm.work),
+            "git",
+        );
+        swarm.git(&["checkout", "--quiet", "--orphan", "main"]);
         swarm.write("scswarm.yaml", CONFIG);
-        swarm.write("SWARM.yaml", &board());
-        swarm.commit(CONTAINERFILE, &containerfile(1), "e2e: project");
+        swarm.commit_here(CONTAINERFILE, &containerfile(1), "e2e: project", "main");
+        swarm.git(&["checkout", "--quiet", "-b", "side"]);
+        swarm.commit_here("side.txt", "side\n", "e2e: side", "side");
+        swarm.track("track/a", &track_a());
+        swarm.track("track/b", &track_b());
         swarm
+    }
+
+    fn remote(&self) -> PathBuf {
+        scratch().join("remote.git")
     }
 
     fn host(&self, workers: usize, env: &[&str]) {
         let file = host_file();
         fs::create_dir_all(file.parent().expect("host file has a dir"))
             .expect("config dir must be writable");
+        let rules = match env.is_empty() {
+            true => String::new(),
+            false => format!("env:\n  - match: '*'\n    names: [{}]\n", env.join(", ")),
+        };
         let text = format!(
-            "path: {}\ntrunk: main\nworkers: {workers}\nenv: [{}]\npoll: 1\n",
-            self.repo.display(),
-            env.join(", ")
+            "remote: {}\ntracks: track/\nworkers: {workers}\n{rules}poll: 1\n",
+            self.remote().display()
         );
         fs::write(&file, text).expect("host file must be writable");
     }
@@ -288,7 +370,7 @@ impl Swarm {
             self.tool(&["reset", PROJECT, row]);
         }
         for row in rows {
-            self.wait(&format!("assign task={row} "), from);
+            self.wait(&format!("assign row={row} "), from);
         }
     }
 
@@ -333,11 +415,11 @@ impl Swarm {
             .enumerate()
             .rev()
             .find_map(|(index, line)| {
-                let row = line.strip_prefix("assign task=")?.strip_suffix(&tail)?;
+                let row = line.strip_prefix("assign row=")?.strip_suffix(&tail)?;
                 Some((index, row.to_string()))
             })
             .unwrap_or_else(|| panic!("log must show a row assigned to slot {slot}"));
-        self.wait(&format!("land task={row}"), assigned)
+        self.wait(&format!("land row={row}"), assigned)
     }
 
     /// No slot created or removed since `from`.
@@ -363,26 +445,43 @@ impl Swarm {
         held
     }
 
-    fn image(&self) -> String {
-        let out = succeed(
-            Command::new("podman").args(["image", "inspect", "--format={{.Id}}", IMAGE]),
-            "podman",
-        );
-        out.trim().to_string()
+    /// Image IDs the slot containers run.
+    fn images(&self) -> BTreeSet<String> {
+        self.containers()
+            .iter()
+            .filter_map(|line| line.rsplit(' ').next().map(str::to_string))
+            .collect()
     }
 
-    fn commit(&self, file: &str, text: &str, message: &str) {
+    /// Orphan track branch holding `text` as its track file, pushed.
+    fn track(&self, branch: &str, text: &str) {
+        self.git(&["checkout", "--quiet", "--orphan", branch]);
+        self.git(&["rm", "-r", "--quiet", "--force", "--cached", "."]);
+        self.git(&["clean", "--quiet", "--force", "-d"]);
+        self.commit_here("SWARM.yaml", text, "e2e: track", branch);
+    }
+
+    /// Commit `text` as `file` on the remote tip of `branch`, then push it.
+    fn commit_on(&self, branch: &str, file: &str, text: &str, message: &str) {
+        self.git(&["fetch", "--quiet", "origin"]);
+        let tip = format!("origin/{branch}");
+        self.git(&["checkout", "--quiet", "--force", "-B", branch, &tip]);
+        self.commit_here(file, text, message, branch);
+    }
+
+    fn commit_here(&self, file: &str, text: &str, message: &str, branch: &str) {
         self.write(file, text);
         self.git(&["add", "--all"]);
         self.git(&["commit", "--quiet", "--message", message]);
+        self.git(&["push", "--quiet", "origin", branch]);
     }
 
     fn write(&self, file: &str, text: &str) {
-        fs::write(self.repo.join(file), text).expect("scratch file must be writable");
+        fs::write(self.work.join(file), text).expect("scratch file must be writable");
     }
 
     fn git(&self, args: &[&str]) {
-        succeed(git().arg("-C").arg(&self.repo).args(args), "git");
+        succeed(git().arg("-C").arg(&self.work).args(args), "git");
     }
 }
 
@@ -402,41 +501,56 @@ default_agent: none
 agents:
   none:
     exec: \"false\"
-commit: \"unused: board holds literal commits only\"
+commit: \"unused: rows hold literal commits only\"
 ";
 
-fn board() -> String {
-    ROWS.iter()
-        .map(|row| {
+fn track_a() -> String {
+    track("main", "feat/a", 0, &ROWS)
+}
+
+/// Lower priority: runs once track `a` leaves a slot free.
+fn track_b() -> String {
+    track("side", "feat/b", -1, &[OTHER])
+}
+
+fn track(from: &str, to: &str, priority: i32, rows: &[&str]) -> String {
+    let rows: String = rows
+        .iter()
+        .map(|key| {
+            let id = key.split_once('/').expect("key holds a `/`").1;
             format!(
-                "- id: {row}\n  steps:\n    - run: sleep {ROW_SECONDS}\n    - commit: \"{row}\"\n"
+                "  - id: {id}\n    steps:\n      - run: sleep {ROW_SECONDS}\n      - commit: \"{id}\"\n"
             )
         })
-        .collect()
+        .collect();
+    format!("from: {from}\nto: {to}\npriority: {priority}\nrows:\n{rows}")
 }
 
 fn containerfile(revision: u32) -> String {
     format!("FROM {BASE}\nENV E2E_REVISION={revision}\n")
 }
 
-/// Every trace of the project: slots, image, bare repo, logs, host file, checkout.
+/// Every trace of the project: slots, images, bare repos, logs, host file, scratch.
 fn clean() {
-    let names = Command::new("podman")
+    let listing = Command::new("podman")
         .args([
             "ps",
             "--all",
-            "--quiet",
+            "--format={{.ID}} {{.ImageID}}",
             &format!("--filter=name=^scswarm-{PROJECT}-"),
         ])
         .output()
         .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
         .unwrap_or_default();
-    for id in names.lines() {
-        let _ = Command::new("podman").args(["rm", "--force", id]).output();
+    for line in listing.lines() {
+        let mut fields = line.split(' ');
+        if let (Some(id), Some(image)) = (fields.next(), fields.next()) {
+            let _ = Command::new("podman").args(["rm", "--force", id]).output();
+            let _ = Command::new("podman")
+                .args(["rmi", "--force", image])
+                .output();
+        }
     }
-    let _ = Command::new("podman")
-        .args(["rmi", "--force", IMAGE])
-        .output();
     let swarm = home().join("swarm");
     for dir in [
         swarm.join(format!("{PROJECT}.git")),
@@ -448,7 +562,6 @@ fn clean() {
         let _ = fs::remove_dir_all(dir);
     }
     let _ = fs::remove_file(host_file());
-    let _ = fs::remove_file(scratch().with_extension("log"));
 }
 
 /// Tool under test. Git identity set here: host commits need one, the machine may

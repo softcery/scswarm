@@ -26,8 +26,11 @@ mod yaml;
 
 use clap::{Parser, Subcommand};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
+use crate::git::Git;
+use crate::host::Host;
 use crate::paths::Project;
+use crate::state::Key;
 use crate::work::Job;
 
 #[derive(Parser)]
@@ -39,7 +42,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    #[command(about = "Create bare repo and image")]
+    #[command(about = "Create bare repo and `origin`, fetch")]
     Init { project: String },
     #[command(about = "Run scheduler until stopped; each row runs as its own process")]
     Serve { project: String },
@@ -49,14 +52,20 @@ enum Command {
         #[command(flatten)]
         job: Job,
     },
-    #[command(about = "Print board rows with state derived from git")]
-    Status { project: String },
-    #[command(about = "Print the agent transcript of one task")]
-    Log { project: String, id: String },
+    #[command(about = "Print every row of every track with state derived from git")]
+    Status {
+        #[arg(required_unless_present = "tracks")]
+        project: Option<String>,
+        /// Read the clone in the working directory instead: track branch prefix.
+        #[arg(long, value_name = "PREFIX", conflicts_with = "project")]
+        tracks: Option<String>,
+    },
+    #[command(about = "Print the agent transcripts of one row, `<track>/<id>`")]
+    Log { project: String, row: String },
     #[command(
-        about = "Delete the branch, land ref and fail mark of one task and of every dependant"
+        about = "Delete the branch, land ref and fail refs of one row, `<track>/<id>`, and of every dependant"
     )]
-    Reset { project: String, id: String },
+    Reset { project: String, row: String },
 }
 
 fn main() {
@@ -67,29 +76,44 @@ fn main() {
     }
 }
 
-/// Every command names a project: stem of its host file. Working directory means
-/// nothing.
+/// Every command but `status --tracks` names a project: stem of its host file.
+/// Working directory means nothing there.
 fn dispatch(command: Command) -> Result<()> {
-    let project = Project::try_from(command.project())?;
+    let named = |name: &str| Project::try_from(name);
     match command {
-        Command::Init { .. } => init::init(&project),
-        Command::Serve { .. } => serve::serve(&init::open(&project)?, &project),
-        Command::Work { job, .. } => work::work(&init::open(&project)?, &project, &job),
-        Command::Status { .. } => status::status(&init::open(&project)?, &project),
-        Command::Log { id, .. } => log::log(&project, &id),
-        Command::Reset { id, .. } => reset::reset(&init::open(&project)?, &id),
-    }
-}
-
-impl Command {
-    fn project(&self) -> &str {
-        match self {
-            Command::Init { project }
-            | Command::Serve { project }
-            | Command::Work { project, .. }
-            | Command::Status { project }
-            | Command::Log { project, .. }
-            | Command::Reset { project, .. } => project,
+        Command::Init { project } => init::init(&named(&project)?),
+        Command::Serve { project } => {
+            let project = named(&project)?;
+            serve::serve(&init::open(&project)?, &project)
+        }
+        Command::Work { project, job } => {
+            let project = named(&project)?;
+            work::work(&init::open(&project)?, &project, &job)
+        }
+        Command::Status {
+            project: Some(project),
+            ..
+        } => {
+            let project = named(&project)?;
+            let tracks = Host::load(&project)?.tracks;
+            status::status(&init::open(&project)?, &tracks, Some(&project))
+        }
+        Command::Status {
+            tracks: Some(prefix),
+            ..
+        } => status::status(&Git::at(paths::here()?), &prefix, None),
+        Command::Status { .. } => Err(Error::Invalid(
+            "`status` must name a project, or a track branch prefix in `--tracks`".to_string(),
+        )),
+        Command::Log { project, row } => log::log(&named(&project)?, &Key::try_from(row.as_str())?),
+        Command::Reset { project, row } => {
+            let project = named(&project)?;
+            let tracks = Host::load(&project)?.tracks;
+            reset::reset(
+                &init::open(&project)?,
+                &tracks,
+                &Key::try_from(row.as_str())?,
+            )
         }
     }
 }
@@ -104,13 +128,16 @@ mod tests {
         let project = Project::try_from("alpha").expect("project name must pass");
         let job = Job {
             slot: 2,
+            track: "laser".to_string(),
             id: "rag-04-review".to_string(),
+            track_tip: "89abcdef0123456789abcdef0123456789abcdef".to_string(),
             base: "0123456789abcdef0123456789abcdef01234567".to_string(),
-            stack: vec![
-                "swarm/rag-04-retriever".to_string(),
-                "swarm/rag-03".to_string(),
-            ],
             env: vec!["ANTHROPIC_API_KEY".to_string()],
+            mounts: vec![host::Mount {
+                host: "/records".to_string(),
+                guest: "/mnt".to_string(),
+            }],
+            devices: vec!["/dev/dri/card0".to_string()],
         };
         let argv = std::iter::once("scswarm".to_string()).chain(job.argv(&project));
         match Cli::try_parse_from(argv).expect("argv must parse").command {

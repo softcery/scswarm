@@ -5,6 +5,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
+use crate::state::Key;
 
 const SWARM_DIR: &str = "swarm";
 const SLOT_DIR: &str = "slot";
@@ -54,14 +55,17 @@ pub fn host_file(project: &Project) -> Result<PathBuf> {
         .join(format!("{project}.{CONFIG_EXT}")))
 }
 
-/// Bare repo the workers read and write. Project pushes the trunk branch here.
+/// Bare repo the workers read and write. Fetches from and pushes to the remote.
 pub fn repo(project: &Project) -> Result<PathBuf> {
     Ok(swarm()?.join(format!("{project}{REPO_SUFFIX}")))
 }
 
-/// Throwaway worktree the image builds from.
-pub fn build(project: &Project) -> Result<PathBuf> {
-    Ok(swarm()?.join(BUILD_DIR).join(project.to_string()))
+/// Throwaway worktree the image of one slot builds from.
+pub fn build(project: &Project, index: usize) -> Result<PathBuf> {
+    Ok(swarm()?
+        .join(BUILD_DIR)
+        .join(project.to_string())
+        .join(index.to_string()))
 }
 
 pub fn slot(project: &Project, index: usize) -> Result<PathBuf> {
@@ -95,13 +99,23 @@ pub fn slot_dirs(project: &Project) -> Result<Vec<usize>> {
 pub const RUN_LOG: &str = "run";
 pub const MERGE_LOG: &str = "merge";
 
-/// Every transcript of one task, one file per session.
-pub fn transcripts(project: &Project, id: &str) -> Result<PathBuf> {
-    Ok(swarm()?.join(LOG_DIR).join(project.to_string()).join(id))
+/// Every transcript of one row, one file per session.
+pub fn transcripts(project: &Project, key: &Key) -> Result<PathBuf> {
+    Ok(swarm()?
+        .join(LOG_DIR)
+        .join(project.to_string())
+        .join(&key.track)
+        .join(&key.id))
 }
 
-pub fn transcript(project: &Project, id: &str, name: &str) -> Result<PathBuf> {
-    Ok(transcripts(project, id)?.join(format!("{name}.{LOG_EXT}")))
+pub fn transcript(project: &Project, key: &Key, name: &str) -> Result<PathBuf> {
+    Ok(transcripts(project, key)?.join(format!("{name}.{LOG_EXT}")))
+}
+
+/// Working directory: the clone `status --tracks` reads.
+pub fn here() -> Result<PathBuf> {
+    env::current_dir()
+        .map_err(|why| Error::Failed(format!("working directory must resolve: {why}")))
 }
 
 /// Path as a command argument.

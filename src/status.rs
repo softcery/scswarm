@@ -1,36 +1,70 @@
 use std::collections::BTreeMap;
 
-use crate::board::{Board, Row};
-use crate::config::Config;
-use crate::error::Result;
-use crate::git::Git;
+use crate::board;
+use crate::error::{Error, Result};
+use crate::git::{self, Git};
+use crate::lock;
 use crate::paths::{self, Project};
-use crate::state;
+use crate::state::{self, Key};
 
-const HEADER: [&str; 4] = ["id", "state", "branch", "worker"];
+const HEADER: [&str; 4] = ["row", "state", "branch", "worker"];
 const COLUMNS: usize = HEADER.len();
 const GAP: &str = "  ";
 const NONE: &str = "-";
 
 type Line = [String; COLUMNS];
 
-/// One line per board row. Every cell derives from git.
-pub fn status(repo: &Git, project: &Project) -> Result<()> {
-    let config = Config::from_trunk(repo)?;
-    let board = Board::from_trunk(repo, &config)?;
-    let states = state::derive(&board, repo)?;
-    let slots = slots(repo, project)?;
+/// One line per row of every track, from git and row locks. `project: None` reads
+/// a clone: no locks, so running reads as queued. A failed track check exits 1.
+pub fn status(repo: &Git, tracks: &str, project: Option<&Project>) -> Result<()> {
+    let scan = board::scan(repo, tracks)?;
+    let mut faults = scan.faults;
+    let held = |key: &Key| match project {
+        Some(project) => lock::held(&paths::transcripts(project, key)?),
+        None => Ok(false),
+    };
+    let slots = match project {
+        Some(project) => slots(repo, project)?,
+        None => BTreeMap::new(),
+    };
+    let branches = repo.refs(git::HEADS)?;
     let mut table = vec![HEADER.map(str::to_string)];
-    for (row, state) in board.rows().iter().zip(&states) {
-        table.push([
-            row.id.clone(),
-            state.to_string(),
-            branch_cell(repo, row)?,
-            worker_cell(row, &slots),
-        ]);
+    for track in scan.tracks {
+        let snapshot = match state::snapshot(repo, track, &held) {
+            Ok(snapshot) => snapshot,
+            Err(why @ Error::Invalid(_)) => {
+                faults.push(why);
+                continue;
+            }
+            Err(why) => return Err(why),
+        };
+        for (row, state) in snapshot.board.rows().iter().zip(&snapshot.states) {
+            let key = Key::new(&snapshot.track.name, &row.id);
+            let branch = key.branch();
+            table.push([
+                key.to_string(),
+                state.to_string(),
+                match branches.contains_key(&git::branch_ref(&branch)) {
+                    true => branch.clone(),
+                    false => NONE.to_string(),
+                },
+                slots
+                    .get(&branch)
+                    .map_or_else(|| NONE.to_string(), usize::to_string),
+            ]);
+        }
     }
     print!("{}", render(&table));
-    Ok(())
+    match faults.is_empty() {
+        true => Ok(()),
+        false => Err(Error::Invalid(
+            faults
+                .iter()
+                .map(Error::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )),
+    }
 }
 
 /// Slot number holding each branch. A worktree checked out on a branch is that
@@ -43,21 +77,6 @@ fn slots(repo: &Git, project: &Project) -> Result<BTreeMap<String, usize>> {
         }
     }
     Ok(slots)
-}
-
-/// A row that never started, and one whose merge failed, hold no branch.
-fn branch_cell(repo: &Git, row: &Row) -> Result<String> {
-    let branch = state::branch(&row.id);
-    Ok(match repo.branch_exists(&branch)? {
-        true => branch,
-        false => NONE.to_string(),
-    })
-}
-
-fn worker_cell(row: &Row, slots: &BTreeMap<String, usize>) -> String {
-    slots
-        .get(&state::branch(&row.id))
-        .map_or_else(|| NONE.to_string(), usize::to_string)
 }
 
 fn render(table: &[Line]) -> String {

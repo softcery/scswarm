@@ -45,6 +45,16 @@ pub fn probe<S: AsRef<OsStr>>(bin: &str, dir: &Path, args: &[S]) -> Result<bool>
     }
 }
 
+/// Exit 0 = stdout, exit 1 = none, rest = failure.
+pub fn lookup<S: AsRef<OsStr>>(bin: &str, dir: &Path, args: &[S]) -> Result<Option<String>> {
+    let out = output(bin, dir, args)?;
+    match out.status.code() {
+        Some(0) => Ok(Some(text(&out.stdout))),
+        Some(1) => Ok(None),
+        _ => Err(failed(bin, args, &fault(&out))),
+    }
+}
+
 /// Run `command` to its end, or kill it at `timeout`. Output captured, stdin closed.
 /// Pipes drain on their own threads, so a chatty child never blocks on a full pipe.
 pub fn capture(mut command: Command, timeout: Option<Duration>) -> Result<Captured> {
@@ -69,15 +79,19 @@ pub fn capture(mut command: Command, timeout: Option<Duration>) -> Result<Captur
     })
 }
 
-/// Output goes to operator, not buffer.
-pub fn stream<S: AsRef<OsStr>>(bin: &str, dir: &Path, args: &[S]) -> Result<()> {
-    let status = command(bin, dir, args)
-        .status()
-        .map_err(|why| unspawned(bin, &call(bin, args), &why))?;
-    if !status.success() {
-        return Err(failed(bin, args, &format!("exit {}", code(status.code()))));
-    }
-    Ok(())
+/// Run to the end, output captured. The caller judges the exit.
+pub fn answer<S: AsRef<OsStr>>(bin: &str, dir: &Path, args: &[S]) -> Result<Output> {
+    output(bin, dir, args)
+}
+
+/// Failure of a call `answer` ran, named by argv and the text it printed.
+pub fn refused<S: AsRef<OsStr>>(bin: &str, args: &[S], out: &Output) -> Error {
+    failed(bin, args, &fault(out))
+}
+
+/// Last line a call printed on stderr, else on stdout: the line that names the fault.
+pub fn last_line(out: &Output) -> String {
+    fault(out).lines().last().unwrap_or_default().to_string()
 }
 
 fn output<S: AsRef<OsStr>>(bin: &str, dir: &Path, args: &[S]) -> Result<Output> {
@@ -167,10 +181,6 @@ fn line<S: AsRef<OsStr>>(args: &[S]) -> String {
         .map(|arg| arg.as_ref().to_string_lossy().into_owned())
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn code(code: Option<i32>) -> String {
-    code.map_or_else(|| "signal".to_string(), |code| code.to_string())
 }
 
 fn text(bytes: &[u8]) -> String {

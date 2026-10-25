@@ -1,54 +1,39 @@
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::error::Result;
-use crate::git::{self, Git};
-use crate::host::{Slots, Stamp};
+use crate::event;
+use crate::git::Git;
+use crate::host::{Mount, Stamp};
 use crate::paths::{self, Project};
 use crate::podman::{self, Container, Spec};
 use crate::step::Outcome;
 
 const WORKTREE_LINK: &str = ".git";
 
-/// One try at conflicted merge.
-pub type Resolve<'a> = dyn Fn(&str) -> Result<Outcome<()>> + 'a;
+/// One try at a conflicted merge.
+pub type Resolve<'a> = dyn FnMut() -> Result<Outcome<()>> + 'a;
 
-/// Worker slot: worktree outside project checkout, container over it. Idle slot
-/// holds no branch. Crash leaves one checked out.
+/// Worker slot: worktree outside any checkout, container over it.
 pub struct Slot {
     git: Git,
     path: PathBuf,
     container: Container,
-}
-
-/// Worktree and container of one slot. Standing worktree stays, container is
-/// replaced.
-pub fn create(
-    repo: &Git,
-    project: &Project,
+    project: Project,
     index: usize,
-    slots: &Slots,
-    stamp: &Stamp,
-) -> Result<()> {
-    let slot = Slot::open(project, index)?;
-    if !slot.path.join(WORKTREE_LINK).exists() {
-        repo.worktree_add(&slot.path, git::TRUNK)?;
-    }
-    slot.container.create(&Spec {
-        worktree: &slot.path,
-        repo: repo.root(),
-        mounts: &slots.mounts,
-        devices: &slots.devices,
-        stamp,
-    })?;
-    slot.release()
 }
 
-/// Take over a whole slot: kill what a dead worker left, free its branch.
-pub fn attach(project: &Project, index: usize) -> Result<()> {
-    let slot = Slot::open(project, index)?;
-    slot.container.restart()?;
-    slot.release()
+/// Slot numbers with a worktree directory or a container.
+pub fn indices(project: &Project) -> Result<BTreeSet<usize>> {
+    let mut held: BTreeSet<usize> = paths::slot_dirs(project)?.into_iter().collect();
+    held.extend(podman::slots(project)?.into_keys());
+    Ok(held)
+}
+
+/// Drop container and worktree of one slot. Either may be absent.
+pub fn remove(repo: &Git, project: &Project, index: usize) -> Result<()> {
+    podman::remove(project, index)?;
+    repo.worktree_remove(&paths::slot(project, index)?)
 }
 
 impl Slot {
@@ -58,6 +43,8 @@ impl Slot {
             git: Git::at(path.clone()),
             path,
             container: Container::slot(project, index),
+            project: project.clone(),
+            index,
         })
     }
 
@@ -69,76 +56,81 @@ impl Slot {
         &self.container
     }
 
-    /// Build `branch` from commit `base` plus merge of `stack`, named last: crash
-    /// mid-merge leaves no branch. Standing branch is a cut-short session: rebuild.
-    pub fn checkout(
+    /// Stamp of the container standing on this slot. `None` when absent.
+    pub fn stamp(&self) -> Result<Option<Stamp>> {
+        podman::stamp(&self.project, self.index)
+    }
+
+    /// Worktree, then a container carrying `stamp`: the standing one restarted, so
+    /// no process a dead worker left reaches this row, else made again.
+    pub fn prepare(
         &self,
-        branch: &str,
+        repo: &Git,
         base: &str,
-        stack: &[String],
-        resolve: &Resolve,
+        stamp: &Stamp,
+        standing: Option<Stamp>,
+        mounts: &[Mount],
+        devices: &[String],
+    ) -> Result<()> {
+        if !self.path.join(WORKTREE_LINK).exists() {
+            repo.worktree_add(&self.path, base)?;
+        }
+        if standing.as_ref() == Some(stamp) {
+            return self.container.restart();
+        }
+        self.container.create(&Spec {
+            worktree: &self.path,
+            repo: repo.root(),
+            mounts,
+            devices,
+            stamp,
+        })?;
+        event::create(self.index);
+        Ok(())
+    }
+
+    pub fn checkout(&self, branch: &str, rev: &str) -> Result<()> {
+        self.git.checkout_at(branch, rev)
+    }
+
+    /// Merge `rev`, tip of `name`, into `onto` on no branch: `onto` first parent.
+    /// Conflict goes to `resolve` once; no merge in flight is git failing.
+    pub fn merge_onto(
+        &self,
+        onto: &str,
+        rev: &str,
+        name: &str,
+        resolve: &mut Resolve,
     ) -> Result<Outcome<()>> {
-        if self.git.branch_exists(branch)? {
-            self.git.branch_delete(branch)?;
+        self.git.checkout_detached(onto)?;
+        let Err(conflict) = self.git.merge(rev, name) else {
+            return Ok(Outcome::Done(()));
+        };
+        if !self.git.merging()? {
+            return Err(conflict);
         }
-        self.git.detach_at(base)?;
-        match self.merge_stack(stack, resolve) {
-            Ok(Outcome::Done(())) => {}
-            unmerged => {
-                self.git.merge_abort()?;
-                return unmerged;
-            }
-        }
-        self.git.branch_at(branch, &self.git.head()?)?;
-        self.git.checkout(branch)?;
-        Ok(Outcome::Done(()))
+        let spent = match resolve()? {
+            Outcome::Spent(why) => format!("{conflict}; `merge` steps: {why}"),
+            Outcome::Done(()) if self.git.merging()? => conflict.to_string(),
+            Outcome::Done(()) => return Ok(Outcome::Done(())),
+        };
+        self.git.merge_abort()?;
+        Ok(Outcome::Spent(spent))
     }
 
-    /// Merge each parent. Conflict goes to `resolve` once; conflict left after it
-    /// spends the row. Merge error with no merge in flight is git failing.
-    fn merge_stack(&self, stack: &[String], resolve: &Resolve) -> Result<Outcome<()>> {
-        for parent in stack {
-            let Err(conflict) = self.git.merge(parent) else {
-                continue;
-            };
-            if !self.git.merging()? {
-                return Err(conflict);
-            }
-            if let Outcome::Spent(why) = resolve(parent)? {
-                return Ok(Outcome::Spent(format!("{conflict}; `merge` steps: {why}")));
-            }
-            if self.git.merging()? {
-                return Ok(Outcome::Spent(conflict.to_string()));
-            }
-        }
-        Ok(Outcome::Done(()))
+    pub fn head(&self) -> Result<String> {
+        self.git.head()
     }
 
+    /// Free the branch for another slot. No worktree: nothing to free.
     pub fn release(&self) -> Result<()> {
-        self.git.detach()
+        match self.path.join(WORKTREE_LINK).exists() {
+            true => self.git.detach(),
+            false => Ok(()),
+        }
     }
 
     pub fn commit(&self, message: &str) -> Result<String> {
         self.git.commit(message)
     }
-}
-
-/// Every slot on the machine with the stamp its container carries. `None`: half
-/// a slot, container or worktree absent. The two list apart: either outlives the other.
-pub fn survey(project: &Project) -> Result<BTreeMap<usize, Option<Stamp>>> {
-    let mut held: BTreeMap<usize, Option<Stamp>> = paths::slot_dirs(project)?
-        .into_iter()
-        .map(|index| (index, None))
-        .collect();
-    for (index, stamp) in podman::slots(project)? {
-        let whole = paths::slot(project, index)?.join(WORKTREE_LINK).exists();
-        held.insert(index, whole.then_some(stamp));
-    }
-    Ok(held)
-}
-
-/// Drop container and worktree of one slot. Either may be absent.
-pub fn remove(repo: &Git, project: &Project, index: usize) -> Result<()> {
-    podman::remove(project, index)?;
-    repo.worktree_remove(&paths::slot(project, index)?)
 }

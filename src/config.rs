@@ -3,9 +3,7 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 
 use crate::error::{Error, Result};
-use crate::git::{self, Git};
-use crate::paths::Project;
-use crate::podman;
+use crate::git::Git;
 use crate::step::{self, Defaults, Steps};
 use crate::yaml;
 
@@ -26,7 +24,8 @@ pub struct Config {
     pub commit: String,
     /// Policy per step kind, under every step field.
     pub defaults: Defaults,
-    /// Steps that resolve a conflicted parent merge. Absent: conflict drops branch.
+    /// Steps that resolve a conflicted merge of a row into `to`. Absent: conflict
+    /// fails the row.
     pub merge: Option<Steps>,
 }
 
@@ -53,10 +52,6 @@ struct Written {
 }
 
 impl Config {
-    pub fn from_trunk(git: &Git) -> Result<Self> {
-        Self::at(git, git::TRUNK)
-    }
-
     /// Settings at `rev`, full ref or commit.
     pub fn at(git: &Git, rev: &str) -> Result<Self> {
         let text = git
@@ -69,19 +64,6 @@ impl Config {
         let written: Written = yaml::parse(FILE, text)?;
         written.check()?;
         written.settle()
-    }
-
-    /// Image slots run, in podman's reported form. `image` naming a trunk file:
-    /// `init` builds it. Anything else: podman resolves it.
-    pub fn image_name(&self, repo: &Git, project: &Project) -> Result<String> {
-        Ok(match repo.has_path(git::TRUNK, &self.image)? {
-            true => podman::tag(project),
-            false => podman::image_ref(&self.image),
-        })
-    }
-
-    pub fn builds_image(&self, repo: &Git) -> Result<bool> {
-        repo.has_path(git::TRUNK, &self.image)
     }
 
     pub fn knows_agent(&self, key: &str) -> bool {
@@ -177,7 +159,7 @@ defaults:
   prompt: { tries: 3, timeout: 3600 }
   run: { tries: 1, timeout: 7200 }
 merge:
-  - "Resolve every conflict of the merge of {parent} into {id}."
+  - "Resolve every conflict of the merge of row {id} into {parent}."
   - run: make lint
   - commit:
 "#;

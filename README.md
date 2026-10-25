@@ -148,7 +148,7 @@ merge:
   - commit:
 ```
 
-- `image` naming a path at the `to` tip builds for every row, cached by podman. Any other value names an image podman resolves.
+- `image` naming a path at the `to` tip builds for every row, cached by podman. Builds of one project run one at a time, so slots on one Containerfile share one image ID. Any other value names an image podman resolves.
 - `exec` runs in the container with the prompt appended as the last argument. It must print JSON holding `session_id` and `result`, or plain text taken as `result`. With `resume` set, a reply with no `session_id` fails the try.
 - `exec` must return only when the turn's work ends. The container restarts after every try, which kills anything left running. `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` stops Claude Code from sending a long command to the background and ending the turn with "the command is running in the background". Without it, the next step runs over half-done work. Measured on claude 2.1.280: switch off, turn ends at 13 s, output file never written; switch on, turn holds 209 s, file written. The switch leaves `nohup cmd &` from Bash open; the restart after the try kills it.
 - `--disallowedTools Agent Skill SendMessage ListAgents RemoteTrigger PushNotification` keeps the session flat: no subagent, no skill, no message to another session. A subagent burns the turn budget and writes files the transcript never sees.
@@ -252,7 +252,7 @@ rows:
 | `timeout` | seconds before a try is killed | none |
 | `continue_on_error` | `run` alone: move on after spent tries | false |
 
-A track that fails a check skips; the others run. `status` prints the rest, then exits 1 and names the track, the row and the field: a duplicate id, an unknown id in `after`, a dependency loop, an unknown agent, an id git refuses as a ref, `to` equal to `from`, two tracks on one `to`, and while `to` is absent: an absent `from`, or a remote that refuses to make `to`. A bad step names the row, the step number and the field. `serve` reports the same text once as `skip`, starts no row of that track, and lets rows in flight finish until a fixed track file arrives.
+A track that fails a check skips; the others run. `status` prints the rest, then exits 1 and names the track, the row and the field: a duplicate id, an unknown id in `after`, a dependency loop, an unknown agent, an id git refuses as a ref, `to` equal to `from`, two tracks on one `to`, and while `to` is absent: an absent `from`, an `at` not on `from`, or a remote that refuses to make `to`. A row whose `id` fails its check is named by its place, for example `row 2`. A track branch whose name fails its check is named by its fault alone. A bad step names the row, the step number and the field. `serve` reports the same text once as `skip`, starts no row of that track, and lets rows in flight finish until a fixed track file arrives.
 
 ## Commands
 
@@ -289,6 +289,13 @@ systemctl --user enable --now scswarm@PROJECT
 
 **Upgrade.** Run `cargo install --path .`, then `systemctl --user restart scswarm@PROJECT`. Rows in flight finish on the old binary. New rows start on the new one.
 
+`serve` makes the remote's `refs/swarm/*` match the bare repo's, so its first cycle deletes every remote land or fail ref the bare repo lacks. Before the first `serve` against a remote other hosts or clones wrote to, compare the two:
+
+```
+git ls-remote origin 'refs/swarm/*'
+git -C ~/swarm/PROJECT.git for-each-ref refs/swarm/
+```
+
 **Stop.** `systemctl --user stop scswarm@PROJECT` ends `serve` alone: rows in flight finish, no new row starts. To end every worker too, run `systemctl --user kill --kill-whom=all scswarm@PROJECT`. Their rows replay from the `to` tip on the next start.
 
 **Change workers, mounts, devices or env.** If `workers` grows past `ARG WORKERS` of the Containerfile, raise that value and push it on each `to` first. Then edit the host file. `serve` applies it on the next cycle, slot by slot as each goes idle.
@@ -307,6 +314,8 @@ systemctl --user enable --now scswarm@PROJECT
 - `reset` after a push leaves the old commits on `to`. The tool never rewrites `to`. Revert the row's merge commit with `git revert -m 1`.
 - Land and fail refs reach the remote on the next `serve` cycle. While `serve` is down, a clone reads a row a live worker pushed as `queued`.
 - A failed row retries on every push to its `to`, each pushed sibling row included.
+- A push of `to` refused as behind merges the row again onto the new tip. A conflict runs the `merge` steps again.
+- Builds of one project wait on each other, so a slot can wait on another slot's build.
 - One configured agent means one model both writes and audits the work.
 - A step with no `timeout` runs without limit. No token budget: agent flags in `exec` carry any cap.
 - The container restarts after every try and before every row. A server a step needs starts and stops inside one `run`.

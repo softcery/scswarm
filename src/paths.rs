@@ -10,6 +10,7 @@ use crate::state::Key;
 const SWARM_DIR: &str = "swarm";
 const SLOT_DIR: &str = "slot";
 const BUILD_DIR: &str = "build";
+const BUILD_TREE: &str = "tree";
 const LOG_DIR: &str = "log";
 const LOG_EXT: &str = "jsonl";
 const REPO_SUFFIX: &str = ".git";
@@ -60,12 +61,15 @@ pub fn repo(project: &Project) -> Result<PathBuf> {
     Ok(swarm()?.join(format!("{project}{REPO_SUFFIX}")))
 }
 
-/// Throwaway worktree the image of one slot builds from.
-pub fn build(project: &Project, index: usize) -> Result<PathBuf> {
-    Ok(swarm()?
-        .join(BUILD_DIR)
-        .join(project.to_string())
-        .join(index.to_string()))
+/// Build lock of one project: builds run one at a time, so a second build of one
+/// Containerfile reuses the first's cache and image ID.
+pub fn builds(project: &Project) -> Result<PathBuf> {
+    Ok(swarm()?.join(BUILD_DIR).join(project.to_string()))
+}
+
+/// Throwaway worktree the image builds from, under the build lock.
+pub fn build(project: &Project) -> Result<PathBuf> {
+    Ok(builds(project)?.join(BUILD_TREE))
 }
 
 pub fn slot(project: &Project, index: usize) -> Result<PathBuf> {

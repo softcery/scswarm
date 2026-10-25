@@ -193,7 +193,7 @@ merge:
 - A pushed row clears its own fail refs. `reset <track>/<id>` clears branch, land ref and fail refs of the row and of every dependant in its track, here, then on the remote.
 - A try fails on non-zero exit, a signal, `timeout`, a blank agent commit reply, or no `session_id` from an agent with `resume`. A step whose tries are spent fails the row and marks it, except a `run` step with `continue_on_error`.
 - A git or podman failure in a slot is no row failure. It writes no mark: the worker exits 2, `serve` exits 2, and the row replays on the next start. Workers on other slots run on. A failed image build or pull is a row failure: the worker reaches podman before it builds, so a podman that answers nothing stays a machine fault.
-- Locks: flock on 4 standing directories, no file written. The kernel drops a lock when its holder dies, so a crash leaves nothing to clean.
+- Locks: flock on 5 standing directories, no file written. The kernel drops a lock when its holder dies, so a crash leaves nothing to clean.
 
 | Lock | Directory | Holder | `serve` while held |
 |---|---|---|---|
@@ -201,6 +201,7 @@ merge:
 | row | `~/swarm/log/<project>/<track>/<id>/` | `serve` takes it before spawn, worker inherits it as stdin and holds it to exit | no assign; the row reads `running`. Held from spawn, so no restart of `serve` reads the row free while its worker lives |
 | project | `~/swarm/<project>.git` | `serve`, whole life | a second `serve` exits 2 |
 | remote | `~/swarm/<project>.git/refs` | each fetch and push, for its length | fetch waits |
+| build | `~/swarm/build/<project>` | worker, for its image build | none: workers alone take it. Builds run one at a time, so a second build of one Containerfile hits the cache and gets the same image ID |
 
 ## CLI
 
@@ -252,7 +253,7 @@ Image: `image` names a Containerfile at the base, built with no tag and run by I
 - `status` prints one line per row. A task written as three rows reads as three lines; the tool learns no id pattern, so it groups nothing.
 - A slot due to drop waits for its row to end. A long row holds the old slot past the change.
 - Rows of tracks with different images run on different images at once. A slot that switches image remakes its container.
-- The worker builds the image for every row. A Containerfile with `COPY . .` rebuilds for every row. Built images carry no tag and stay until `podman image prune`.
+- The worker builds the image for every row. A Containerfile with `COPY . .` rebuilds for every row. Builds of one project wait on each other, so a slot can wait on another slot's build. Built images carry no tag and stay until `podman image prune`.
 - The image build context is the base. A build that reads an untracked or ignored file fails after that file leaves the base.
 - Containers carry the `mounts` and device nodes they baked as labels. A release that changes that text remakes every container at its next row.
 - A pulled image name is not pulled again. A new push under the same tag needs `podman pull`.

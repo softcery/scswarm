@@ -219,7 +219,7 @@ impl Attempt<'_> {
     }
 
     /// Containerfile at the base builds from a throwaway worktree of it, free of
-    /// untracked files. Anything else names an image.
+    /// untracked files, under the build lock. Anything else names an image.
     fn image(&self) -> Result<Made> {
         let (repo, job, image) = (self.repo, self.job, &self.config.image);
         if !repo.has_path(&job.base, image)? {
@@ -229,7 +229,11 @@ impl Attempt<'_> {
                 None => podman::pull(&name),
             };
         }
-        let tree = paths::build(self.project, job.slot)?;
+        let locked = paths::builds(self.project)?;
+        fs::create_dir_all(&locked)
+            .map_err(|why| Error::Failed(format!("directory {}: {why}", locked.display())))?;
+        let _build = lock::hold(&locked)?;
+        let tree = paths::build(self.project)?;
         repo.worktree_remove(&tree)?;
         repo.worktree_add(&tree, &job.base)?;
         let built = podman::build(&tree.join(image), &tree);

@@ -45,14 +45,17 @@ projects:
 | Thing | Today | New |
 |---|---|---|
 | host file | `scswarm/<project>.yaml` | `scswarm/host.yaml` |
-| slot | `~/swarm/slot/<project>/<n>` | `~/swarm/slot/<n>` |
+| slot lock | slot worktree dir | `~/swarm/slot/<n>` |
+| slot worktree | `~/swarm/slot/<project>/<n>` | `~/swarm/slot/<n>/tree` |
+| `serve` lock | bare repo | `~/swarm` |
 | container | `scswarm-<project>-<n>` | `scswarm-<n>` |
 | bare repo, build lock, logs | per project | unchanged |
 
 ### Slot
 
 - `Stamp` gains the bare repo path. A slot whose stamp names another repo gets a new container through the remake that exists today (`src/slot.rs` line 78).
-- `Slot::prepare` checks the worktree `.git` link names the row's bare repo. Other repo: delete the slot dir, prune the old repo's worktree list, add a worktree from the new repo. Ignored files of one project never reach another.
+- `Slot::prepare` checks the worktree `.git` link names the row's bare repo. Other repo: delete `tree`, prune the old repo's worktree list, add `tree` from the new repo. Ignored files of one project never reach another.
+- The slot lock sits on `~/swarm/slot/<n>`, the parent of `tree`. Today the lock is an flock on the worktree dir itself (`src/work.rs` line 67, `src/lock.rs` lines 15-18). A deleted and remade dir has a new inode, so `Pool::busy` reads the slot free while its worker runs (`src/pool.rs` line 145).
 - `Slot::open` drops the project argument. The owning repo comes from the `.git` link.
 
 ### Key
@@ -61,7 +64,7 @@ projects:
 
 ### Serve
 
-- One lock for the machine, held by `serve`. Remote, build and row locks stay per project.
+- `serve` holds the lock on `~/swarm`, so one `serve` runs per user. Remote, build and row locks stay per project.
 - Each cycle, one thread per project through `std::thread::scope`:
   1. If the project's `fetch` seconds passed since its last fetch, write `origin` and fetch.
   2. If kept refs changed since the last mirror, mirror them. Today's rule (`src/serve.rs` lines 115-124).
@@ -90,12 +93,12 @@ scswarm work PROJECT --slot N ...
 
 ### Isolation
 
-Rule: nothing writable is shared across projects. That covers slot dirs, `mounts`, credentials by name and logs. The host file check enforces `mounts`. The slot switch enforces slot dirs.
+Rule: nothing writable is shared across projects. That covers slot worktrees, `mounts` and logs. The host file check enforces `mounts`. The slot switch enforces worktrees. Credentials sit outside the rule: agents read them, never write them, so a shared one, for example `RELAY_URL`, opens no channel between projects.
 
 Levels, strongest last. The tool changes for none of them:
 
 1. One user, rootless podman. The container is the wall (`docs/refs/architecture.md` line 38).
-2. Same, plus a VM-backed runtime in `~/.config/containers/containers.conf`, `[engine] runtime = "krun"` or `"runsc"`. Every container of the user runs under it.
+2. Same, plus a VM-backed runtime in `~/.config/containers/containers.conf`, `[engine] runtime = "krun"` or `"runsc"`. Every container of the user runs under it. Linux only: on macOS every container runs in one podman machine VM and shares its kernel.
 3. One unix user per client group, one swarm each.
 4. One VM per client group.
 
@@ -112,12 +115,13 @@ Build caches ride on per-project `mounts`, for example pnpm store, sccache dir, 
 
 1. Spike: `make e2e` under rootless podman with `krun`, then `runsc`, in `containers.conf`. Record the result in this RFC.
 2. `host`: machine and project fields, `set` map, `mounts` overlap check.
-3. `paths`, `podman`, `slot`: project-free slot and container names, repo in `Stamp`, worktree rehome.
+3. `paths`, `podman`, `slot`, `work`: project-free slot and container names, slot lock on the parent of `tree`, repo in `Stamp`, worktree rehome.
 4. `state::Key` gains `project`. `pool::schedule` ranks by project first.
 5. `serve`: machine lock, open on first sight, parallel due fetch, faults per project. Delete `init`.
 6. CLI and `main`.
 7. `tests/e2e.rs`: two projects, one slot.
-8. Docs: contract, architecture, README. Credentials per repo, isolation levels, caches, offboarding paths.
+8. Measure cycle time with 30 projects of one track each, no rows running. Record it in the contract.
+9. Docs: contract, architecture, README. Credentials per repo, isolation levels, caches, offboarding paths.
 
 ## Notes
 
@@ -130,6 +134,7 @@ Build caches ride on per-project `mounts`, for example pnpm store, sccache dir, 
 - A pnpm store on a bind mount cannot hardlink into the worktree (`EXDEV`). pnpm falls back to copy.
 - sccache turns off incremental builds. The crate under work compiles in full each row.
 - Unverified: GitHub limits on ssh fetches from one host. 30 projects at `fetch: 60` make 30 fetches a minute. Per-project `fetch` is the lever.
+- Unmeasured: git calls per cycle. Each cycle reads every track of every project from local refs, one set of git subprocesses per track. Step 8 measures it.
 - Unverified: sccache local disk cache shared by several sccache servers at once.
 - Unverified: step 1, rootless podman with `krun` or `runsc` under `--userns=keep-id`, same-path binds, `restart --time=0`, `--device`.
 - Out of scope: slot affinity (issue #5), pause on usage limit (issue #6), runtime per project, transcript access without a shell on the swarm host.

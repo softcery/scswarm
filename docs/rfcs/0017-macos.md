@@ -14,39 +14,43 @@
   - A bind with `ro,z` refuses writes: `Read-only file system`.
   - `--env=NAME` carries the client value into `run` and `exec`.
   - `make e2e` passes with no code change: 1 passed, 120.69 s.
-  - `which podman`: `/opt/homebrew/bin/podman`. launchd starts agents with `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, which misses it.
+  - `which podman`: `/opt/homebrew/bin/podman`. A probe launchd agent printed `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, which misses it.
 
-**Done when.** On macOS under the shipped launchd agent, a row whose host `env` names `ANTHROPIC_API_KEY` runs its agent step with the value from `~/.config/scswarm/credentials/ANTHROPIC_API_KEY`, and `make e2e` passes on Linux and macOS.
+**Done when.** `make e2e` passes on Linux and on macOS, with a row that reads its value from a credential file.
 
 ## Design
 
 ### Credentials
 
 - Directory `~/.config/scswarm/credentials/`, under `XDG_CONFIG_HOME` when set. One file per credential: file name = variable name, contents = value.
-- The directory must grant no group or other bits, mode `0700`. The rule of `~/.ssh`.
+- The directory must belong to the current uid and grant no group or other bits, mode `0700`. The rule of `~/.ssh`.
 - One trailing `\n` strips, so `echo key > file` works. Other bytes pass as is.
 - Sole source. The `serve` and worker environments carry no credential.
-- The worker reads the names of its job at row start. A refresh applies from the next row, with no restart.
-- Missing directory, wrong mode, missing file: machine fault, exit 2, no fail mark. The error names the directory or file and the expected mode, never the value.
+- `host` checks at each load: directory owner and mode, one file per name in any `env` rule. A failure at start exits 1. A failure later reports `stale` and keeps the last good copy, the path of an unparsable host file. A missing credential then blocks no other track. `host` reads no value.
+- The worker reads the values of its job's names at row start. A refresh applies from the next row, with no restart.
+- A file gone between the `host` check and row start: machine fault, exit 2, no fail mark.
+- Errors name the directory or file and the expected owner or mode, never the value.
 
 File by file:
 
 | File | Change |
 |---|---|
 | `src/paths.rs` | `credentials()`: the directory path |
-| `src/credential.rs` | new. `load(names) -> Result<Vec<(String, OsString)>>`: mode check, read, strip. Sole reader of the directory |
+| `src/credential.rs` | new. `check(names) -> Result<()>`: owner, mode, presence. `load(names) -> Result<Vec<(String, OsString)>>`: check, read, strip. Sole reader of the directory |
+| `src/host.rs` | load calls `credential::check` on the names of every `env` rule |
 | `src/work.rs` | `attempt` loads the job's names before `Session::open`, passes the pairs down |
 | `src/call.rs` | `env: &[String]` becomes the loaded pairs |
 | `src/podman.rs` | `exec` sets `Command::env(name, value)`, keeps `--env=NAME`. `present` goes: `credential::load` checks presence |
 | `systemd/scswarm@.service` | `EnvironmentFile=` goes |
 | `docs/spec/contract.md` | host `env` names credentials; credentials section; limit 272 goes |
 | `README.md` | step 5 writes credential files, not exports |
+| `tests/e2e.rs` | writes a credential file with a trailing `\n` under its temp config. `env` names it in place of `HOME`. One row runs `test "$NAME" = value` |
 
 Host field `env` keeps its name: it names variables inside the container.
 
 ### launchd agent
 
-`launchd/com.softcery.scswarm.plist`, a template. launchd has no instances and expands no `~`, so the user fills `PROJECT` and `HOME` and installs one copy per project as `~/Library/LaunchAgents/com.softcery.scswarm.PROJECT.plist`.
+`launchd/com.softcery.scswarm.plist`, a template. launchd has no instances and expands no `~`, so each project gets one copy as `~/Library/LaunchAgents/com.softcery.scswarm.PROJECT.plist`. README fills each placeholder with one `plutil -replace` command, so a typo fails `plutil -lint`, not launchd.
 
 | Key | Value | systemd peer |
 |---|---|---|
@@ -67,7 +71,7 @@ README section "Run under launchd": install, `launchctl bootstrap gui/$(id -u) <
 
 ## Steps
 
-1. Credentials: `paths`, `credential`, `work`, `call`, `podman`, systemd unit, contract, README.
+1. Credentials: `paths`, `credential`, `host`, `work`, `call`, `podman`, e2e, systemd unit, contract, README.
 2. launchd template and README section.
 3. Doc limits and e2e wording.
 4. `make lint`, `cargo test`, `make e2e` on Linux and on macOS.
@@ -81,9 +85,10 @@ README section "Run under launchd": install, `launchctl bootstrap gui/$(id -u) <
 - A Mac asleep pauses the VM. Steps in flight can hit `timeout` and spend tries.
 - The podman machine does not start at login. Until it runs, `serve` exits 2 and launchd restarts it every 10 s, the default `ThrottleInterval`.
 - `mounts` host sides must sit under a VM share: `/Users`, `/private`, `/var/folders`.
-- Hard stop under launchd: `pkill -f 'scswarm work PROJECT'`. launchd has no command that kills an abandoned process group.
-- The log file never rotates. launchd holds it open.
+- Hard stop under launchd: `pkill -f 'scswarm work PROJECT '`. The trailing space keeps project `a` off workers of `ab`. launchd has no command that kills an abandoned process group.
+- systemd `LoadCredential=` gives the same layout under `$CREDENTIALS_DIRECTORY`. The tool keeps its own directory: one path on Linux and macOS, and `host` can check it from any shell.
 - Unverified:
+  - Log rotation of `StandardOutPath` by `newsyslog`.
   - `AbandonProcessGroup=true` keeps workers alive through `kickstart -k` and `bootout`.
   - `KeepAlive=true` restarts `serve` after exit 2.
   - `serve` recovers once the VM comes up after login.

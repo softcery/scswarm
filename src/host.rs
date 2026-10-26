@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::credential;
 use crate::device;
 use crate::error::{Error, Result};
 use crate::git;
@@ -82,14 +81,7 @@ impl Host {
         let label = paths::arg(&file)?;
         let text =
             fs::read_to_string(&file).map_err(|why| Error::Invalid(format!("{label}: {why}")))?;
-        let host = Self::parse(&label, &text)?;
-        let names: Vec<String> = host
-            .env
-            .iter()
-            .flat_map(|rule| rule.names.iter().cloned())
-            .collect();
-        credential::check(&names)?;
-        Ok(host)
+        Self::parse(&label, &text)
     }
 
     pub fn parse(file: &str, text: &str) -> Result<Self> {
@@ -104,6 +96,14 @@ impl Host {
             .iter()
             .find(|rule| matches(&rule.pattern, track))
             .map_or(&[], |rule| &rule.names)
+    }
+
+    /// Credential names of every rule.
+    pub fn names(&self) -> Vec<String> {
+        self.env
+            .iter()
+            .flat_map(|rule| rule.names.iter().cloned())
+            .collect()
     }
 }
 

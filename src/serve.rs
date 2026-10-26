@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::thread;
 
 use crate::board::{self, Track};
+use crate::credential;
 use crate::error::{Error, Result};
 use crate::event::{self, Latch};
 use crate::git::{self, Git, Push};
@@ -47,7 +48,7 @@ impl<'a> Server<'a> {
             repo,
             project,
             pool: Pool::open(repo, project)?,
-            host: Host::load(project)?,
+            host: host(project)?,
             origin: None,
             tips: BTreeMap::new(),
             mirrored: None,
@@ -189,7 +190,7 @@ impl<'a> Server<'a> {
     /// Reread host file each cycle. Unreadable: keep last good copy, editor mid-save
     /// must not stop the loop.
     fn reload(&mut self) {
-        match Host::load(self.project) {
+        match host(self.project) {
             Ok(host) => {
                 self.host = host;
                 self.stale.report(&[], event::stale);
@@ -197,6 +198,13 @@ impl<'a> Server<'a> {
             Err(why) => self.stale.report(&[why], event::stale),
         }
     }
+}
+
+/// Host file, credential files checked. Only `serve` needs them.
+fn host(project: &Project) -> Result<Host> {
+    let host = Host::load(project)?;
+    credential::check(&host.names())?;
+    Ok(host)
 }
 
 /// Queued rows of one track: new rows, rows cut short, rows whose land commit

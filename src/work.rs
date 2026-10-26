@@ -139,10 +139,11 @@ impl Attempt<'_> {
         }
     }
 
-    /// Image, container, the row session unless a land ref stands, then the merge
+    /// Credentials, image, container, the row session unless a land ref stands, then the merge
     /// into `to`. Podman answers before the build, so a failed build is the row's.
     fn attempt(&mut self) -> Result<Outcome<()>> {
         let (slot, job, key) = (self.slot, self.job, self.key);
+        let credentials = credential::load(&job.env)?;
         let standing = slot.stamp()?;
         let image = match self.image()? {
             Ok(image) => image,
@@ -157,7 +158,6 @@ impl Attempt<'_> {
             &job.mounts,
             &job.devices,
         )?;
-        let credentials = credential::load(&job.env)?;
         let mut session = Session::open(slot, &credentials, self.config, self.row, key)?;
         let land = match self.repo.commit_of(&key.land_ref())? {
             Some(land) => land,

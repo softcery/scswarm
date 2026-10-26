@@ -130,7 +130,7 @@ Every field reloads each cycle. `serve` drops slots at or above `workers`. The w
 
 ### Credentials: `~/.config/scswarm/credentials/<NAME>`
 
-One file per name in `env`, contents = value. The directory must be mode `0700`. One trailing newline strips, so `echo` works. The worker reads each file at row start, so a new value reaches the next row with no restart. A name with no file reports `stale` and keeps the last good host file. Only these files carry credentials: the `serve` environment carries none.
+One file per name in `env`, contents = value. The directory must be mode `0700`. One trailing newline strips, so `echo` works. The worker reads each file at row start, so a new value reaches the next row with no restart. A track whose names lack a file skips with `skip`; the other tracks run. Only these files carry credentials: the `serve` environment carries none.
 
 The machine pushes `to` and `refs/swarm/*`. Give it a deploy key or token with write access, outside every container.
 

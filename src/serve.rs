@@ -48,7 +48,7 @@ impl<'a> Server<'a> {
             repo,
             project,
             pool: Pool::open(repo, project)?,
-            host: host(project)?,
+            host: Host::load(project)?,
             origin: None,
             tips: BTreeMap::new(),
             mirrored: None,
@@ -132,6 +132,10 @@ impl<'a> Server<'a> {
         let mut snapshots = Vec::new();
         let held = |key: &state::Key| self.pool.holds(key);
         for track in scan.tracks {
+            if let Err(why) = credential::check(self.host.env(&track.name)) {
+                faults.push(track.invalid(&why.to_string()));
+                continue;
+            }
             match self.open_to(&track) {
                 Ok(true) => {}
                 Ok(false) => continue,
@@ -190,7 +194,7 @@ impl<'a> Server<'a> {
     /// Reread host file each cycle. Unreadable: keep last good copy, editor mid-save
     /// must not stop the loop.
     fn reload(&mut self) {
-        match host(self.project) {
+        match Host::load(self.project) {
             Ok(host) => {
                 self.host = host;
                 self.stale.report(&[], event::stale);
@@ -198,13 +202,6 @@ impl<'a> Server<'a> {
             Err(why) => self.stale.report(&[why], event::stale),
         }
     }
-}
-
-/// Host file, credential files checked. Only `serve` needs them.
-fn host(project: &Project) -> Result<Host> {
-    let host = Host::load(project)?;
-    credential::check(&host.names())?;
-    Ok(host)
 }
 
 /// Queued rows of one track: new rows, rows cut short, rows whose land commit

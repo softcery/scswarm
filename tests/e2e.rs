@@ -43,6 +43,7 @@ fn slot_set_follows_host_file_live() {
     holds(&swarm);
     keeps_containers_on_env(&swarm);
     reports_stale_once(&swarm);
+    skips_track_without_credential(&swarm);
     survives_bad_track(&swarm);
     rolls_image(&swarm);
     let restarted = outlives_serve(&mut swarm);
@@ -131,22 +132,39 @@ fn keeps_containers_on_env(swarm: &Swarm) {
     );
 }
 
-/// Broken host file, then a credential with no file, across cycles: one `stale`
-/// line each, last good copy runs on.
+/// Broken host file across cycles: one `stale` line, last good copy runs on.
 fn reports_stale_once(swarm: &Swarm) {
     let from = swarm.mark();
-    let stale = || {
-        swarm.lines()[from..]
-            .iter()
-            .filter(|line| line.starts_with("stale "))
-            .count()
-    };
     fs::write(host_file(), "workers: [").expect("host file must be writable");
     thread::sleep(CYCLES);
-    assert_eq!(stale(), 1, "a repeated host file fault must report once");
-    swarm.host(3, &["E2E_MISSING"]);
+    let stale = swarm.lines()[from..]
+        .iter()
+        .filter(|line| line.starts_with("stale "))
+        .count();
+    assert_eq!(stale, 1, "a repeated host file fault must report once");
+    swarm.host(3, &[EXTRA.0]);
     thread::sleep(CYCLES);
-    assert_eq!(stale(), 2, "a missing credential must report once");
+    swarm.quiet(from);
+}
+
+/// Credential with no file: each track it names skips once, the host file stays good.
+fn skips_track_without_credential(swarm: &Swarm) {
+    let from = swarm.mark();
+    swarm.host(3, &["E2E_MISSING"]);
+    swarm.wait("skip cause=track `a`", from);
+    thread::sleep(CYCLES);
+    let lines = &swarm.lines()[from..];
+    let count = |prefix: &str| lines.iter().filter(|line| line.starts_with(prefix)).count();
+    assert_eq!(
+        count("skip cause=track `a`"),
+        1,
+        "a missing credential must report once"
+    );
+    assert_eq!(
+        count("stale "),
+        0,
+        "a missing credential must leave the host file good"
+    );
     swarm.host(3, &[EXTRA.0]);
     thread::sleep(CYCLES);
     swarm.quiet(from);

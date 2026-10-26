@@ -121,7 +121,7 @@ poll: 5
 - Every field reloads on the next cycle.
 - `serve` converges slots each cycle, at start too: drops each idle slot at or above `workers`, and frees the branch of each idle slot below it once per `serve` life. A busy slot drops after its row ends. The worker makes the worktree of its slot and the container. It remakes the container when it differs from the row in `mounts`, device nodes or image ID. A GPU node renumbered at boot remakes it at the next row. `init` writes no slot.
 - `env` names and credential values apply from the next row on. No container bakes them.
-- Absent or unparsable at start: exit 1. Unparsable later: `serve` reports `stale` once per cause, keeps the last good copy, keeps running. In `serve`, a credential check that fails counts as unparsable.
+- Absent or unparsable at start: exit 1. Unparsable later: `serve` reports `stale` once per cause, keeps the last good copy, keeps running.
 
 ## Credentials
 
@@ -130,7 +130,7 @@ Directory `${XDG_CONFIG_HOME:-~/.config}/scswarm/credentials/`, shared by every 
 - The directory must grant group and others nothing: mode `0700`.
 - One trailing `\n` strips. Other bytes pass as is.
 - Sole source: the `serve` environment carries no credential.
-- `serve`, at each host file load, checks the directory mode and one regular file per name in any `env` rule. It reads no value. A host file with no `env` names needs no directory. `init`, `status` and `reset` skip the check.
+- `serve`, each cycle, checks the directory mode and one regular file per name the track's `env` rule lists. It reads no value. A track that fails skips with `skip`, as a track check; the others run. A track with no names needs no directory.
 - The worker reads the values of its row's names at row start. A file gone since the check: exit 2, no fail mark.
 - Errors name the directory or the credential, never the value.
 

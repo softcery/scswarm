@@ -97,14 +97,6 @@ impl Host {
             .find(|rule| matches(&rule.pattern, track))
             .map_or(&[], |rule| &rule.names)
     }
-
-    /// Credential names of every rule.
-    pub fn names(&self) -> Vec<String> {
-        self.env
-            .iter()
-            .flat_map(|rule| rule.names.iter().cloned())
-            .collect()
-    }
 }
 
 impl Stamp {

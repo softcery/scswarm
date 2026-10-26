@@ -10,13 +10,13 @@ use crate::credential::{self, Binding};
 use crate::error::{Error, Result};
 use crate::event;
 use crate::git::{self, Git, Push};
-use crate::host::{Mount, Stamp};
+use crate::host::Mount;
 use crate::lock;
 use crate::paths::{self, Project};
-use crate::podman::{self, Made};
+use crate::podman::{self, Made, Stamp};
 use crate::script::Session;
 use crate::slot::Slot;
-use crate::state::Key;
+use crate::state::{Address, Key};
 use crate::step::Outcome;
 use crate::transcript::Transcript;
 
@@ -34,6 +34,7 @@ const DEVICE: &str = "device";
 /// `serve` spawns new binary across `cargo install`, so a change needs a release note.
 #[derive(Args, Debug, PartialEq, Eq)]
 pub struct Job {
+    pub project: Project,
     #[arg(long = SLOT)]
     pub slot: usize,
     #[arg(long = TRACK, value_name = "NAME")]
@@ -59,9 +60,9 @@ pub struct Job {
 
 /// Row lock from stdin, slot lock once its last holder ends. `Ok`: row pushed or
 /// fail refs written. `Err`: machine fault, no mark.
-pub fn work(repo: &Git, project: &Project, job: &Job) -> Result<()> {
-    let key = job.key();
-    let _row = lock::adopt(io::stdin().as_fd(), &paths::transcripts(project, &key)?)?;
+pub fn work(repo: &Git, job: &Job) -> Result<()> {
+    let address = job.address();
+    let _row = lock::adopt(io::stdin().as_fd(), &paths::transcripts(&address)?)?;
     let dir = paths::slot(job.slot)?;
     fs::create_dir_all(&dir)
         .map_err(|why| Error::Failed(format!("directory {}: {why}", dir.display())))?;
@@ -78,24 +79,26 @@ pub fn work(repo: &Git, project: &Project, job: &Job) -> Result<()> {
     Attempt {
         slot: &Slot::open(job.slot)?,
         repo,
-        project,
         track: &track,
         config: &config,
         row,
         job,
-        key: &key,
+        address: &address,
         against: job.base.clone(),
     }
     .run()
 }
 
 impl Job {
-    pub fn key(&self) -> Key {
-        Key::new(&self.track, &self.id)
+    pub fn address(&self) -> Address {
+        Address {
+            project: self.project.clone(),
+            key: Key::new(&self.track, &self.id),
+        }
     }
 
-    pub fn argv(&self, project: &Project) -> Vec<String> {
-        let mut argv = vec![COMMAND.to_string(), project.to_string()];
+    pub fn argv(&self) -> Vec<String> {
+        let mut argv = vec![COMMAND.to_string(), self.project.to_string()];
         let mut flag = |name: &str, value: String| argv.extend([format!("--{name}"), value]);
         flag(SLOT, self.slot.to_string());
         flag(TRACK, self.track.clone());
@@ -119,12 +122,11 @@ impl Job {
 struct Attempt<'a> {
     slot: &'a Slot,
     repo: &'a Git,
-    project: &'a Project,
     track: &'a Track,
     config: &'a Config,
     row: &'a Row,
     job: &'a Job,
-    key: &'a Key,
+    address: &'a Address,
     against: String,
 }
 
@@ -134,7 +136,8 @@ impl Attempt<'_> {
     fn run(mut self) -> Result<()> {
         let outcome = self.attempt();
         let released = self.slot.release();
-        let outcome = outcome.map_err(|why| Error::Failed(format!("row {}: {why}", self.key)))?;
+        let outcome =
+            outcome.map_err(|why| Error::Failed(format!("row {}: {why}", self.address.key)))?;
         released?;
         match outcome {
             Outcome::Done(()) => Ok(()),
@@ -145,7 +148,8 @@ impl Attempt<'_> {
     /// Credentials, image, container, the row session unless a land ref stands, then the merge
     /// into `to`. Podman answers before the build, so a failed build is the row's.
     fn attempt(&mut self) -> Result<Outcome<()>> {
-        let (slot, job, key) = (self.slot, self.job, self.key);
+        let (slot, job, address) = (self.slot, self.job, self.address);
+        let key = &address.key;
         let credentials = credential::load(&job.env)?;
         let standing = slot.stamp()?;
         let image = match self.image()? {
@@ -161,15 +165,14 @@ impl Attempt<'_> {
             &job.mounts,
             &job.devices,
         )?;
-        let label = key.label(self.project);
-        let mut session = Session::open(slot, &credentials, self.config, self.row, &label)?;
+        let mut session = Session::open(slot, &credentials, self.config, self.row, address)?;
         let land = match self.repo.commit_of(&key.land_ref())? {
             Some(land) => land,
             None => {
                 slot.checkout(&key.branch(), &job.base)?;
                 match session.play(&self.transcript(paths::RUN_LOG)?)? {
                     Outcome::Done(land) => {
-                        event::land(&label);
+                        event::land(address);
                         self.repo.ref_set(&key.land_ref(), &land)?;
                         land
                     }
@@ -183,7 +186,8 @@ impl Attempt<'_> {
     /// Merge the row into the `to` tip, push to `to` with no force, again onto the
     /// new tip after a fetch when behind. `serve` pushes the refs after.
     fn deliver(&mut self, session: &mut Session, land: &str) -> Result<Outcome<()>> {
-        let (slot, repo, key, to) = (self.slot, self.repo, self.key, &self.track.to);
+        let (slot, repo, address, to) = (self.slot, self.repo, self.address, &self.track.to);
+        let key = &address.key;
         let tracking = git::remote_branch(to);
         let branch = key.branch();
         let transcript = self.transcript(paths::MERGE_LOG)?;
@@ -212,14 +216,14 @@ impl Attempt<'_> {
         for name in &key.fail_refs() {
             repo.ref_delete(name)?;
         }
-        event::push(key.label(self.project), to, &head);
+        event::push(address, to, &head);
         Ok(Outcome::Done(()))
     }
 
     /// Track tip and `to` tip of this attempt.
     fn fail(&self, why: &str) -> Result<()> {
-        event::fail(self.key.label(self.project), why);
-        let [on_track, on_to] = self.key.fail_refs();
+        event::fail(self.address, why);
+        let [on_track, on_to] = self.address.key.fail_refs();
         self.repo.ref_set(&on_track, &self.job.track_tip)?;
         self.repo.ref_set(&on_to, &self.against)
     }
@@ -235,11 +239,11 @@ impl Attempt<'_> {
                 None => podman::pull(&name),
             };
         }
-        let locked = paths::builds(self.project)?;
+        let locked = paths::builds(&self.address.project)?;
         fs::create_dir_all(&locked)
             .map_err(|why| Error::Failed(format!("directory {}: {why}", locked.display())))?;
         let _build = lock::hold(&locked)?;
-        let tree = paths::build(self.project)?;
+        let tree = paths::build(&self.address.project)?;
         repo.worktree_remove(&tree)?;
         repo.worktree_add(&tree, &job.base)?;
         let built = podman::build(&tree.join(image), &tree);
@@ -248,11 +252,7 @@ impl Attempt<'_> {
     }
 
     fn transcript(&self, name: &str) -> Result<Transcript> {
-        Ok(Transcript::at(paths::transcript(
-            self.project,
-            self.key,
-            name,
-        )?))
+        Ok(Transcript::at(paths::transcript(self.address, name)?))
     }
 }
 

@@ -7,13 +7,13 @@ mod error;
 mod event;
 mod git;
 mod host;
-mod init;
 mod lock;
 mod log;
 mod paths;
 mod podman;
 mod pool;
 mod proc;
+mod repo;
 mod reset;
 mod script;
 mod serve;
@@ -31,7 +31,7 @@ use crate::error::Result;
 use crate::git::Git;
 use crate::host::Host;
 use crate::paths::Project;
-use crate::state::Key;
+use crate::state::{Address, Key};
 use crate::status::Source;
 use crate::work::Job;
 
@@ -50,24 +50,23 @@ enum Command {
     Serve,
     #[command(name = work::COMMAND, hide = true, about = "Run one row attempt; `serve` spawns it")]
     Work {
-        project: String,
         #[command(flatten)]
         job: Job,
     },
     #[command(about = "Print every row of every track with state derived from git")]
     Status {
         /// One project of the host file. Absent: every project.
-        project: Option<String>,
+        project: Option<Project>,
         /// Read the clone in the working directory instead: track branch prefix.
         #[arg(long, value_name = "PREFIX", conflicts_with = "project")]
         tracks: Option<String>,
     },
     #[command(about = "Print the agent transcripts of one row, `<track>/<id>`")]
-    Log { project: String, row: String },
+    Log { project: Project, row: String },
     #[command(
         about = "Delete the branch, land ref and fail refs of one row, `<track>/<id>`, and of every dependant"
     )]
-    Reset { project: String, row: String },
+    Reset { project: Project, row: String },
 }
 
 fn main() {
@@ -81,13 +80,9 @@ fn main() {
 /// Projects are keys of the host file. Working directory means nothing but to
 /// `status --tracks`.
 fn dispatch(command: Command) -> Result<()> {
-    let named = |name: &str| Project::try_from(name);
     match command {
         Command::Serve => serve::serve(),
-        Command::Work { project, job } => {
-            let project = named(&project)?;
-            work::work(&init::open(&project)?, &project, &job)
-        }
+        Command::Work { job } => work::work(&repo::open(&job.project)?, &job),
         Command::Status {
             tracks: Some(prefix),
             ..
@@ -99,7 +94,7 @@ fn dispatch(command: Command) -> Result<()> {
         Command::Status { project, .. } => {
             let host = Host::load()?;
             let projects = match project {
-                Some(project) => vec![named(&project)?],
+                Some(project) => vec![project],
                 None => host.projects.keys().cloned().collect(),
             };
             let sources = projects
@@ -107,19 +102,21 @@ fn dispatch(command: Command) -> Result<()> {
                 .map(|project| {
                     Ok(Source {
                         tracks: host.entry(&project)?.tracks.clone(),
-                        repo: init::open(&project)?,
+                        repo: repo::open(&project)?,
                         project: Some(project),
                     })
                 })
                 .collect::<Result<Vec<Source>>>()?;
             status::status(&sources)
         }
-        Command::Log { project, row } => log::log(&named(&project)?, &Key::try_from(row.as_str())?),
+        Command::Log { project, row } => log::log(&Address {
+            project,
+            key: Key::try_from(row.as_str())?,
+        }),
         Command::Reset { project, row } => {
-            let project = named(&project)?;
             let tracks = Host::load()?.entry(&project)?.tracks.clone();
             reset::reset(
-                &init::open(&project)?,
+                &repo::open(&project)?,
                 &tracks,
                 &Key::try_from(row.as_str())?,
             )
@@ -134,8 +131,8 @@ mod tests {
     /// Argv is the contract between an old `serve` and a new worker binary.
     #[test]
     fn job_argv_parses_back() {
-        let project = Project::try_from("alpha").expect("project name must pass");
         let job = Job {
+            project: "alpha".parse().expect("project name must pass"),
             slot: 2,
             track: "laser".to_string(),
             id: "rag-04-review".to_string(),
@@ -151,15 +148,9 @@ mod tests {
             }],
             devices: vec!["/dev/dri/card0".to_string()],
         };
-        let argv = std::iter::once("scswarm".to_string()).chain(job.argv(&project));
+        let argv = std::iter::once("scswarm".to_string()).chain(job.argv());
         match Cli::try_parse_from(argv).expect("argv must parse").command {
-            Command::Work {
-                project: name,
-                job: parsed,
-            } => {
-                assert_eq!(name, "alpha");
-                assert_eq!(parsed, job);
-            }
+            Command::Work { job: parsed } => assert_eq!(parsed, job),
             _ => panic!("argv must name `work`"),
         }
     }

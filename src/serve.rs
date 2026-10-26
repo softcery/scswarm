@@ -10,11 +10,11 @@ use crate::error::{Error, Result};
 use crate::event::{self, Latch};
 use crate::git::{self, Git, Push};
 use crate::host::{self, Entry, Host};
-use crate::init;
 use crate::lock;
 use crate::paths::{self, Project};
 use crate::pool::{self, Pool, Queue};
-use crate::state::{self, Snapshot, State};
+use crate::repo;
+use crate::state::{self, Address, Snapshot, State};
 use crate::work::Job;
 
 /// Refresh every project, spawn a worker per idle slot and queued row, sleep.
@@ -113,19 +113,17 @@ impl Server {
             let (project, snapshot) = flat[at];
             let entry = self.host.entry(project)?;
             let track = &snapshot.track;
-            self.pool.assign(
-                project,
-                Job {
-                    slot,
-                    track: track.name.clone(),
-                    id: snapshot.board.rows()[row].id.clone(),
-                    track_tip: track.tip.clone(),
-                    base: snapshot.base.clone(),
-                    env: entry.env(&track.name).to_vec(),
-                    mounts: entry.mounts.clone(),
-                    devices: self.host.devices.clone(),
-                },
-            )?;
+            self.pool.assign(Job {
+                project: project.clone(),
+                slot,
+                track: track.name.clone(),
+                id: snapshot.board.rows()[row].id.clone(),
+                track_tip: track.tip.clone(),
+                base: snapshot.base.clone(),
+                env: entry.env(&track.name).to_vec(),
+                mounts: entry.mounts.clone(),
+                devices: self.host.devices.clone(),
+            })?;
         }
         Ok(())
     }
@@ -183,7 +181,12 @@ impl Feed {
         {
             return Vec::new();
         }
-        let held = |key: &state::Key| pool.holds(project, key);
+        let held = |key: &state::Key| {
+            pool.holds(&Address {
+                project: project.clone(),
+                key: key.clone(),
+            })
+        };
         let read = self.sync(project, entry).and_then(|()| match &self.repo {
             Some(repo) => read(repo, project, entry, &held),
             None => Ok((Vec::new(), Vec::new())),
@@ -226,7 +229,7 @@ impl Feed {
         let repo = match self.repo.take() {
             Some(repo) => repo,
             None => {
-                let (repo, made) = init::open_or_make(project, &entry.remote)?;
+                let (repo, made) = repo::open_or_make(project, &entry.remote)?;
                 if made {
                     self.origin = Some(entry.remote.clone());
                     self.fetched = Some(Instant::now());

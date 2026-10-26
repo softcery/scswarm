@@ -3,8 +3,8 @@ use std::io;
 use std::path::Path;
 
 use crate::error::{Error, Result};
-use crate::paths::{self, Project, MERGE_LOG, RUN_LOG};
-use crate::state::Key;
+use crate::paths::{self, MERGE_LOG, RUN_LOG};
+use crate::state::Address;
 use crate::transcript::Entry;
 
 const PROMPT: &str = ">";
@@ -15,19 +15,20 @@ const STDERR: &str = "2>";
 const FAULT: &str = "!";
 
 /// Print the transcripts of one row: the row session first, then the merge into `to`.
-pub fn log(project: &Project, key: &Key) -> Result<()> {
+pub fn log(row: &Address) -> Result<()> {
     let mut printed = false;
     for name in [RUN_LOG, MERGE_LOG] {
-        let Some(transcript) = read(&paths::transcript(project, key, name)?)? else {
+        let Some(transcript) = read(&paths::transcript(row, name)?)? else {
             continue;
         };
         printed = true;
         print!("{}", render(name, &transcript));
     }
     if !printed {
-        let dir = paths::transcripts(project, key)?;
+        let dir = paths::transcripts(row)?;
         return Err(Error::Invalid(format!(
-            "row `{key}` must name a row that ran a session: {} holds no transcript",
+            "row `{}` must name a row that ran a session: {} holds no transcript",
+            row.key,
             dir.display()
         )));
     }

@@ -5,7 +5,7 @@ use crate::error::{Error, Result};
 use crate::git::{self, Git};
 use crate::lock;
 use crate::paths::{self, Project};
-use crate::state::{self, Key};
+use crate::state::{self, Address, Key};
 
 const HEADER: [&str; 5] = ["project", "row", "state", "branch", "worker"];
 const COLUMNS: usize = HEADER.len();
@@ -49,7 +49,10 @@ fn list(source: &Source, table: &mut Vec<Line>) -> Result<Vec<Error>> {
     let scan = board::scan(repo, &source.tracks)?;
     let mut faults = scan.faults;
     let held = |key: &Key| match project {
-        Some(project) => lock::held(&paths::transcripts(project, key)?),
+        Some(project) => lock::held(&paths::transcripts(&Address {
+            project: project.clone(),
+            key: key.clone(),
+        })?),
         None => Ok(false),
     };
     let slots = match project {

@@ -28,12 +28,19 @@ pub enum State {
     Merged,
 }
 
-/// Row of one track in one repo. Names branch, land ref, fail refs; with its
-/// project, transcripts and row lock.
+/// Row of one track in one repo. Names branch, land ref, fail refs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Key {
     pub track: String,
     pub id: String,
+}
+
+/// Row of one project. Names transcripts, row lock, and the row in event lines:
+/// rows of two projects can share track and id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Address {
+    pub project: Project,
+    pub key: Key,
 }
 
 /// One track at one fetch: rows settled at `base`, each with its state.
@@ -123,11 +130,6 @@ impl Key {
         }
     }
 
-    /// Row of `project` in event lines: rows of two projects can share track and id.
-    pub fn label(&self, project: &Project) -> String {
-        format!("{project}/{self}")
-    }
-
     pub fn branch(&self) -> String {
         format!("{BRANCHES}{self}")
     }
@@ -162,6 +164,12 @@ impl TryFrom<&str> for Key {
 impl fmt::Display for Key {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}/{}", self.track, self.id)
+    }
+}
+
+impl fmt::Display for Address {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.project, self.key)
     }
 }
 

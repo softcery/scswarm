@@ -54,18 +54,6 @@ pub struct EnvRule {
     pub set: Vec<Binding>,
 }
 
-/// What a slot container bakes, as text. A container carries it, the worker
-/// compares it back.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Stamp {
-    /// Image ID: a rebuild under the same name reads as a change.
-    pub image: String,
-    pub mounts: String,
-    pub devices: String,
-    /// Bare repo the container binds: a project switch reads as a change.
-    pub repo: String,
-}
-
 /// One bind: absolute host path, absolute container path. Both sides rw.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(try_from = "String", into = "String")]
@@ -173,18 +161,6 @@ impl Entry {
             .iter()
             .find(|rule| matches(&rule.pattern, track))
             .map_or(&[], |rule| &rule.set)
-    }
-}
-
-impl Stamp {
-    /// Text a container carries: image ID plus the mounts, devices and repo it bakes.
-    pub fn new(image: &str, mounts: &[Mount], devices: &[String], repo: &Path) -> Result<Self> {
-        Ok(Self {
-            image: image.to_string(),
-            mounts: text(&mounts)?,
-            devices: text(&devices)?,
-            repo: paths::arg(repo)?,
-        })
     }
 }
 
@@ -355,12 +331,6 @@ fn matches(pattern: &str, name: &str) -> bool {
     rest.len() >= last.len() && rest.ends_with(last)
 }
 
-/// Stamp text a container carries as a label. JSON: the YAML reader only reads.
-fn text<T: Serialize>(value: &T) -> Result<String> {
-    serde_json::to_string(value)
-        .map_err(|why| Error::Failed(format!("slot binds must serialise: {why}")))
-}
-
 fn shaped(got: &str) -> String {
     format!("field `mounts` entry must read `/host:/container`: got {got}")
 }
@@ -399,7 +369,7 @@ projects:
 ";
 
     fn alpha() -> Project {
-        Project::try_from("alpha").expect("name must parse")
+        "alpha".parse().expect("name must parse")
     }
 
     #[test]

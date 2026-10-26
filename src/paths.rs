@@ -3,11 +3,12 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use serde::Deserialize;
 
 use crate::error::{Error, Result};
-use crate::state::Key;
+use crate::state::Address;
 
 const SWARM_DIR: &str = "swarm";
 const SLOT_DIR: &str = "slot";
@@ -30,10 +31,10 @@ const CREDENTIALS_DIR: &str = "credentials";
 #[serde(try_from = "String")]
 pub struct Project(String);
 
-impl TryFrom<&str> for Project {
-    type Error = Error;
+impl FromStr for Project {
+    type Err = Error;
 
-    fn try_from(name: &str) -> Result<Self> {
+    fn from_str(name: &str) -> Result<Self> {
         let plain = |letter: char| {
             letter.is_ascii_lowercase() || letter.is_ascii_digit() || "._-".contains(letter)
         };
@@ -51,7 +52,7 @@ impl TryFrom<String> for Project {
     type Error = Error;
 
     fn try_from(name: String) -> Result<Self> {
-        Self::try_from(name.as_str())
+        name.parse()
     }
 }
 
@@ -127,16 +128,16 @@ pub const RUN_LOG: &str = "run";
 pub const MERGE_LOG: &str = "merge";
 
 /// One transcript per session, and the row lock.
-pub fn transcripts(project: &Project, key: &Key) -> Result<PathBuf> {
+pub fn transcripts(row: &Address) -> Result<PathBuf> {
     Ok(swarm()?
         .join(LOG_DIR)
-        .join(project.to_string())
-        .join(&key.track)
-        .join(&key.id))
+        .join(row.project.to_string())
+        .join(&row.key.track)
+        .join(&row.key.id))
 }
 
-pub fn transcript(project: &Project, key: &Key, name: &str) -> Result<PathBuf> {
-    Ok(transcripts(project, key)?.join(format!("{name}.{LOG_EXT}")))
+pub fn transcript(row: &Address, name: &str) -> Result<PathBuf> {
+    Ok(transcripts(row)?.join(format!("{name}.{LOG_EXT}")))
 }
 
 pub fn here() -> Result<PathBuf> {

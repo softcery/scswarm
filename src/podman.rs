@@ -2,11 +2,11 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::credential::Credential;
 use crate::error::{Error, Result};
-use crate::host::{Mount, Stamp};
+use crate::host::Mount;
 use crate::paths;
 use crate::proc;
 
@@ -36,6 +36,27 @@ pub type Made = std::result::Result<String, String>;
 /// One long-lived container per slot. Sole owner of podman arguments.
 pub struct Container {
     name: String,
+}
+
+/// What a slot container bakes, as label text. Worker compares it back.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Stamp {
+    /// Image ID: a rebuild under the same name reads as a change.
+    pub image: String,
+    pub mounts: String,
+    pub devices: String,
+    pub repo: String,
+}
+
+impl Stamp {
+    pub fn new(image: &str, mounts: &[Mount], devices: &[String], repo: &Path) -> Result<Self> {
+        Ok(Self {
+            image: image.to_string(),
+            mounts: text(&mounts)?,
+            devices: text(&devices)?,
+            repo: paths::arg(repo)?,
+        })
+    }
 }
 
 /// Binds of slot container, plus stamp it carries.
@@ -255,6 +276,12 @@ fn drop_container(name: &str) -> Result<()> {
         "--ignore".to_string(),
         name.to_string(),
     ])
+}
+
+/// JSON: the YAML reader only reads.
+fn text<T: Serialize>(value: &T) -> Result<String> {
+    serde_json::to_string(value)
+        .map_err(|why| Error::Failed(format!("slot binds must serialise: {why}")))
 }
 
 /// podman takes paths as arguments; working dir holds no meaning.

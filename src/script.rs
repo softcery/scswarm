@@ -5,6 +5,7 @@ use crate::credential::Credential;
 use crate::error::{Error, Result};
 use crate::event;
 use crate::slot::Slot;
+use crate::state::Address;
 use crate::step::{Outcome, Policy, Step, Steps};
 use crate::transcript::{Entry, Transcript};
 
@@ -38,7 +39,7 @@ impl<'a> Session<'a> {
         credentials: &'a [Credential],
         config: &'a Config,
         row: &'a Row,
-        label: &str,
+        address: &Address,
     ) -> Result<Self> {
         Ok(Self {
             slot,
@@ -46,7 +47,7 @@ impl<'a> Session<'a> {
             config,
             row,
             agent: agent(config, &row.agent)?,
-            key: label.to_string(),
+            key: address.to_string(),
             session: None,
         })
     }

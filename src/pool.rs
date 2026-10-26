@@ -9,7 +9,7 @@ use crate::event;
 use crate::lock;
 use crate::paths::{self, Project};
 use crate::slot::{self, Slot};
-use crate::state::Key;
+use crate::state::Address;
 use crate::work::Job;
 
 /// Workers by slot. Slot or row is taken while own worker runs it, or a worker
@@ -24,8 +24,7 @@ pub struct Pool {
 
 struct Worker {
     child: Child,
-    project: Project,
-    key: Key,
+    row: Address,
 }
 
 /// Queued rows of one track, in file order, with what orders the track.
@@ -118,49 +117,38 @@ impl Pool {
             if !status.success() {
                 let why = format!(
                     "row {} on slot {index}: worker {status}: row replays",
-                    worker.key
+                    worker.row.key
                 );
-                faults.push((worker.project, Error::Failed(why)));
+                faults.push((worker.row.project, Error::Failed(why)));
             }
         }
         Ok(faults)
     }
 
-    pub fn holds(&self, project: &Project, key: &Key) -> Result<bool> {
-        if self
-            .workers
-            .values()
-            .any(|worker| &worker.project == project && &worker.key == key)
-        {
+    pub fn holds(&self, row: &Address) -> Result<bool> {
+        if self.workers.values().any(|worker| &worker.row == row) {
             return Ok(true);
         }
-        lock::held(&paths::transcripts(project, key)?)
+        lock::held(&paths::transcripts(row)?)
     }
 
     /// Spawn worker on an idle slot. Row lock taken here, inherited as stdin: held
     /// from spawn. Lock held since the scan, by a `status` probe say: next cycle.
-    pub fn assign(&mut self, project: &Project, job: Job) -> Result<()> {
-        let key = job.key();
-        let logs = paths::transcripts(project, &key)?;
+    pub fn assign(&mut self, job: Job) -> Result<()> {
+        let row = job.address();
+        let logs = paths::transcripts(&row)?;
         fs::create_dir_all(&logs)
             .map_err(|why| Error::Failed(format!("directory {}: {why}", logs.display())))?;
-        let Some(row) = lock::take(&logs)? else {
+        let Some(lock) = lock::take(&logs)? else {
             return Ok(());
         };
-        event::assign(key.label(project), job.slot);
+        event::assign(&row, job.slot);
         let child = Command::new(&self.exe)
-            .args(job.argv(project))
-            .stdin(row.into_stdio())
+            .args(job.argv())
+            .stdin(lock.into_stdio())
             .spawn()
             .map_err(|why| stopped(job.slot, &format!("worker must start: {why}")))?;
-        self.workers.insert(
-            job.slot,
-            Worker {
-                child,
-                project: project.clone(),
-                key,
-            },
-        );
+        self.workers.insert(job.slot, Worker { child, row });
         Ok(())
     }
 

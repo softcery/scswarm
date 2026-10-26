@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Result};
 use crate::event;
 use crate::git::Git;
-use crate::host::{Mount, Stamp};
+use crate::host::Mount;
 use crate::paths;
-use crate::podman::{self, Container, Spec};
+use crate::podman::{self, Container, Spec, Stamp};
 use crate::step::Outcome;
 
 const WORKTREE_LINK: &str = ".git";

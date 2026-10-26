@@ -358,7 +358,7 @@ git -C ~/swarm/PROJECT.git for-each-ref refs/swarm/
 - `systemctl stop` and `launchctl bootout` leave rows in flight running.
 - macOS: `devices` must stay empty. Device nodes live in the podman machine VM.
 - macOS: a Mac asleep pauses the VM. Steps in flight can hit `timeout` and spend tries.
-- macOS: the podman machine does not start at login. Until it runs, `serve` stops with exit 2 every 10 s.
+- macOS: the podman machine does not start at login. Until it runs, each worker exits 2, so `serve` stops and launchd starts it again after 10 s.
 - Locks sit on `~/swarm`, which must be a local filesystem. NFS breaks them.
 - A worker hung outside a step holds its slot until killed.
 - A git or podman fault in one slot stops `serve` for every track.

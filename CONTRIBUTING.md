@@ -4,7 +4,7 @@
 
 - Rust toolchain. `rust-toolchain.toml` pins channel `stable` with `rustfmt` and `clippy`.
 - Python 3 for `make lint`. The script uses the standard library alone.
-- For `make e2e`: Linux and rootless podman.
+- For `make e2e`: rootless podman on Linux, or a podman machine on macOS.
 
 ## Build
 
@@ -19,7 +19,7 @@ The repo has no CI. Run these checks yourself before you open a pull request:
 
 1. Run `make lint`. It runs the comment budget script, `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`.
 2. Run `cargo test`.
-3. If you change slots, the pool or podman calls, run `make e2e`. It spends no agent tokens. It runs about 100 s and needs Linux with rootless podman.
+3. If you change slots, the pool or podman calls, run `make e2e`. It spends no agent tokens. It runs about 105 s on Linux and 120 s on macOS. It writes `E2E_*` files in `~/.config/scswarm/credentials/` and removes them.
 
 To run `make lint` on each commit, install a hook:
 

@@ -34,10 +34,11 @@ Push rights per branch give each team its own track file. No team edits another'
 - **Values live in config, not code.** Tries, waits, timeouts and poll come from step fields, `defaults` and the host file. Tool defaults sit in one place each: `step` for policy, `host` for poll. Violation: a project needs a release to change a retry count.
 - **Branches are refs, not names.** The host file names the remote and the track prefix; every branch arrives as a remote-tracking ref, the layout of any clone. Every project text that becomes a ref passes `git::valid_ref` first. Chokepoint: refspec in `git::Git::set_origin`, gate in `host` and `board`. Violation: a project whose branches the tool cannot name cannot run, or a track row kills the loop.
 - **Slot set converges to the host file.** `serve` drops slots above `workers` and frees idle slots. The worker makes its slot's worktree and container, and remakes the container when the row's image, `mounts` or device nodes differ. `env` rides in each job, so it changes no container. A busy slot keeps its row and changes once idle. Chokepoint: `pool::Pool::converge`, sole caller of `slot::remove`; `slot::Slot::prepare`, sole caller of `podman::Container::create`. Violation: a slot changes under a running row, or a container runs an image its row did not name.
+- **Credential values stay off argv and out of `serve`.** `host` checks the credential files and reads no value. The worker reads values at row start and passes them in the podman environment, names alone as `--env`. Chokepoint: `credential`, sole reader of the credential directory; `podman::Container::exec`, sole place a value enters a command. Violation: a secret shows in `ps`, a transcript, or every child of `serve`.
 - **Container is the boundary.** Agent permission checks off, container mounts fixed. One rule for every agent. Chokepoint: `podman` module builds every `run` and `exec`. Violation: two sandbox semantics, one agent escapes.
 - **One row, one slot.** The scheduler hands a row to a single slot and skips it while a worker holds it. `serve` takes the row lock before spawn and the worker inherits it as stdin, so it is held from spawn to exit. The worker holds the slot lock for its life; `serve` holds the project lock, so no second scheduler runs. Each fetch and push holds the remote lock, so no two update one remote-tracking ref. Each image build holds the build lock: parallel builds miss the layer cache and give slots of one image different IDs. Chokepoint: `lock`, sole caller of `File::lock`; `pool` checks own workers, then probes both locks, before release, drop and assign, and takes the row lock at assign. `status` reads the same fact from the row locks. Violation: two containers commit one branch.
 - **Rows outlive `serve`.** Each row attempt is its own process. `serve` holds no row a restart cannot rebuild: kernel locks mark what a live worker holds and drop on its death. Chokepoint: `pool::Pool::assign`, sole spawner of workers. Violation: a restart, an upgrade or a fault on one slot kills every row in flight.
-- **Tool knows no project.** Ids, order, base and output come from track files; image, agents, `commit`, `defaults` and `merge` steps from the project file at the row's base; remote, track prefix, workers, mounts, devices and env from the host file. Chokepoint: `board` reads track files, `config` reads the project file, `step` settles every step list, `host` reads the host file. Violation: second project needs a code change.
+- **Tool knows no project.** Ids, order, base and output come from track files; image, agents, `commit`, `defaults` and `merge` steps from the project file at the row's base; remote, track prefix, workers, mounts, devices and env from the host file; values from the credential files. Chokepoint: `board` reads track files, `config` reads the project file, `step` settles every step list, `host` reads the host file. Violation: second project needs a code change.
 
 ## Loop
 
@@ -70,7 +71,8 @@ Steps join through the worktree alone: no step output reaches a prompt, so promp
 - Podman exit 125 from `exec` counts as a failed try. A step command that exits 125 reads the same.
 - `status` prints one line per row. The tool learns no id pattern, so a task written as three rows groups into nothing.
 - `reset` races a worker running that row. Stopping `serve` stops no worker.
-- `systemctl stop` leaves rows in flight running. Hard stop: `systemctl --user kill --kill-whom=all`.
+- `systemctl stop` and `launchctl bootout` leave rows in flight running. Hard stop: `systemctl --user kill --kill-whom=all`, or `pkill -f 'scswarm work <project> '` under launchd.
+- macOS runs containers in the podman machine VM. `devices` stays empty, `mounts` sit under a VM share, a Mac asleep pauses rows.
 - Rows started before an upgrade finish on the old binary. `work` argv, branch and ref names must read the same in both versions.
 - A worker takes the slot lock after spawn. A new `serve` can release or use that slot first; the worker waits, or exits 2 if the slot drops.
 - Locks need a local filesystem. `~/swarm` on NFS breaks flock.
@@ -95,6 +97,7 @@ Steps join through the worktree alone: no step output reaches a prompt, so promp
 - A push of `refs/swarm/*` outside `git::Git::mirror_kept`.
 - A merge into `to` that fast-forwards or leaves the row first parent.
 - A `podman` argument outside the `podman` module.
+- A credential value in an argument, an event line or a `Debug` derive.
 - State kept in memory that a restart cannot rebuild from git and locks.
 - A row run as a thread inside `serve`.
 - A commit message read for anything but the commit itself.

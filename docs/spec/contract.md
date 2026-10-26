@@ -115,13 +115,24 @@ poll: 5
 - `workers`: slot count. One worktree, one container each.
 - `mounts`: extra `host:container` binds, rw. Both sides absolute; host side takes `~/` for home. Build caches ride here.
 - `devices`: host device paths, absolute. A folder stands for each device node under it, symlinks skipped. Each node passes as `--device` at the same path. A GPU rides here. A bind in `mounts` cannot carry a device: the `z` relabel of a device node fails.
-- `env`: ordered rules. `match` is a glob on track names, `*` for any run of characters. The first rule that matches names the host environment variables forwarded into each container of that track's rows. No match: none. Value never reaches an argument list.
+- `env`: ordered rules. `match` is a glob on track names, `*` for any run of characters. The first rule that matches names the credentials forwarded into each container of that track's rows, as environment variables. No match: none. Value never reaches an argument list.
 - `poll`: seconds between loop cycles, 1 or more. Absent = 5.
 - These fields cannot sit in a repo: `remote` and `tracks` say where repo text comes from, `env` keeps one team's key from another team's track, and the rest changes with the machine.
 - Every field reloads on the next cycle.
 - `serve` converges slots each cycle, at start too: drops each idle slot at or above `workers`, and frees the branch of each idle slot below it once per `serve` life. A busy slot drops after its row ends. The worker makes the worktree of its slot and the container. It remakes the container when it differs from the row in `mounts`, device nodes or image ID. A GPU node renumbered at boot remakes it at the next row. `init` writes no slot.
-- `env` names apply from the next row on. No container bakes them.
-- Absent or unparsable at start: exit 1. Unparsable later: `serve` reports `stale` once per cause, keeps the last good copy, keeps running.
+- `env` names and credential values apply from the next row on. No container bakes them.
+- Absent or unparsable at start: exit 1. Unparsable later: `serve` reports `stale` once per cause, keeps the last good copy, keeps running. A credential check that fails counts as unparsable.
+
+## Credentials
+
+Directory `${XDG_CONFIG_HOME:-~/.config}/scswarm/credentials/`, shared by every project of the machine. One file per credential: file name = name in `env`, contents = value.
+
+- The directory must grant group and others nothing: mode `0700`.
+- One trailing `\n` strips. Other bytes pass as is.
+- Sole source: the `serve` environment carries no credential.
+- Each host file load checks the directory mode and one regular file per name in any `env` rule. It reads no value. A host file with no `env` names needs no directory.
+- The worker reads the values of its row's names at row start. A file gone since the check: exit 2, no fail mark.
+- Errors name the directory or the credential, never the value.
 
 ## `scswarm.yaml`
 
@@ -209,7 +220,7 @@ merge:
 
 ```
 scswarm init PROJECT            bare repo, origin, first fetch; safe while `serve` runs
-scswarm serve PROJECT           foreground loop; run under systemd
+scswarm serve PROJECT           foreground loop; run under systemd or launchd
 scswarm status PROJECT          one line per row of every track: row, state, branch, worker
                                   state: waiting, queued, running, failed, pushed, merged
 scswarm status --tracks PREFIX  same, read from the clone in the working directory; that
@@ -229,13 +240,13 @@ Exit codes: 0 ok, 1 input invalid (host file, track file, config, unknown row), 
 
 `work` argv and stdin bind across versions: a `serve` started before `cargo install` spawns the new binary. Stdin holds the row lock: `work` refuses a stdin that is not that directory. A change to either needs a release note.
 
-`serve` spawns each worker with stdout and stderr shared, so worker lines reach the same journal, also after `serve` dies. A worker whose `serve` died runs to its end; the process manager reaps it. `systemctl stop` and `restart` end `serve` alone under the shipped unit, `KillMode=process`: rows in flight finish, no new row starts.
+`serve` spawns each worker with stdout and stderr shared, so worker lines reach the same journal, also after `serve` dies. A worker whose `serve` died runs to its end; the process manager reaps it. `systemctl stop` and `restart` end `serve` alone under the shipped unit, `KillMode=process`: rows in flight finish, no new row starts. The shipped launchd agent does the same through `AbandonProcessGroup`, for `launchctl kickstart -k` and `bootout`.
 
 Scheduling: each idle slot takes a queued row. Highest `priority` first; among tracks of equal priority, the track with fewest rows running, so tracks take turns; file order inside a track. No preemption.
 
 ## Container
 
-Rootless podman, `--userns=keep-id`, one long-lived container per slot, named `scswarm-<project>-<n>`. It sleeps; every try of a prompt, `run` or agent commit step is one `podman exec`, then `podman restart --time=0`. The restart kills every process the try left, so a background job never reaches the next step or the commit. The worker restarts the container before each row, so a process a dead worker left inside never reaches the next row. Mounts: slot worktree rw at same path, bare repo ro at same path, `mounts` rw. Every bind carries the `z` flag, so an SELinux host relabels it shared. `devices` pass as `--device`, with no relabel. Credentials arrive as `env` names. Network on. Agent runs with its own permission checks off.
+Rootless podman, `--userns=keep-id`, one long-lived container per slot, named `scswarm-<project>-<n>`. It sleeps; every try of a prompt, `run` or agent commit step is one `podman exec`, then `podman restart --time=0`. The restart kills every process the try left, so a background job never reaches the next step or the commit. The worker restarts the container before each row, so a process a dead worker left inside never reaches the next row. Mounts: slot worktree rw at same path, bare repo ro at same path, `mounts` rw. Every bind carries the `z` flag, so an SELinux host relabels it shared. `devices` pass as `--device`, with no relabel. Credentials arrive as `--env=NAME`, values in the podman environment. Network on. Agent runs with its own permission checks off.
 
 Git inside the container is read-only: the index sits under the bare repo. `git status`, `git log`, `git diff` work. `git add`, `git mv`, `git commit`, `git checkout` fail with `Read-only file system`. Host stages every change with `add --all` at each commit step, so a plain `mv` lands. Project prompts and command files must not ask the agent for a git write.
 
@@ -269,7 +280,7 @@ Image: `image` names a Containerfile at the base, built with no tag and run by I
 - A merge session after a crash or a repair opens a new agent session: the row session lived in the dead worker.
 - An urgent track waits for a free slot, up to one row's length.
 - A 429 usage limit fails rows of every track that shares the credential. Per-team `env` limits it to one team.
-- `env` values come from the `serve` process; workers inherit them. A refreshed credential needs a `serve` restart, and rows in flight keep the old value.
+- A refreshed credential reaches the next row. Rows in flight keep the old value.
 - A step with no `timeout` runs without limit. No cap counts tokens.
 - A podman fault inside `exec` exits 125 and counts as a failed try. A step command that exits 125 reads the same: `sh -c` passes the code through.
 - The transcript keeps full stdout and stderr of every try. Redirect big output to a file.
@@ -278,6 +289,11 @@ Image: `image` names a Containerfile at the base, built with no tag and run by I
 - A kill between the commit and the land ref write leaves a branch the next cycle replays. A kill after the land ref write leaves a row the next cycle merges into `to`.
 - `reset` a row only while no worker runs it. A running worker recreates the refs at its next commit, and stopping `serve` stops no worker.
 - `systemctl stop` leaves rows in flight running. Hard stop: `systemctl --user kill --kill-whom=all scswarm@<project>`.
+- `launchctl bootout` leaves rows in flight running. Hard stop: `pkill -f 'scswarm work <project> '`. launchd has no command that kills an abandoned process group.
+- macOS: `devices` must stay empty. Device nodes live in the podman machine VM, so the host check fails each entry.
+- macOS: `mounts` host sides must sit under a podman machine share: `/Users`, `/private`, `/var/folders` by default.
+- macOS: a Mac asleep pauses the VM. Steps in flight can hit `timeout` and spend tries.
+- macOS: the podman machine does not start at login. Until it runs, workers exit 2 and launchd starts `serve` again every 10 s.
 - systemd logs a left-over process line per running worker at each restart. Expected under `KillMode=process`.
 - Ctrl-C in a terminal reaches the whole process group: `serve` and its workers stop.
 - Rows started before an upgrade finish on the old binary. Branch, land ref and fail ref names must read the same in both versions.

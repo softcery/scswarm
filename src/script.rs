@@ -1,6 +1,7 @@
 use crate::board::Row;
 use crate::call::{Call, Message, Reply, Shell, Turn};
 use crate::config::{self, Agent, Config, ID_SLOT, PARENT_SLOT};
+use crate::credential::Credential;
 use crate::error::{Error, Result};
 use crate::event;
 use crate::slot::Slot;
@@ -15,7 +16,7 @@ const SLOT_OPEN: char = '{';
 /// resumes the session the row ran.
 pub struct Session<'a> {
     slot: &'a Slot,
-    env: &'a [String],
+    credentials: &'a [Credential],
     config: &'a Config,
     row: &'a Row,
     agent: &'a Agent,
@@ -35,14 +36,14 @@ struct Pass<'p> {
 impl<'a> Session<'a> {
     pub fn open(
         slot: &'a Slot,
-        env: &'a [String],
+        credentials: &'a [Credential],
         config: &'a Config,
         row: &'a Row,
         key: &Key,
     ) -> Result<Self> {
         Ok(Self {
             slot,
-            env,
+            credentials,
             config,
             row,
             agent: agent(config, &row.agent)?,
@@ -154,7 +155,7 @@ impl<'a> Session<'a> {
     fn call<'c>(&'c self, policy: &'c Policy, number: usize, pass: Pass<'c>) -> Call<'c> {
         Call {
             slot: self.slot,
-            env: self.env,
+            credentials: self.credentials,
             policy,
             transcript: pass.transcript,
             id: &self.key,

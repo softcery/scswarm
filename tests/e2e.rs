@@ -4,6 +4,7 @@
 use std::collections::BTreeSet;
 use std::env;
 use std::fs::{self, OpenOptions};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output};
 use std::thread;
@@ -20,9 +21,13 @@ const TICK: Duration = Duration::from_millis(200);
 const CYCLES: Duration = Duration::from_secs(3);
 const CONTAINERFILE: &str = "Containerfile.e2e";
 const BASE: &str = "registry.fedoraproject.org/fedora:44";
+/// Every row checks this value. The file ends in `\n`: the worker strips it.
+const CREDENTIAL: (&str, &str) = ("E2E_CREDENTIAL", "e2e-value");
+/// Named by the `env` edit alone.
+const EXTRA: (&str, &str) = ("E2E_EXTRA", "extra");
 
 #[test]
-#[ignore = "needs Linux and rootless podman: run `make e2e`"]
+#[ignore = "needs rootless podman or a podman machine: run `make e2e`"]
 fn slot_set_follows_host_file_live() {
     let mut swarm = Swarm::open();
     swarm.host(1, &[]);
@@ -114,7 +119,7 @@ fn holds(swarm: &Swarm) {
 fn keeps_containers_on_env(swarm: &Swarm) {
     let before = swarm.containers();
     let from = swarm.mark();
-    swarm.host(3, &["HOME"]);
+    swarm.host(3, &[EXTRA.0]);
     thread::sleep(CYCLES);
     swarm.rerun(&ROWS[..1], from);
     swarm.wait(&format!("land row={}", ROWS[0]), from);
@@ -126,17 +131,23 @@ fn keeps_containers_on_env(swarm: &Swarm) {
     );
 }
 
-/// Broken host file across cycles: one `stale` line, last good copy runs on.
+/// Broken host file, then a credential with no file, across cycles: one `stale`
+/// line each, last good copy runs on.
 fn reports_stale_once(swarm: &Swarm) {
     let from = swarm.mark();
+    let stale = || {
+        swarm.lines()[from..]
+            .iter()
+            .filter(|line| line.starts_with("stale "))
+            .count()
+    };
     fs::write(host_file(), "workers: [").expect("host file must be writable");
     thread::sleep(CYCLES);
-    let stale = swarm.lines()[from..]
-        .iter()
-        .filter(|line| line.starts_with("stale "))
-        .count();
-    assert_eq!(stale, 1, "a repeated host file fault must report once");
-    swarm.host(3, &["HOME"]);
+    assert_eq!(stale(), 1, "a repeated host file fault must report once");
+    swarm.host(3, &["E2E_MISSING"]);
+    thread::sleep(CYCLES);
+    assert_eq!(stale(), 2, "a missing credential must report once");
+    swarm.host(3, &[EXTRA.0]);
     thread::sleep(CYCLES);
     swarm.quiet(from);
 }
@@ -307,6 +318,7 @@ impl Swarm {
                 .arg(&swarm.work),
             "git",
         );
+        credentials();
         swarm.git(&["checkout", "--quiet", "--orphan", "main"]);
         swarm.write("scswarm.yaml", CONFIG);
         swarm.commit_here(CONTAINERFILE, &containerfile(1), "e2e: project", "main");
@@ -325,12 +337,9 @@ impl Swarm {
         let file = host_file();
         fs::create_dir_all(file.parent().expect("host file has a dir"))
             .expect("config dir must be writable");
-        let rules = match env.is_empty() {
-            true => String::new(),
-            false => format!("env:\n  - match: '*'\n    names: [{}]\n", env.join(", ")),
-        };
+        let names = [&[CREDENTIAL.0], env].concat().join(", ");
         let text = format!(
-            "remote: {}\ntracks: track/\nworkers: {workers}\n{rules}poll: 1\n",
+            "remote: {}\ntracks: track/\nworkers: {workers}\nenv:\n  - match: '*'\n    names: [{names}]\npoll: 1\n",
             self.remote().display()
         );
         fs::write(&file, text).expect("host file must be writable");
@@ -519,7 +528,8 @@ fn track(from: &str, to: &str, priority: i32, rows: &[&str]) -> String {
         .map(|key| {
             let id = key.split_once('/').expect("key holds a `/`").1;
             format!(
-                "  - id: {id}\n    steps:\n      - run: sleep {ROW_SECONDS}\n      - commit: \"{id}\"\n"
+                "  - id: {id}\n    steps:\n      - run: test \"${}\" = {} && sleep {ROW_SECONDS}\n      - commit: \"{id}\"\n",
+                CREDENTIAL.0, CREDENTIAL.1
             )
         })
         .collect();
@@ -562,6 +572,25 @@ fn clean() {
         let _ = fs::remove_dir_all(dir);
     }
     let _ = fs::remove_file(host_file());
+    for (name, _) in [CREDENTIAL, EXTRA] {
+        let _ = fs::remove_file(credential_dir().join(name));
+    }
+}
+
+/// Credential files in the shared directory. Made mode 0700 when absent; an
+/// existing directory keeps its mode, so a bad mode fails the test.
+fn credentials() {
+    let dir = credential_dir();
+    if !dir.exists() {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .expect("credential dir must be writable");
+    }
+    for (name, value) in [CREDENTIAL, EXTRA] {
+        fs::write(dir.join(name), format!("{value}\n")).expect("credential must be writable");
+    }
 }
 
 /// Tool under test. Git identity set here: host commits need one, the machine may
@@ -610,11 +639,19 @@ fn scratch() -> PathBuf {
 }
 
 fn host_file() -> PathBuf {
-    let config = env::var_os("XDG_CONFIG_HOME")
+    config().join(format!("{PROJECT}.yaml"))
+}
+
+fn credential_dir() -> PathBuf {
+    config().join("credentials")
+}
+
+fn config() -> PathBuf {
+    env::var_os("XDG_CONFIG_HOME")
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".config"));
-    config.join("scswarm").join(format!("{PROJECT}.yaml"))
+        .unwrap_or_else(|| home().join(".config"))
+        .join("scswarm")
 }
 
 fn home() -> PathBuf {

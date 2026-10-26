@@ -110,7 +110,7 @@ scripts/       comment-budget.py
 
 - Build: `cargo build --release`. Install: `cargo install --path .`. Iterate: `cargo run -- <args>`.
 - Test: `cargo test`. Lint: `make lint`.
-- E2E: `make e2e`. Linux, rootless podman, about 100 s, no tokens. Run after slot, pool or podman changes.
+- E2E: `make e2e`. Linux rootless podman or macOS podman machine, about 105 to 120 s, no tokens. Run after slot, pool or podman changes.
 - `rmap tree|module|refs|body|deps|graph`: Rust code map. `--crate <name>` reads dependency source from cargo registry; use for clap, serde-saphyr, never guess API.
 </tools>
 

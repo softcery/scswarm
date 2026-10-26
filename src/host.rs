@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::credential;
 use crate::device;
 use crate::error::{Error, Result};
 use crate::git;
@@ -26,15 +27,15 @@ pub struct Host {
     /// Host device nodes each container gets at the same path. Resolved at load.
     pub devices: Vec<String>,
     /// Ordered rules: the first rule whose `match` takes a track names its variables.
-    pub env: Vec<Credential>,
+    pub env: Vec<EnvRule>,
     /// Pause between loop cycles. Reloads each cycle.
     pub poll: Duration,
 }
 
-/// Host variables forwarded into the containers of every track `pattern` matches.
+/// Credentials forwarded into the containers of every track `pattern` matches.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Credential {
+pub struct EnvRule {
     #[serde(rename = "match")]
     pub pattern: String,
     pub names: Vec<String>,
@@ -70,7 +71,7 @@ struct Written {
     #[serde(default)]
     devices: Vec<String>,
     #[serde(default)]
-    env: Vec<Credential>,
+    env: Vec<EnvRule>,
     #[serde(default)]
     poll: Option<u64>,
 }
@@ -81,7 +82,14 @@ impl Host {
         let label = paths::arg(&file)?;
         let text =
             fs::read_to_string(&file).map_err(|why| Error::Invalid(format!("{label}: {why}")))?;
-        Self::parse(&label, &text)
+        let host = Self::parse(&label, &text)?;
+        let names: Vec<String> = host
+            .env
+            .iter()
+            .flat_map(|rule| rule.names.iter().cloned())
+            .collect();
+        credential::check(&names)?;
+        Ok(host)
     }
 
     pub fn parse(file: &str, text: &str) -> Result<Self> {
@@ -175,7 +183,9 @@ impl Written {
             {
                 return Err(invalid(
                     file,
-                    &format!("{entry}: field `names` must list host environment variables"),
+                    &format!(
+                        "{entry}: field `names` must list credential names: letters, digits, `_`"
+                    ),
                 ));
             }
         }

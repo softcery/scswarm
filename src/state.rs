@@ -5,6 +5,7 @@ use crate::board::{self, Board, Track};
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::git::{self, Git};
+use crate::paths::Project;
 
 const BRANCHES: &str = "swarm/";
 /// Kinds of kept ref, under `git::KEPT`.
@@ -27,7 +28,8 @@ pub enum State {
     Merged,
 }
 
-/// Row of one track. Names branch, land ref, fail refs, transcripts, row lock.
+/// Row of one track in one repo. Names branch, land ref, fail refs; with its
+/// project, transcripts and row lock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Key {
     pub track: String,
@@ -119,6 +121,11 @@ impl Key {
             track: track.to_string(),
             id: id.to_string(),
         }
+    }
+
+    /// Row of `project` in event lines: rows of two projects can share track and id.
+    pub fn label(&self, project: &Project) -> String {
+        format!("{project}/{self}")
     }
 
     pub fn branch(&self) -> String {

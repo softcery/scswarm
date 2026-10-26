@@ -1,5 +1,7 @@
-//! Live slot set, `serve` restart and two tracks against rootless podman and a local remote.
-//! Rows hold `run` and literal commit steps only: no agent call, no credential, no token spent.
+//! Live slot set, `serve` restart, two tracks and two projects against rootless podman and
+//! local remotes. Rows hold `run` and literal commit steps only: no agent call, no token spent.
+//! Slots, container names and the host file belong to the user: the test refuses a user whose
+//! host file it did not write.
 
 use std::collections::BTreeSet;
 use std::env;
@@ -11,9 +13,17 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const PROJECT: &str = "scswarm-e2e";
+/// Second project, own remote: listed once the first one has run.
+const SECOND: &str = "scswarm-e2e-second";
 /// Track `a` starts from `main` and runs first; track `b` starts from `side`.
 const ROWS: [&str; 3] = ["a/row-1", "a/row-2", "a/row-3"];
 const OTHER: &str = "b/other-1";
+/// Sole row of the second project.
+const ELSEWHERE: &str = "c/one";
+/// First line of every host file the test writes. Any other host file is a live swarm.
+const MARK: &str = "# scswarm-e2e";
+/// Every slot container: `scswarm-<n>`.
+const SLOT_NAMES: &str = "^scswarm-[0-9]+$";
 const ROW_SECONDS: u64 = 10;
 const WAIT: Duration = Duration::from_secs(180);
 const TICK: Duration = Duration::from_millis(200);
@@ -31,11 +41,6 @@ const EXTRA: (&str, &str) = ("E2E_EXTRA", "extra");
 fn slot_set_follows_host_file_live() {
     let mut swarm = Swarm::open();
     swarm.host(1, &[]);
-    swarm.tool(&["init", PROJECT]);
-    assert!(
-        swarm.containers().is_empty(),
-        "`init` must create no container"
-    );
     swarm.serve();
     swarm.wait("create slot=0", 0);
     grows(&swarm);
@@ -46,6 +51,7 @@ fn slot_set_follows_host_file_live() {
     skips_track_without_credential(&swarm);
     survives_bad_track(&swarm);
     rolls_image(&swarm);
+    switches_project(&swarm);
     let restarted = outlives_serve(&mut swarm);
     pushes_every_track(&swarm, restarted);
     let creates = swarm
@@ -54,20 +60,20 @@ fn slot_set_follows_host_file_live() {
         .filter(|line| line.starts_with("create "))
         .count();
     assert_eq!(
-        creates, 8,
-        "each `create` must answer a change: 1 + 2 + 2 + 3"
+        creates, 10,
+        "each `create` must answer a change: 1 + 2 + 2 + 3 + 2"
     );
 }
 
 /// 1 → 3 with rows waiting: new slots take them on the next cycle, priority first.
 fn grows(swarm: &Swarm) {
-    let from = swarm.wait(&format!("assign row={} slot=0", ROWS[0]), 0);
+    let from = swarm.wait(&format!("assign row={} slot=0", label(ROWS[0])), 0);
     swarm.host(3, &[]);
     for needle in [
         "create slot=1",
         "create slot=2",
-        &format!("assign row={} ", ROWS[1]),
-        &format!("assign row={} ", ROWS[2]),
+        &format!("assign row={} ", label(ROWS[1])),
+        &format!("assign row={} ", label(ROWS[2])),
     ] {
         swarm.wait(needle, from);
     }
@@ -92,8 +98,8 @@ fn drains(swarm: &Swarm) {
             "slot {slot} must drop after its row lands"
         );
     }
-    swarm.wait(&format!("land row={}", ROWS[0]), from);
-    swarm.wait(&format!("push row={OTHER} "), from);
+    swarm.wait(&format!("land row={}", label(ROWS[0])), from);
+    swarm.wait(&format!("push row={} ", label(OTHER)), from);
 }
 
 /// 3 → 1 → 3 inside one row: nothing drops, nothing rebuilds.
@@ -109,7 +115,7 @@ fn holds(swarm: &Swarm) {
     thread::sleep(CYCLES);
     swarm.host(3, &[]);
     for row in ROWS {
-        swarm.wait(&format!("land row={row}"), flip);
+        swarm.wait(&format!("land row={}", label(row)), flip);
     }
     thread::sleep(CYCLES);
     swarm.quiet(flip);
@@ -123,7 +129,7 @@ fn keeps_containers_on_env(swarm: &Swarm) {
     swarm.host(3, &[EXTRA.0]);
     thread::sleep(CYCLES);
     swarm.rerun(&ROWS[..1], from);
-    swarm.wait(&format!("land row={}", ROWS[0]), from);
+    swarm.wait(&format!("land row={}", label(ROWS[0])), from);
     swarm.quiet(from);
     assert_eq!(
         swarm.containers(),
@@ -151,15 +157,12 @@ fn reports_stale_once(swarm: &Swarm) {
 fn skips_track_without_credential(swarm: &Swarm) {
     let from = swarm.mark();
     swarm.host(3, &["E2E_MISSING"]);
-    swarm.wait("skip cause=track `a`", from);
+    let skip = format!("skip project={PROJECT} cause=track `a`");
+    swarm.wait(&skip, from);
     thread::sleep(CYCLES);
     let lines = &swarm.lines()[from..];
     let count = |prefix: &str| lines.iter().filter(|line| line.starts_with(prefix)).count();
-    assert_eq!(
-        count("skip cause=track `a`"),
-        1,
-        "a missing credential must report once"
-    );
+    assert_eq!(count(&skip), 1, "a missing credential must report once");
     assert_eq!(
         count("stale "),
         0,
@@ -180,8 +183,8 @@ fn survives_bad_track(swarm: &Swarm) {
         "from: main\nto: [\n",
         "e2e: broken track",
     );
-    swarm.wait("skip cause=track `a`", from);
-    swarm.wait(&format!("land row={}", ROWS[0]), from);
+    swarm.wait(&format!("skip project={PROJECT} cause=track `a`"), from);
+    swarm.wait(&format!("land row={}", label(ROWS[0])), from);
     thread::sleep(CYCLES);
     let skips = swarm.lines()[from..]
         .iter()
@@ -190,9 +193,9 @@ fn survives_bad_track(swarm: &Swarm) {
     assert_eq!(skips, 1, "a repeated track fault must report once");
     swarm.commit_on("track/a", "SWARM.yaml", &track_a(), "e2e: track fixed");
     let fixed = swarm.mark();
-    swarm.wait("fetch track=a ", fixed);
+    swarm.wait(&format!("fetch project={PROJECT} track=a "), fixed);
     swarm.rerun(&ROWS[1..2], fixed);
-    swarm.wait(&format!("push row={} ", ROWS[1]), fixed);
+    swarm.wait(&format!("push row={} ", label(ROWS[1])), fixed);
     swarm.quiet(from);
 }
 
@@ -212,7 +215,7 @@ fn rolls_image(swarm: &Swarm) {
         swarm.wait(&format!("create slot={slot}"), from);
     }
     for row in ROWS {
-        swarm.wait(&format!("push row={row} "), from);
+        swarm.wait(&format!("push row={} ", label(row)), from);
     }
     let new = swarm.images();
     assert_eq!(new.len(), 1, "every slot must run one image: {new:?}");
@@ -222,32 +225,59 @@ fn rolls_image(swarm: &Swarm) {
     );
 }
 
+/// Second project listed: its row takes slot 0, whose worktree and container
+/// move to the second repo, then a row of the first project moves them back.
+/// `status` with no project lists both.
+fn switches_project(swarm: &Swarm) {
+    let from = swarm.mark();
+    swarm.with_second(3, &[EXTRA.0]);
+    let row = format!("{SECOND}/{ELSEWHERE}");
+    swarm.wait(&format!("assign row={row} slot=0"), from);
+    swarm.wait("create slot=0", from);
+    swarm.wait(&format!("push row={row} "), from);
+    let back = swarm.mark();
+    swarm.rerun(&ROWS[..1], back);
+    swarm.wait("create slot=0", back);
+    swarm.wait(&format!("push row={} ", label(ROWS[0])), back);
+    let table = succeed(command().arg("status"), "scswarm");
+    for (project, row) in [(PROJECT, ROWS[0]), (SECOND, ELSEWHERE)] {
+        assert!(
+            table.lines().any(|line| {
+                let cells: Vec<&str> = line.split_whitespace().collect();
+                cells[..3] == [project, row, "pushed"]
+            }),
+            "status must list {project} {row} as pushed:\n{table}"
+        );
+    }
+}
+
 /// SIGKILL on `serve` mid-row: the worker runs on, a new `serve` waits on its
 /// locks. The row lands once, one try per step. Returns the restart line.
 fn outlives_serve(swarm: &mut Swarm) -> usize {
     let row = ROWS[0];
     let from = swarm.mark();
     swarm.rerun(&[row], from);
-    swarm.wait(&format!("step row={row} step=1"), from);
+    swarm.wait(&format!("step row={} step=1", label(row)), from);
     let before = swarm.containers();
     swarm.kill();
     let restarted = swarm.mark();
     swarm.serve();
-    swarm.wait("fetch track=", restarted);
+    swarm.wait("fetch project=", restarted);
     let second = command()
-        .args(["serve", PROJECT])
+        .arg("serve")
         .output()
         .expect("second `scswarm serve` must start");
     assert_eq!(second.status.code(), Some(2), "second `serve` must exit 2");
     let why = String::from_utf8_lossy(&second.stderr);
     assert!(why.contains("another `scswarm serve"), "{why}");
-    swarm.wait(&format!("land row={row}"), from);
+    swarm.wait(&format!("land row={}", label(row)), from);
     let count = |needle: &str| {
         swarm.lines()[from..]
             .iter()
             .filter(|line| line.starts_with(needle))
             .count()
     };
+    let row = label(row);
     assert_eq!(
         count(&format!("assign row={row} ")),
         1,
@@ -270,8 +300,9 @@ fn outlives_serve(swarm: &mut Swarm) -> usize {
 /// Two tracks from two branches each push a `to` that holds every row, and a
 /// plain clone reads every row as `pushed`.
 fn pushes_every_track(swarm: &Swarm, from: usize) {
-    let pushed = swarm.wait(&format!("push row={} ", ROWS[0]), from);
-    swarm.wait("mirror refs=", pushed);
+    let landed = swarm.wait(&format!("land row={}", label(ROWS[0])), from);
+    swarm.wait(&format!("mirror project={PROJECT} "), landed);
+    swarm.wait(&format!("push row={} ", label(ROWS[0])), from);
     let clone = scratch().join("clone");
     let remote = swarm.remote();
     succeed(
@@ -296,7 +327,7 @@ fn pushes_every_track(swarm: &Swarm, from: usize) {
     for row in ROWS.iter().chain([&OTHER]) {
         let line = table
             .lines()
-            .find(|line| line.starts_with(&format!("{row} ")))
+            .find(|line| line.split_whitespace().nth(1) == Some(row))
             .unwrap_or_else(|| panic!("status must list {row}:\n{table}"));
         assert!(
             line.contains(" pushed "),
@@ -315,6 +346,7 @@ struct Swarm {
 
 impl Swarm {
     fn open() -> Self {
+        refuse_live_swarm();
         clean();
         let root = scratch();
         fs::create_dir_all(&root).expect("scratch dir must be writable");
@@ -344,6 +376,7 @@ impl Swarm {
         swarm.commit_here("side.txt", "side\n", "e2e: side", "side");
         swarm.track("track/a", &track_a());
         swarm.track("track/b", &track_b());
+        swarm.second();
         swarm
     }
 
@@ -351,15 +384,76 @@ impl Swarm {
         scratch().join("remote.git")
     }
 
+    fn second_remote(&self) -> PathBuf {
+        scratch().join("second.git")
+    }
+
+    /// Second project: own remote, own clone, one track of one row.
+    fn second(&self) {
+        let work = scratch().join("second");
+        let here = |args: &[&str]| succeed(git().arg("-C").arg(&work).args(args), "git");
+        let write = |file: &str, text: &str| {
+            fs::write(work.join(file), text).expect("scratch file must be writable")
+        };
+        succeed(
+            git()
+                .args(["init", "--quiet", "--bare"])
+                .arg(self.second_remote()),
+            "git",
+        );
+        succeed(
+            git()
+                .args(["clone", "--quiet"])
+                .arg(self.second_remote())
+                .arg(&work),
+            "git",
+        );
+        here(&["checkout", "--quiet", "--orphan", "main"]);
+        write("scswarm.yaml", CONFIG);
+        write(CONTAINERFILE, &containerfile(1));
+        here(&["add", "--all"]);
+        here(&["commit", "--quiet", "--message", "e2e: second project"]);
+        here(&["push", "--quiet", "origin", "main"]);
+        here(&["checkout", "--quiet", "--orphan", "track/c"]);
+        here(&["rm", "-r", "--quiet", "--force", "--cached", "."]);
+        here(&["clean", "--quiet", "--force", "-d"]);
+        write("SWARM.yaml", &track("main", "feat/c", 0, &[ELSEWHERE]));
+        here(&["add", "--all"]);
+        here(&["commit", "--quiet", "--message", "e2e: track"]);
+        here(&["push", "--quiet", "origin", "track/c"]);
+    }
+
     fn host(&self, workers: usize, env: &[&str]) {
+        self.write_host(workers, env, false);
+    }
+
+    fn with_second(&self, workers: usize, env: &[&str]) {
+        self.write_host(workers, env, true);
+    }
+
+    fn write_host(&self, workers: usize, env: &[&str], second: bool) {
         let file = host_file();
         fs::create_dir_all(file.parent().expect("host file has a dir"))
             .expect("config dir must be writable");
-        let names = [&[CREDENTIAL.0], env].concat().join(", ");
-        let text = format!(
-            "remote: {}\ntracks: track/\nworkers: {workers}\nenv:\n  - match: '*'\n    names: [{names}]\npoll: 1\n",
-            self.remote().display()
+        let set = [&[CREDENTIAL.0], env]
+            .concat()
+            .iter()
+            .map(|name| format!("{name}: {name}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let entry = |name: &str, remote: PathBuf| {
+            format!(
+                "  {name}:\n    remote: {}\n    tracks: track/\n    fetch: 1\n    env:\n      - match: '*'\n        set: {{ {set} }}\n",
+                remote.display()
+            )
+        };
+        let mut text = format!(
+            "{MARK}\nworkers: {workers}\npoll: 1\nprojects:\n{}",
+            entry(PROJECT, self.remote())
         );
+        if second {
+            text.push_str(&entry(SECOND, self.second_remote()));
+        }
         fs::write(&file, text).expect("host file must be writable");
     }
 
@@ -372,7 +466,7 @@ impl Swarm {
             .open(&self.log)
             .expect("log must be writable");
         let child = command()
-            .args(["serve", PROJECT])
+            .arg("serve")
             .stdout(log.try_clone().expect("log handle must clone"))
             .stderr(log)
             .spawn()
@@ -397,7 +491,7 @@ impl Swarm {
             self.tool(&["reset", PROJECT, row]);
         }
         for row in rows {
-            self.wait(&format!("assign row={row} "), from);
+            self.wait(&format!("assign row={} ", label(row)), from);
         }
     }
 
@@ -461,7 +555,7 @@ impl Swarm {
 
     /// `name id image-id` per slot container, sorted.
     fn containers(&self) -> Vec<String> {
-        let filter = format!("--filter=name=^scswarm-{PROJECT}-");
+        let filter = format!("--filter=name={SLOT_NAMES}");
         let format = "--format={{.Names}} {{.ID}} {{.ImageID}}";
         let out = succeed(
             Command::new("podman").args(["ps", "--all", "--no-trunc", &filter, format]),
@@ -558,14 +652,27 @@ fn containerfile(revision: u32) -> String {
     format!("FROM {BASE}\nENV E2E_REVISION={revision}\n")
 }
 
-/// Every trace of the project: slots, images, bare repos, logs, host file, scratch.
+/// Stop unless the host file is absent or one this test wrote: slots, container
+/// names and the host file belong to the user, and `clean` drops them.
+fn refuse_live_swarm() {
+    let Ok(text) = fs::read_to_string(host_file()) else {
+        return;
+    };
+    assert!(
+        text.starts_with(MARK),
+        "e2e must run as a user with no swarm: {} holds a live host file",
+        host_file().display()
+    );
+}
+
+/// Every trace of both projects: slots, images, bare repos, logs, host file, scratch.
 fn clean() {
     let listing = Command::new("podman")
         .args([
             "ps",
             "--all",
             "--format={{.ID}} {{.ImageID}}",
-            &format!("--filter=name=^scswarm-{PROJECT}-"),
+            &format!("--filter=name={SLOT_NAMES}"),
         ])
         .output()
         .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
@@ -580,15 +687,17 @@ fn clean() {
         }
     }
     let swarm = home().join("swarm");
-    for dir in [
-        swarm.join(format!("{PROJECT}.git")),
-        swarm.join("slot").join(PROJECT),
-        swarm.join("log").join(PROJECT),
-        swarm.join("build").join(PROJECT),
-        scratch(),
-    ] {
-        let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(swarm.join("slot"));
+    for project in [PROJECT, SECOND] {
+        for dir in [
+            swarm.join(format!("{project}.git")),
+            swarm.join("log").join(project),
+            swarm.join("build").join(project),
+        ] {
+            let _ = fs::remove_dir_all(dir);
+        }
     }
+    let _ = fs::remove_dir_all(scratch());
     let _ = fs::remove_file(host_file());
     for (name, _) in [CREDENTIAL, EXTRA] {
         let _ = fs::remove_file(credential_dir().join(name));
@@ -657,7 +766,12 @@ fn scratch() -> PathBuf {
 }
 
 fn host_file() -> PathBuf {
-    config().join(format!("{PROJECT}.yaml"))
+    config().join("host.yaml")
+}
+
+/// Row as event lines name it.
+fn label(row: &str) -> String {
+    format!("{PROJECT}/{row}")
 }
 
 fn credential_dir() -> PathBuf {

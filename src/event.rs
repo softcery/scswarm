@@ -2,19 +2,27 @@ use std::collections::BTreeSet;
 use std::fmt::Display;
 
 use crate::error::Error;
+use crate::paths::Project;
 
 /// Sole writer of `serve` loop lines. Progress on stdout, faults on stderr.
 /// journald stamps each line, so none carries a time field.
-pub fn fetch(track: &str, tip: &str, to: &str) {
-    println!("fetch track={track} tip={} to={}", short(tip), short(to));
+pub fn fetch(project: &Project, track: &str, tip: &str, to: &str) {
+    println!(
+        "fetch project={project} track={track} tip={} to={}",
+        short(tip),
+        short(to)
+    );
 }
 
-pub fn open(track: &str, to: &str, sha: &str) {
-    println!("open track={track} to={to} sha={}", short(sha));
+pub fn open(project: &Project, track: &str, to: &str, sha: &str) {
+    println!(
+        "open project={project} track={track} to={to} sha={}",
+        short(sha)
+    );
 }
 
-pub fn mirror(refs: usize) {
-    println!("mirror refs={refs}");
+pub fn mirror(project: &Project, refs: usize) {
+    println!("mirror project={project} refs={refs}");
 }
 
 pub fn assign(key: impl Display, slot: usize) {
@@ -66,7 +74,7 @@ pub fn remove(slot: usize) {
 pub struct Latch(BTreeSet<String>);
 
 impl Latch {
-    pub fn report(&mut self, faults: &[Error], emit: fn(&Error)) {
+    pub fn report(&mut self, faults: &[Error], emit: impl Fn(&Error)) {
         let causes: BTreeSet<String> = faults.iter().map(Error::to_string).collect();
         for why in faults {
             if !self.0.contains(&why.to_string()) {
@@ -77,9 +85,9 @@ impl Latch {
     }
 }
 
-/// Cycle or track passed over.
-pub fn skip(why: &Error) {
-    eprintln!("skip cause={why}");
+/// Project or track passed over this cycle.
+pub fn skip(project: &Project, why: &Error) {
+    eprintln!("skip project={project} cause={why}");
 }
 
 /// Host file unreadable: loop runs on last good copy.

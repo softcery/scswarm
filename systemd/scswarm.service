@@ -1,0 +1,17 @@
+[Unit]
+Description=scswarm autonomous task swarm
+After=default.target
+
+[Service]
+Type=simple
+# Host file: %h/.config/scswarm/host.yaml
+# Credentials: %h/.config/scswarm/credentials/, one file per name in `set`
+ExecStart=%h/.cargo/bin/scswarm serve
+Restart=always
+RestartSec=5
+# Stop and restart end `serve` alone: rows in flight finish on their workers.
+# Hard stop: systemctl --user kill --kill-whom=all scswarm
+KillMode=process
+
+[Install]
+WantedBy=default.target

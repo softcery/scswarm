@@ -88,50 +88,57 @@ Step kinds:
 - Step errors name the step number and field: ``track `laser` SWARM.yaml row `rag-04-retriever`: field `steps` step 4: field `timeout` must be seconds, 1 or more, or stay absent``.
 - Row removed = row gone from swarm. Its commits stay on `to`; branch and land ref stay until `reset`.
 
-## `<project>.yaml`
+## `host.yaml`
 
-Host file, one per project, at `${XDG_CONFIG_HOME:-~/.config}/scswarm/<project>.yaml`. Project
-name = file stem, ascii letters, digits, `.`, `_`, `-`.
+Host file, one per unix user, at `${XDG_CONFIG_HOME:-~/.config}/scswarm/host.yaml`. One user runs one swarm.
 
 ```yaml
-remote: git@github.com:org/alpha.git
-tracks: track/
 workers: 3
-mounts:
-  - ~/alpha/records:/records
-  - ~/.cargo/registry:/cargo/registry
 devices:
   - /dev/dri
-env:
-  - match: ai-*
-    names: [AI_TEAM_CLAUDE_TOKEN]
-  - match: "*"
-    names: [ANTHROPIC_API_KEY]
 poll: 5
+projects:
+  alpha:
+    remote: git@github-alpha:org/alpha.git
+    tracks: track/
+    fetch: 60
+    mounts:
+      - ~/cache/alpha/records:/records
+      - ~/cache/alpha/cargo:/cargo/registry
+    env:
+      - match: ai-*
+        set: { ANTHROPIC_AUTH_TOKEN: ALPHA_AI_KEY }
+      - match: "*"
+        set: { ANTHROPIC_BASE_URL: RELAY_URL, ANTHROPIC_AUTH_TOKEN: ALPHA_KEY }
+  beta:
+    remote: git@github-beta:org/beta.git
+    tracks: track/
 ```
 
-- `remote`: git URL or repo path the bare repo fetches from and pushes to. A leading `~/` reads as home. Push needs a deploy key or token on the host, never in a container.
+- `workers`: slot count, shared by every project. One worktree, one container each.
+- `devices`: host device paths, absolute. A folder stands for each device node under it, symlinks skipped. Each node passes as `--device` at the same path, into every project's containers. A GPU rides here. A bind in `mounts` cannot carry a device: the `z` relabel of a device node fails.
+- `poll`: seconds between scheduler cycles, 1 or more. Absent = 5. A cycle reads local refs; fetch runs on its own clock.
+- `projects`: one entry per repo. Key = project name: ascii lowercase letters, digits, `.`, `_`, `-`. It names the bare repo, the build lock and the log dir. Absent = none.
+- `remote`: git URL or repo path the bare repo fetches from and pushes to. A leading `~/` reads as home. Push needs a deploy key or token on the host, never in a container. GitHub binds a deploy key to one repo: an ssh host alias per repo, for example `github-alpha`, picks its key.
 - `tracks`: branch name prefix of every track branch. Any text that makes a branch name git takes.
-- `workers`: slot count. One worktree, one container each.
-- `mounts`: extra `host:container` binds, rw. Both sides absolute; host side takes `~/` for home. Build caches ride here.
-- `devices`: host device paths, absolute. A folder stands for each device node under it, symlinks skipped. Each node passes as `--device` at the same path. A GPU rides here. A bind in `mounts` cannot carry a device: the `z` relabel of a device node fails.
-- `env`: ordered rules. `match` is a glob on track names, `*` for any run of characters. The first rule that matches names the credentials forwarded into each container of that track's rows, as environment variables. No match: none. Value never reaches an argument list.
-- `poll`: seconds between loop cycles, 1 or more. Absent = 5.
+- `fetch`: seconds between fetches of `remote`, 1 or more. Absent = 60. A fetch brings human input alone: tracks, `from`, commits on `to`. A worker's push of `to` moves the remote-tracking ref itself. A new track waits up to `fetch` seconds for its first row.
+- `mounts`: extra `host:container` binds, rw, into this project's containers alone. Both sides absolute; host side takes `~/` for home. Build caches ride here. A host path inside, or holding, a host path of another project's `mounts` fails the file: two projects share no writable path.
+- `env`: ordered rules. `match` is a glob on track names, `*` for any run of characters. The first rule that matches binds credentials into each container of that track's rows: `set` maps an environment variable name to a credential name. Both take letters, digits, `_`. No match: none. Value never reaches an argument list.
 - These fields cannot sit in a repo: `remote` and `tracks` say where repo text comes from, `env` keeps one team's key from another team's track, and the rest changes with the machine.
-- Every field reloads on the next cycle.
-- `serve` converges slots each cycle, at start too: drops each idle slot at or above `workers`, and frees the branch of each idle slot below it once per `serve` life. A busy slot drops after its row ends. The worker makes the worktree of its slot and the container. It remakes the container when it differs from the row in `mounts`, device nodes or image ID. A GPU node renumbered at boot remakes it at the next row. `init` writes no slot.
-- `env` names and credential values apply from the next row on. No container bakes them.
+- Every field reloads on the next cycle. A project added opens on the next cycle: bare repo, `origin`, fetch, then the land and fail refs of the remote. A project removed stops scheduling; its rows in flight run on.
+- `serve` converges slots each cycle, at start too: drops each idle slot at or above `workers`, and frees the branch of each idle slot below it once per `serve` life. A busy slot drops after its row ends. The worker makes the worktree of its slot and the container. It remakes the worktree when the row's project differs, and the container when it differs from the row in `mounts`, device nodes, image ID or bare repo. A GPU node renumbered at boot remakes it at the next row.
+- `env` bindings and credential values apply from the next row on. No container bakes them.
 - Absent or unparsable at start: exit 1. Unparsable later: `serve` reports `stale` once per cause, keeps the last good copy, keeps running.
 
 ## Credentials
 
-Directory `${XDG_CONFIG_HOME:-~/.config}/scswarm/credentials/`, shared by every project of the machine. One file per credential: file name = name in `env`, contents = value.
+Directory `${XDG_CONFIG_HOME:-~/.config}/scswarm/credentials/`, shared by every project of the user. One file per credential: file name = credential name in `set`, contents = value. Two projects can bind one credential, for example a relay URL: agents read credentials, never write them.
 
 - The directory must grant group and others nothing: mode `0700`.
 - One trailing `\n` strips. Other bytes pass as is.
 - Sole source: the `serve` environment carries no credential.
-- `serve`, each cycle, checks the directory mode and one regular file per name the track's `env` rule lists. It reads no value. A track that fails skips with `skip`, as a track check; the others run. A track with no names needs no directory.
-- The worker reads the values of its row's names at row start. A file gone since the check: exit 2, no fail mark.
+- `serve`, each cycle, checks the directory mode and one regular file per credential the track's `env` rule binds. It reads no value. A track that fails skips with `skip`, as a track check; the others run. A track with no names needs no directory.
+- The worker reads the values of its row's credentials at row start. A file gone since the check: exit 2, no fail mark.
 - Errors name the directory or the credential, never the value.
 
 ## `scswarm.yaml`
@@ -164,10 +171,10 @@ merge:
 
 ## Git
 
-- Remote: `remote` of the host file. Humans push `from` branches, track branches, and commits on `to`. The tool pushes `to`, land refs and fail refs.
+- Remote: `remote` of the project entry. Humans push `from` branches, track branches, and commits on `to`. The tool pushes `to`, land refs and fail refs.
 - Workers and `reset` write land refs and fail refs in the bare repo alone. `serve`, each cycle they changed since its last push, and `reset`, when done, push `refs/swarm/*` with force and prune: the remote then holds exactly the bare repo's set.
-- Bare repo `~/swarm/<project>.git`, `origin` = `remote`, refspec `+refs/heads/*:refs/remotes/origin/*`: the layout of any clone. `init` writes it; `serve` writes it when `remote` changes, and again after a failed fetch, so a hand-edited bare repo heals. A failed fetch reports `skip` and costs one cycle. `status` reads the last fetch.
-- `init` on a new bare repo fetches the land refs and fail refs of the remote once. Without that fetch, the first push of `refs/swarm/*` deletes them on the remote.
+- Bare repo `~/swarm/<project>.git`, `origin` = `remote`, refspec `+refs/heads/*:refs/remotes/origin/*`: the layout of any clone. `serve` makes it on first sight of the project, writes `origin` when `remote` changes, and again after a failed fetch, so a hand-edited bare repo heals. A failed fetch reports `skip` for that project and costs it one cycle; other projects run. `status` reads the last fetch.
+- A new bare repo fetches the land refs and fail refs of the remote once, before any mirror. Without that fetch, the first push of `refs/swarm/*` deletes them on the remote. The repo grows at `~/swarm/<project>.git.partial` and takes its name once that fetch lands, so a fault leaves no half-made repo.
 - `serve` makes each absent `to` at `at`, or at the `from` tip, and pushes it.
 
 | Ref | Holds | Where |
@@ -184,7 +191,7 @@ merge:
 - Merge conflict: `merge` steps get one try in the conflicted worktree, in the row session. The first commit step closes the merge. Merge commits get no ref. Transcript: `merge`.
 - No `merge` block, a failed merge session, or a conflict left after it: the tool aborts the merge and reports the files. The row fails.
 - A `git merge` error with no `MERGE_HEAD` is git failing, not a conflict: no `merge` steps run.
-- Worktree per slot: `~/swarm/slot/<project>/<n>`. Never inside a checkout.
+- Worktree per slot: `~/swarm/slot/<n>/tree`, of the project its last row ran. Never inside a checkout. A row of another project drops it, ignored files included, and adds one from its own bare repo.
 - A slot detaches its worktree when a row ends or fails, and again when `serve` attaches it. A branch left checked out by a crash blocks every other slot.
 - One commit per commit step, no trailer. The host stages with `add --all`: ignored files miss every commit. A commit step with no diff commits empty, so state still moves.
 - The land ref is the sole record of finished work: no commit message carries state.
@@ -208,33 +215,36 @@ merge:
 
 | Lock | Directory | Holder | `serve` while held |
 |---|---|---|---|
-| slot | `~/swarm/slot/<project>/<n>` | worker, whole life | no release, drop or assign |
+| slot | `~/swarm/slot/<n>`, parent of the worktree it moves | worker, whole life | no release, drop or assign |
 | row | `~/swarm/log/<project>/<track>/<id>/` | `serve` takes it before spawn, worker inherits it as stdin and holds it to exit | no assign; the row reads `running`. Held from spawn, so no restart of `serve` reads the row free while its worker lives |
-| project | `~/swarm/<project>.git` | `serve`, whole life | a second `serve` exits 2 |
+| swarm | `~/swarm` | `serve`, whole life | a second `serve` exits 2 |
 | remote | `~/swarm/<project>.git/refs` | each fetch and push, for its length | fetch waits |
 | build | `~/swarm/build/<project>` | worker, for its image build | none: workers alone take it. Builds run one at a time, so a second build of one Containerfile hits the cache and gets the same image ID |
 
 ## CLI
 
-`PROJECT` = stem of the host file. The working directory carries meaning for `status --tracks` alone. `ROW` = `<track>/<id>`.
+`PROJECT` = key of the host file `projects`. The working directory carries meaning for `status --tracks` alone. `ROW` = `<track>/<id>`.
 
 ```
-scswarm init PROJECT            bare repo, origin, first fetch; safe while `serve` runs
-scswarm serve PROJECT           foreground loop; run under systemd or launchd
-scswarm status PROJECT          one line per row of every track: row, state, branch, worker
+scswarm serve                   foreground loop over every project; run under systemd or launchd
+scswarm status [PROJECT]        one line per row of every track: project, row, state, branch,
+                                  worker; every project when none is named
                                   state: waiting, queued, running, failed, pushed, merged
 scswarm status --tracks PREFIX  same, read from the clone in the working directory; that
-                                  clone fetches +refs/swarm/*:refs/swarm/*. Running reads as queued
+                                  clone fetches +refs/swarm/*:refs/swarm/*. Running reads as
+                                  queued, project reads `-`
 scswarm log PROJECT ROW         transcript, one block per try or commit: prompt, command or commit
                                   message, then reply, stdout, stderr, faults
 scswarm reset PROJECT ROW       delete swarm/<track>/<id>, every dependant branch, their land refs
                                   and fail refs, here, then on the remote
 scswarm work PROJECT --slot N --track NAME --row ID --track-tip SHA --base SHA
-             [--env NAME]... [--mount HOST:GUEST]... [--device PATH]...
+             [--env VAR=FILE]... [--mount HOST:GUEST]... [--device PATH]...
                                 internal, hidden from --help: one row attempt; `serve` spawns one
                                   per assignment. Reads the track file at the track tip, config at
-                                  the base, branches from the base, forwards each NAME
+                                  the base, branches from the base, binds each credential FILE as VAR
 ```
+
+Event lines name a row `<project>/<track>/<id>`, and a project fault `skip project=<project>`.
 
 Exit codes: 0 ok, 1 input invalid (host file, track file, config, unknown row), 2 git or podman failure. `serve` exits 1 only on a host file invalid at start: an invalid track or config skips that track. `work` exits 0 once it pushes the row or writes the fail refs, 2 on a git or podman failure. A worker exit other than 0 exits `serve` 2.
 
@@ -242,11 +252,11 @@ Exit codes: 0 ok, 1 input invalid (host file, track file, config, unknown row), 
 
 `serve` spawns each worker with stdout and stderr shared, so worker lines reach the same journal, also after `serve` dies. A worker whose `serve` died runs to its end; the process manager reaps it. `systemctl stop` and `restart` end `serve` alone under the shipped unit, `KillMode=process`: rows in flight finish, no new row starts. The shipped launchd agent does the same through `AbandonProcessGroup`, for `launchctl kickstart -k` and `bootout`.
 
-Scheduling: each idle slot takes a queued row. Highest `priority` first; among tracks of equal priority, the track with fewest rows running, so tracks take turns; file order inside a track. No preemption.
+Scheduling: each idle slot, lowest number first, takes a queued row. The project with fewest rows running first, so projects take turns; inside it, highest `priority`; among tracks of equal priority, the track with fewest rows running, so tracks take turns; file order inside a track. No preemption. `priority` never reaches across projects.
 
 ## Container
 
-Rootless podman, `--userns=keep-id`, one long-lived container per slot, named `scswarm-<project>-<n>`. It sleeps; every try of a prompt, `run` or agent commit step is one `podman exec`, then `podman restart --time=0`. The restart kills every process the try left, so a background job never reaches the next step or the commit. The worker restarts the container before each row, so a process a dead worker left inside never reaches the next row. Mounts: slot worktree rw at same path, bare repo ro at same path, `mounts` rw. Every bind carries the `z` flag, so an SELinux host relabels it shared. `devices` pass as `--device`, with no relabel. Credentials arrive as `--env=NAME`, values in the podman environment. Network on. Agent runs with its own permission checks off.
+Rootless podman, `--userns=keep-id`, one long-lived container per slot, named `scswarm-<n>`. It sleeps; every try of a prompt, `run` or agent commit step is one `podman exec`, then `podman restart --time=0`. The restart kills every process the try left, so a background job never reaches the next step or the commit. The worker restarts the container before each row, so a process a dead worker left inside never reaches the next row. Mounts: slot worktree rw at same path, the row's bare repo ro at same path, the project's `mounts` rw. Every bind carries the `z` flag, so an SELinux host relabels it shared. `devices` pass as `--device`, with no relabel. Credentials arrive as `--env=VAR`, values in the podman environment. Network on. Agent runs with its own permission checks off.
 
 Git inside the container is read-only: the index sits under the bare repo. `git status`, `git log`, `git diff` work. `git add`, `git mv`, `git commit`, `git checkout` fail with `Read-only file system`. Host stages every change with `add --all` at each commit step, so a plain `mv` lands. Project prompts and command files must not ask the agent for a git write.
 
@@ -266,7 +276,7 @@ Image: `image` names a Containerfile at the base, built with no tag and run by I
 - Rows of tracks with different images run on different images at once. A slot that switches image remakes its container.
 - The worker builds the image for every row. A Containerfile with `COPY . .` rebuilds for every row. Builds of one project wait on each other, so a slot can wait on another slot's build. Built images carry no tag and stay until `podman image prune`.
 - The image build context is the base. A build that reads an untracked or ignored file fails after that file leaves the base.
-- Containers carry the `mounts` and device nodes they baked as labels. A release that changes that text remakes every container at its next row.
+- Containers carry the `mounts`, device nodes and bare repo they baked as labels. A release that changes that text remakes every container at its next row.
 - A pulled image name is not pulled again. A new push under the same tag needs `podman pull`.
 - `merged` misses squash and rebase merges: they write new commits, so the land commit is never an ancestor of `from`.
 - `reset` after a push leaves the old commits on `to`. The tool never rewrites `to`. A human reverts the row's merge commit there, `git revert -m 1`.
@@ -284,12 +294,12 @@ Image: `image` names a Containerfile at the base, built with no tag and run by I
 - A step with no `timeout` runs without limit. No cap counts tokens.
 - A podman fault inside `exec` exits 125 and counts as a failed try. A step command that exits 125 reads the same: `sh -c` passes the code through.
 - The transcript keeps full stdout and stderr of every try. Redirect big output to a file.
-- A git or podman failure in one slot stops `serve` for every track. That row replays from base; rows on other slots run on. A remote out of reach is such a failure; a remote that turns a push down fails the row.
+- A git or podman failure in one slot stops `serve` for every project. That row replays from base; rows on other slots run on. A remote out of reach is such a failure; a remote that turns a push down fails the row.
 - A kill between the failure and the fail ref write loses the mark. The row runs once more.
 - A kill between the commit and the land ref write leaves a branch the next cycle replays. A kill after the land ref write leaves a row the next cycle merges into `to`.
 - `reset` a row only while no worker runs it. A running worker recreates the refs at its next commit, and stopping `serve` stops no worker.
-- `systemctl stop` leaves rows in flight running. Hard stop: `systemctl --user kill --kill-whom=all scswarm@<project>`.
-- `launchctl bootout` leaves rows in flight running. Hard stop: `pkill -f 'scswarm work <project> '`. launchd has no command that kills an abandoned process group.
+- `systemctl stop` leaves rows in flight running. Hard stop: `systemctl --user kill --kill-whom=all scswarm`.
+- `launchctl bootout` leaves rows in flight running. Hard stop: `pkill -f 'scswarm work '`. launchd has no command that kills an abandoned process group.
 - macOS: `devices` must stay empty. Device nodes live in the podman machine VM, so the host check fails each entry.
 - macOS: `mounts` host sides must sit under a podman machine share: `/Users`, `/private`, `/var/folders` by default.
 - macOS: a Mac asleep pauses the VM. Steps in flight can hit `timeout` and spend tries.
@@ -299,9 +309,14 @@ Image: `image` names a Containerfile at the base, built with no tag and run by I
 - Rows started before an upgrade finish on the old binary. Branch, land ref and fail ref names must read the same in both versions.
 - A worker takes the slot lock after spawn. A new `serve` started before then can release that slot or run another row on it first; the worker waits for the lock, then runs. A slot dropped in that wait fails the worker with exit 2, and the row replays.
 - Locks need a local filesystem. `~/swarm` on NFS breaks flock.
-- A new bare repo leaves the slot worktrees of the old one dangling, and `serve` exits 2 on them. Delete `~/swarm/slot/<project>` with the bare repo.
+- A slot worktree whose bare repo is gone drops at its next row, with no prune: git finds no repo to prune.
 - A hung worker holds its slot until killed. Step `timeout` bounds a try; a hang outside a step, for example in git, has no bound.
 - The merge check reads `MERGE_HEAD`. An agent that commits conflict markers passes it.
-- Slot pick is the lowest idle index, so a chained row can land on a cold build cache.
+- Slot pick is the lowest idle index, so a chained row can land on a cold build cache, and a slot switches project whenever the next row asks. Each switch drops the worktree and makes a container.
+- One swarm per unix user. Shell access to that user reaches every project: bare repos, transcripts, credential files.
+- `devices` and the network reach every project's containers. GPU memory can leak between processes, for example LeftoverLocals, CVE-2023-4969.
+- Project offboarding: remove its entry, then delete `~/swarm/<project>.git`, `~/swarm/log/<project>`, `~/swarm/build/<project>`, its credential files and its `mounts` host dirs.
+- Each cycle reads every track of every project with git subprocesses. Cycle time against project count is unmeasured.
+- Unverified: GitHub limits on ssh fetches from one host. 30 projects at `fetch: 60` make 30 fetches a minute.
 - No token budget. Agent flags in `exec` carry any cap.
 - GitHub accepts `refs/swarm/*` from a write deploy key: create, fetch in a fresh clone, delete, all checked 2026-10-22, private repo on a personal account, ssh. The refs stay out of the web UI branch list. Unverified: organization repos, GitHub Enterprise, branch rulesets that target all refs, and the delete of a ref the remote lacks, which git 2.39 over a local path accepts with exit 0.

@@ -6,7 +6,7 @@ use clap::Args;
 
 use crate::board::{self, Row, Track};
 use crate::config::Config;
-use crate::credential;
+use crate::credential::{self, Binding};
 use crate::error::{Error, Result};
 use crate::event;
 use crate::git::{self, Git, Push};
@@ -46,9 +46,10 @@ pub struct Job {
     /// `to` tip: config, image, branch base.
     #[arg(long = BASE, value_name = "SHA")]
     pub base: String,
-    /// Credential names each exec gets. The worker reads the values at row start.
-    #[arg(long = ENV, value_name = "NAME")]
-    pub env: Vec<String>,
+    /// Container variable and credential name each exec gets. The worker reads
+    /// the values at row start.
+    #[arg(long = ENV, value_name = "VAR=FILE", value_parser = binding)]
+    pub env: Vec<Binding>,
     #[arg(long = MOUNT, value_name = "HOST:GUEST", value_parser = mount)]
     pub mounts: Vec<Mount>,
     /// Host device nodes, resolved.
@@ -61,7 +62,7 @@ pub struct Job {
 pub fn work(repo: &Git, project: &Project, job: &Job) -> Result<()> {
     let key = job.key();
     let _row = lock::adopt(io::stdin().as_fd(), &paths::transcripts(project, &key)?)?;
-    let dir = paths::slot(project, job.slot)?;
+    let dir = paths::slot(job.slot)?;
     fs::create_dir_all(&dir)
         .map_err(|why| Error::Failed(format!("directory {}: {why}", dir.display())))?;
     let _slot = lock::hold(&dir)?;
@@ -75,7 +76,7 @@ pub fn work(repo: &Git, project: &Project, job: &Job) -> Result<()> {
         ))
     })?;
     Attempt {
-        slot: &Slot::open(project, job.slot)?,
+        slot: &Slot::open(job.slot)?,
         repo,
         project,
         track: &track,
@@ -101,7 +102,9 @@ impl Job {
         flag(ROW, self.id.clone());
         flag(TRACK_TIP, self.track_tip.clone());
         flag(BASE, self.base.clone());
-        self.env.iter().for_each(|name| flag(ENV, name.clone()));
+        self.env
+            .iter()
+            .for_each(|binding| flag(ENV, binding.clone().into()));
         self.mounts
             .iter()
             .for_each(|bind| flag(MOUNT, bind.clone().into()));
@@ -149,7 +152,7 @@ impl Attempt<'_> {
             Ok(image) => image,
             Err(why) => return Ok(Outcome::Spent(format!("image must build: {why}"))),
         };
-        let stamp = Stamp::new(&image, &job.mounts, &job.devices)?;
+        let stamp = Stamp::new(&image, &job.mounts, &job.devices, self.repo.root())?;
         slot.prepare(
             self.repo,
             &job.base,
@@ -158,14 +161,15 @@ impl Attempt<'_> {
             &job.mounts,
             &job.devices,
         )?;
-        let mut session = Session::open(slot, &credentials, self.config, self.row, key)?;
+        let label = key.label(self.project);
+        let mut session = Session::open(slot, &credentials, self.config, self.row, &label)?;
         let land = match self.repo.commit_of(&key.land_ref())? {
             Some(land) => land,
             None => {
                 slot.checkout(&key.branch(), &job.base)?;
                 match session.play(&self.transcript(paths::RUN_LOG)?)? {
                     Outcome::Done(land) => {
-                        event::land(key);
+                        event::land(&label);
                         self.repo.ref_set(&key.land_ref(), &land)?;
                         land
                     }
@@ -208,13 +212,13 @@ impl Attempt<'_> {
         for name in &key.fail_refs() {
             repo.ref_delete(name)?;
         }
-        event::push(key, to, &head);
+        event::push(key.label(self.project), to, &head);
         Ok(Outcome::Done(()))
     }
 
     /// Track tip and `to` tip of this attempt.
     fn fail(&self, why: &str) -> Result<()> {
-        event::fail(self.key, why);
+        event::fail(self.key.label(self.project), why);
         let [on_track, on_to] = self.key.fail_refs();
         self.repo.ref_set(&on_track, &self.job.track_tip)?;
         self.repo.ref_set(&on_to, &self.against)
@@ -254,4 +258,8 @@ impl Attempt<'_> {
 
 fn mount(text: &str) -> std::result::Result<Mount, String> {
     Mount::try_from(text.to_string())
+}
+
+fn binding(text: &str) -> std::result::Result<Binding, String> {
+    Binding::try_from(text.to_string())
 }

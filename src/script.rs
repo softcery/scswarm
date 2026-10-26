@@ -5,7 +5,6 @@ use crate::credential::Credential;
 use crate::error::{Error, Result};
 use crate::event;
 use crate::slot::Slot;
-use crate::state::Key;
 use crate::step::{Outcome, Policy, Step, Steps};
 use crate::transcript::{Entry, Transcript};
 
@@ -20,7 +19,7 @@ pub struct Session<'a> {
     config: &'a Config,
     row: &'a Row,
     agent: &'a Agent,
-    /// Row key: event context.
+    /// Row label: event context.
     key: String,
     /// Session id of the agent, known from its first reply on. Spans every step.
     session: Option<String>,
@@ -39,7 +38,7 @@ impl<'a> Session<'a> {
         credentials: &'a [Credential],
         config: &'a Config,
         row: &'a Row,
-        key: &Key,
+        label: &str,
     ) -> Result<Self> {
         Ok(Self {
             slot,
@@ -47,7 +46,7 @@ impl<'a> Session<'a> {
             config,
             row,
             agent: agent(config, &row.agent)?,
-            key: key.to_string(),
+            key: label.to_string(),
             session: None,
         })
     }

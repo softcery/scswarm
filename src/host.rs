@@ -1,43 +1,54 @@
+use std::collections::BTreeMap;
 use std::fs;
+use std::path::Path;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::credential::{self, Binding};
 use crate::device;
 use crate::error::{Error, Result};
 use crate::git;
 use crate::paths::{self, Project};
 use crate::yaml;
 
-/// Seconds between loop cycles when the host file sets none.
+/// Seconds between scheduler cycles when the host file sets none.
 const POLL: u64 = 5;
+/// Seconds between fetches of one remote when its entry sets none.
+const FETCH: u64 = 60;
 /// Glob character that stands for any run of characters in `env` field `match`.
 const ANY: char = '*';
 
 /// What the swarm runs on. Only reader of the host file.
 #[derive(Debug)]
 pub struct Host {
+    pub workers: usize,
+    /// Host device nodes each container gets at the same path. Resolved at load.
+    pub devices: Vec<String>,
+    /// Pause between scheduler cycles. Reloads each cycle.
+    pub poll: Duration,
+    pub projects: BTreeMap<Project, Entry>,
+}
+
+/// One project: where its repo text comes from, what its rows get.
+#[derive(Debug)]
+pub struct Entry {
     /// Git URL or path the bare repo fetches from and pushes to. `~/` resolved.
     pub remote: String,
     /// Branch name prefix of every track branch.
     pub tracks: String,
-    pub workers: usize,
+    /// Least pause between two fetches of `remote`.
+    pub fetch: Duration,
     pub mounts: Vec<Mount>,
-    /// Host device nodes each container gets at the same path. Resolved at load.
-    pub devices: Vec<String>,
-    /// Ordered rules: the first rule whose `match` takes a track names its variables.
+    /// Ordered rules: the first rule whose `match` takes a track names its bindings.
     pub env: Vec<EnvRule>,
-    /// Pause between loop cycles. Reloads each cycle.
-    pub poll: Duration,
 }
 
-/// Credentials forwarded into the containers of every track `pattern` matches.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// Credentials bound into the containers of every track `pattern` matches.
+#[derive(Debug)]
 pub struct EnvRule {
-    #[serde(rename = "match")]
     pub pattern: String,
-    pub names: Vec<String>,
+    pub set: Vec<Binding>,
 }
 
 /// What a slot container bakes, as text. A container carries it, the worker
@@ -48,6 +59,8 @@ pub struct Stamp {
     pub image: String,
     pub mounts: String,
     pub devices: String,
+    /// Bare repo the container binds: a project switch reads as a change.
+    pub repo: String,
 }
 
 /// One bind: absolute host path, absolute container path. Both sides rw.
@@ -62,22 +75,39 @@ pub struct Mount {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Written {
-    remote: String,
-    tracks: String,
     workers: usize,
-    #[serde(default)]
-    mounts: Vec<Mount>,
     #[serde(default)]
     devices: Vec<String>,
     #[serde(default)]
-    env: Vec<EnvRule>,
-    #[serde(default)]
     poll: Option<u64>,
+    #[serde(default)]
+    projects: BTreeMap<Project, WrittenEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WrittenEntry {
+    remote: String,
+    tracks: String,
+    #[serde(default)]
+    fetch: Option<u64>,
+    #[serde(default)]
+    mounts: Vec<Mount>,
+    #[serde(default)]
+    env: Vec<WrittenRule>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WrittenRule {
+    #[serde(rename = "match")]
+    pattern: String,
+    set: BTreeMap<String, String>,
 }
 
 impl Host {
-    pub fn load(project: &Project) -> Result<Self> {
-        let file = paths::host_file(project)?;
+    pub fn load() -> Result<Self> {
+        let file = paths::host_file()?;
         let label = paths::arg(&file)?;
         let text =
             fs::read_to_string(&file).map_err(|why| Error::Invalid(format!("{label}: {why}")))?;
@@ -87,46 +117,76 @@ impl Host {
     pub fn parse(file: &str, text: &str) -> Result<Self> {
         let written: Written = yaml::parse(file, text)?;
         written.check(file)?;
-        written.settle()
+        let host = written.settle()?;
+        host.check_mounts(file)?;
+        Ok(host)
     }
 
-    /// Variables of the first rule that matches `track`. No match: none.
-    pub fn env(&self, track: &str) -> &[String] {
+    /// Entry of `project`. Exit 1 when the host file holds none.
+    pub fn entry(&self, project: &Project) -> Result<&Entry> {
+        self.projects.get(project).ok_or_else(|| {
+            Error::Invalid(format!(
+                "project `{project}` must name a key of host file field `projects`"
+            ))
+        })
+    }
+
+    /// No host path bound into two projects: a shared writable dir lets one
+    /// project's agent plant files another project's build reads.
+    fn check_mounts(&self, file: &str) -> Result<()> {
+        let binds: Vec<(&Project, usize, &Path)> = self
+            .projects
+            .iter()
+            .flat_map(|(project, entry)| {
+                entry
+                    .mounts
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, mount)| (project, index + 1, Path::new(&mount.host)))
+            })
+            .collect();
+        for (at, (one, one_entry, one_path)) in binds.iter().enumerate() {
+            for (other, other_entry, other_path) in &binds[at + 1..] {
+                if one != other
+                    && (one_path.starts_with(other_path) || other_path.starts_with(one_path))
+                {
+                    return Err(invalid(
+                        file,
+                        &format!(
+                            "field `projects.{one}.mounts` entry {one_entry} and field `projects.{other}.mounts` entry {other_entry} must not share a host path"
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Entry {
+    /// Bindings of the first rule that matches `track`. No match: none.
+    pub fn env(&self, track: &str) -> &[Binding] {
         self.env
             .iter()
             .find(|rule| matches(&rule.pattern, track))
-            .map_or(&[], |rule| &rule.names)
+            .map_or(&[], |rule| &rule.set)
     }
 }
 
 impl Stamp {
-    /// Text a container carries: image ID plus the mounts and devices it bakes.
-    pub fn new(image: &str, mounts: &[Mount], devices: &[String]) -> Result<Self> {
+    /// Text a container carries: image ID plus the mounts, devices and repo it bakes.
+    pub fn new(image: &str, mounts: &[Mount], devices: &[String], repo: &Path) -> Result<Self> {
         Ok(Self {
             image: image.to_string(),
             mounts: text(&mounts)?,
             devices: text(&devices)?,
+            repo: paths::arg(repo)?,
         })
     }
 }
 
 impl Written {
     fn check(&self, file: &str) -> Result<()> {
-        if self.remote.trim().is_empty() {
-            return Err(invalid(
-                file,
-                "field `remote` must hold a git URL or a repo path",
-            ));
-        }
-        if self.tracks.is_empty() || !git::valid_ref(&format!("{}x", self.tracks)) {
-            return Err(invalid(
-                file,
-                &format!(
-                    "field `tracks` must hold a branch name prefix git takes, not empty: {}",
-                    git::REF_RULE
-                ),
-            ));
-        }
         if self.workers == 0 {
             return Err(invalid(
                 file,
@@ -139,11 +199,6 @@ impl Written {
                 "field `poll` must be seconds, 1 or more, or stay absent",
             ));
         }
-        self.check_devices(file)?;
-        self.check_env(file)
-    }
-
-    fn check_devices(&self, file: &str) -> Result<()> {
         for (index, path) in self.devices.iter().enumerate() {
             if !path.starts_with('/') {
                 return Err(invalid(
@@ -155,37 +210,69 @@ impl Written {
                 ));
             }
         }
-        Ok(())
-    }
-
-    fn check_env(&self, file: &str) -> Result<()> {
-        let plain = |letter: char| letter.is_ascii_alphanumeric() || letter == '_';
-        for (index, rule) in self.env.iter().enumerate() {
-            let entry = format!("field `env` entry {}", index + 1);
-            if rule.pattern.is_empty() {
-                return Err(invalid(
-                    file,
-                    &format!("{entry}: field `match` must hold a track name glob"),
-                ));
-            }
-            if rule
-                .names
-                .iter()
-                .any(|name| name.is_empty() || !name.chars().all(plain))
-            {
-                return Err(invalid(
-                    file,
-                    &format!(
-                        "{entry}: field `names` must list credential names: letters, digits, `_`"
-                    ),
-                ));
-            }
+        for (project, entry) in &self.projects {
+            entry
+                .check(&format!("projects.{project}"))
+                .map_err(|what| invalid(file, &what))?;
         }
         Ok(())
     }
 
     /// Resolve home paths and device nodes once: later readers hold real paths.
     fn settle(self) -> Result<Host> {
+        Ok(Host {
+            workers: self.workers,
+            devices: device::nodes(&self.devices)?,
+            poll: Duration::from_secs(self.poll.unwrap_or(POLL)),
+            projects: self
+                .projects
+                .into_iter()
+                .map(|(project, entry)| Ok((project, entry.settle()?)))
+                .collect::<Result<_>>()?,
+        })
+    }
+}
+
+impl WrittenEntry {
+    /// `field` names the entry, for example `projects.alpha`.
+    fn check(&self, field: &str) -> std::result::Result<(), String> {
+        if self.remote.trim().is_empty() {
+            return Err(format!(
+                "field `{field}.remote` must hold a git URL or a repo path"
+            ));
+        }
+        if self.tracks.is_empty() || !git::valid_ref(&format!("{}x", self.tracks)) {
+            return Err(format!(
+                "field `{field}.tracks` must hold a branch name prefix git takes, not empty: {}",
+                git::REF_RULE
+            ));
+        }
+        if self.fetch == Some(0) {
+            return Err(format!(
+                "field `{field}.fetch` must be seconds, 1 or more, or stay absent"
+            ));
+        }
+        for (index, rule) in self.env.iter().enumerate() {
+            let entry = format!("field `{field}.env` entry {}", index + 1);
+            if rule.pattern.is_empty() {
+                return Err(format!(
+                    "{entry}: field `match` must hold a track name glob"
+                ));
+            }
+            if rule
+                .set
+                .iter()
+                .any(|(var, file)| !credential::plain(var) || !credential::plain(file))
+            {
+                return Err(format!(
+                    "{entry}: field `set` must map variable names to credential names: letters, digits, `_`"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn settle(self) -> Result<Entry> {
         let mounts = self
             .mounts
             .into_iter()
@@ -196,14 +283,24 @@ impl Written {
                 })
             })
             .collect::<Result<Vec<Mount>>>()?;
-        Ok(Host {
+        let env = self
+            .env
+            .into_iter()
+            .map(|rule| EnvRule {
+                pattern: rule.pattern,
+                set: rule
+                    .set
+                    .into_iter()
+                    .map(|(var, file)| Binding { var, file })
+                    .collect(),
+            })
+            .collect();
+        Ok(Entry {
             remote: paths::expand(&self.remote)?,
             tracks: self.tracks,
-            workers: self.workers,
+            fetch: Duration::from_secs(self.fetch.unwrap_or(FETCH)),
             mounts,
-            devices: device::nodes(&self.devices)?,
-            env: self.env,
-            poll: Duration::from_secs(self.poll.unwrap_or(POLL)),
+            env,
         })
     }
 }
@@ -273,38 +370,53 @@ fn invalid(file: &str, what: &str) -> Error {
 mod tests {
     use super::*;
 
-    const FILE: &str = "/home/dev/.config/scswarm/alpha.yaml";
+    const FILE: &str = "/home/dev/.config/scswarm/host.yaml";
 
     const EXAMPLE: &str = "\
-remote: git@github.com:org/alpha.git
-tracks: track/
 workers: 3
-mounts:
-  - ~/alpha/records:/records
 devices:
   - /dev/null
-env:
-  - match: ai-*
-    names: [AI_TOKEN]
-  - match: '*'
-    names: [ANTHROPIC_API_KEY]
+projects:
+  alpha:
+    remote: git@github.com:org/alpha.git
+    tracks: track/
+    fetch: 30
+    mounts:
+      - ~/alpha/records:/records
+    env:
+      - match: ai-*
+        set: { ANTHROPIC_AUTH_TOKEN: ALPHA_AI_KEY }
+      - match: '*'
+        set: { ANTHROPIC_AUTH_TOKEN: ALPHA_KEY }
+  beta:
+    remote: git@github.com:org/beta.git
+    tracks: track/
+    mounts:
+      - /cache/beta:/cache
 ";
+
+    fn alpha() -> Project {
+        Project::try_from("alpha").expect("name must parse")
+    }
 
     #[test]
     fn parses_contract_example() {
         let host = Host::parse(FILE, EXAMPLE).expect("example must parse");
-        assert_eq!(host.remote, "git@github.com:org/alpha.git");
-        assert_eq!(host.tracks, "track/");
         assert_eq!(host.workers, 3);
-        assert_eq!(host.mounts[0].guest, "/records");
         assert_eq!(host.devices, ["/dev/null"]);
+        assert_eq!(host.poll, Duration::from_secs(POLL));
+        let alpha = host.entry(&alpha()).expect("alpha must stand");
+        assert_eq!(alpha.remote, "git@github.com:org/alpha.git");
+        assert_eq!(alpha.fetch, Duration::from_secs(30));
+        assert_eq!(alpha.mounts[0].guest, "/records");
     }
 
     #[test]
-    fn first_matching_rule_names_the_variables() {
+    fn first_matching_rule_names_the_bindings() {
         let host = Host::parse(FILE, EXAMPLE).expect("example must parse");
-        assert_eq!(host.env("ai-search"), ["AI_TOKEN"]);
-        assert_eq!(host.env("net"), ["ANTHROPIC_API_KEY"]);
+        let alpha = host.entry(&alpha()).expect("alpha must stand");
+        assert_eq!(alpha.env("ai-search")[0].file, "ALPHA_AI_KEY");
+        assert_eq!(alpha.env("net")[0].file, "ALPHA_KEY");
         assert!(matches("a*b*c", "axxbyyc"));
         assert!(!matches("a*b", "ab-c"));
         assert!(!matches("net", "network"));
@@ -312,10 +424,20 @@ env:
 
     #[test]
     fn names_the_bad_field() {
-        let text = EXAMPLE.replace("tracks: track/", "tracks: two words/");
+        let text = EXAMPLE.replace("tracks: track/\n    fetch", "tracks: two words/\n    fetch");
         let why = Host::parse(FILE, &text)
             .expect_err("a prefix with a space must fail")
             .to_string();
-        assert!(why.contains("field `tracks`"), "{why}");
+        assert!(why.contains("field `projects.alpha.tracks`"), "{why}");
+    }
+
+    #[test]
+    fn refuses_a_host_path_two_projects_share() {
+        let text = EXAMPLE.replace("/cache/beta:/cache", "~/alpha:/cache");
+        let why = Host::parse(FILE, &text)
+            .expect_err("a shared host path must fail")
+            .to_string();
+        assert!(why.contains("`projects.alpha.mounts` entry 1"), "{why}");
+        assert!(why.contains("`projects.beta.mounts` entry 1"), "{why}");
     }
 }

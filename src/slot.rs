@@ -1,11 +1,12 @@
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::event;
 use crate::git::Git;
 use crate::host::{Mount, Stamp};
-use crate::paths::{self, Project};
+use crate::paths;
 use crate::podman::{self, Container, Spec};
 use crate::step::Outcome;
 
@@ -14,36 +15,41 @@ const WORKTREE_LINK: &str = ".git";
 /// One try at a conflicted merge.
 pub type Resolve<'a> = dyn FnMut() -> Result<Outcome<()>> + 'a;
 
-/// Worker slot: worktree outside any checkout, container over it.
+/// Worker slot: worktree outside any checkout, container over it. Takes rows of
+/// any project; the worktree moves to the repo of each row.
 pub struct Slot {
     git: Git,
     path: PathBuf,
     container: Container,
-    project: Project,
     index: usize,
 }
 
-/// Slot numbers with a worktree directory or a container.
-pub fn indices(project: &Project) -> Result<BTreeSet<usize>> {
-    let mut held: BTreeSet<usize> = paths::slot_dirs(project)?.into_iter().collect();
-    held.extend(podman::slots(project)?.into_keys());
+/// Slot numbers with a slot dir or a container.
+pub fn indices() -> Result<BTreeSet<usize>> {
+    let mut held: BTreeSet<usize> = paths::slot_dirs()?.into_iter().collect();
+    held.extend(podman::slots()?.into_keys());
     Ok(held)
 }
 
-/// Drop container and worktree of one slot. Either may be absent.
-pub fn remove(repo: &Git, project: &Project, index: usize) -> Result<()> {
-    podman::remove(project, index)?;
-    repo.worktree_remove(&paths::slot(project, index)?)
+/// Drop container, worktree and slot dir of one slot. Any may be absent.
+pub fn remove(index: usize) -> Result<()> {
+    podman::remove(index)?;
+    Slot::open(index)?.drop_tree()?;
+    let dir = paths::slot(index)?;
+    match dir.exists() {
+        true => fs::remove_dir_all(&dir)
+            .map_err(|why| Error::Failed(format!("slot {}: {why}", dir.display()))),
+        false => Ok(()),
+    }
 }
 
 impl Slot {
-    pub fn open(project: &Project, index: usize) -> Result<Self> {
-        let path = paths::slot(project, index)?;
+    pub fn open(index: usize) -> Result<Self> {
+        let path = paths::tree(index)?;
         Ok(Self {
             git: Git::at(path.clone()),
             path,
-            container: Container::slot(project, index),
-            project: project.clone(),
+            container: Container::slot(index),
             index,
         })
     }
@@ -58,11 +64,11 @@ impl Slot {
 
     /// Stamp of the container standing on this slot. `None` when absent.
     pub fn stamp(&self) -> Result<Option<Stamp>> {
-        podman::stamp(&self.project, self.index)
+        podman::stamp(self.index)
     }
 
-    /// Worktree, then a container carrying `stamp`: the standing one restarted, so
-    /// no process a dead worker left reaches this row, else made again.
+    /// Worktree of `repo`, a foreign one dropped with its ignored files. Then the
+    /// container: restarted if it carries `stamp`, else made again.
     pub fn prepare(
         &self,
         repo: &Git,
@@ -72,7 +78,8 @@ impl Slot {
         mounts: &[Mount],
         devices: &[String],
     ) -> Result<()> {
-        if !self.path.join(WORKTREE_LINK).exists() {
+        if self.owner()? != Some(paths::real(repo.root())) {
+            self.drop_tree()?;
             repo.worktree_add(&self.path, base)?;
         }
         if standing.as_ref() == Some(stamp) {
@@ -124,13 +131,33 @@ impl Slot {
 
     /// Free the branch for another slot. No worktree: nothing to free.
     pub fn release(&self) -> Result<()> {
-        match self.path.join(WORKTREE_LINK).exists() {
-            true => self.git.detach(),
-            false => Ok(()),
+        match self.owner()? {
+            Some(_) => self.git.detach(),
+            None => Ok(()),
         }
     }
 
     pub fn commit(&self, message: &str) -> Result<String> {
         self.git.commit(message)
+    }
+
+    /// Repo that owns the worktree. `None`: no worktree, or its repo is gone.
+    fn owner(&self) -> Result<Option<PathBuf>> {
+        match self.path.join(WORKTREE_LINK).exists() {
+            true => self.git.owner(),
+            false => Ok(None),
+        }
+    }
+
+    /// Worktree dir, then its registration in the owner. Owner gone: dir alone.
+    fn drop_tree(&self) -> Result<()> {
+        if let Some(owner) = self.owner()? {
+            return Git::at(owner).worktree_remove(&self.path);
+        }
+        match self.path.exists() {
+            true => fs::remove_dir_all(&self.path)
+                .map_err(|why| Error::Failed(format!("worktree {}: {why}", self.path.display()))),
+            false => Ok(()),
+        }
     }
 }

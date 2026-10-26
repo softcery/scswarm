@@ -16,20 +16,21 @@ The slot container is the only boundary. Source: `src/podman.rs`.
 |---|---|
 | slot worktree | read-write |
 | bare repo (gitdir) | read-only |
-| each `mounts` entry of the host file | read-write |
+| each `mounts` entry of the row's project | read-write |
 | each `devices` entry of the host file | passed as `--device` |
-| each `env` name of the host file | value visible to every process |
+| each credential the row's `env` rule binds | value visible to every process |
 | network | podman default: outbound open |
 
 Facts that follow from the table:
 
 - The container runs rootless with `--userns=keep-id`. Files it writes on a bind belong to your host user.
 - An agent can read every forwarded `env` value and send it out over the network. Forward only credentials scoped to the agent.
-- A `mounts` entry shared by all slots, for example a cargo registry, lets one row change what the next row builds with.
+- A `mounts` entry shared by the slots of one project, for example a cargo registry, lets one row change what the next row of that project builds with. The host file refuses a host path in the `mounts` of two projects.
+- Projects share one unix user, the network and `devices`. A container escape reaches every project. For a stronger wall, run one swarm per user or per VM.
 - The agent never writes git refs. The host commits the worktree. The gitdir mounts read-only, so the agent cannot add a hook or change git config.
 - Agent permission flags, for example `--dangerously-skip-permissions`, come from `exec` in your `scswarm.yaml`. scswarm adds none.
 - Review each `to` branch before you merge it. A merge runs nothing, but your next build runs the agent's code on the host.
-- The host pushes `to` and `refs/swarm/*` with its own deploy key or token. No container sees it. Scope it to one repo.
+- The host pushes `to` and `refs/swarm/*` with its own deploy key or token. No container sees it. Scope it to one repo: one key per project.
 - A track names its `from` and `to`. Branch push rights on the remote decide who can point rows at which branch.
 
 ## Out of scope

@@ -7,7 +7,7 @@ use serde::Deserialize;
 use crate::credential::Credential;
 use crate::error::{Error, Result};
 use crate::host::{Mount, Stamp};
-use crate::paths::{self, Project};
+use crate::paths;
 use crate::proc;
 
 const BIN: &str = "podman";
@@ -28,6 +28,7 @@ const INIT: &str = "--init";
 /// Host file field the container bakes. `serve` reads it back and compares.
 const MOUNTS_LABEL: &str = "scswarm.mounts";
 const DEVICES_LABEL: &str = "scswarm.devices";
+const REPO_LABEL: &str = "scswarm.repo";
 
 /// What a build or pull gave: image ID, or the last line podman printed on failure.
 pub type Made = std::result::Result<String, String>;
@@ -48,10 +49,8 @@ pub struct Spec<'a> {
 }
 
 impl Container {
-    pub fn slot(project: &Project, index: usize) -> Self {
-        Self {
-            name: name(project, index),
-        }
+    pub fn slot(index: usize) -> Self {
+        Self { name: name(index) }
     }
 
     /// Drop container of this name, create and start from `spec`.
@@ -83,6 +82,7 @@ impl Container {
             format!("--workdir={worktree}"),
             format!("--label={MOUNTS_LABEL}={}", spec.stamp.mounts),
             format!("--label={DEVICES_LABEL}={}", spec.stamp.devices),
+            format!("--label={REPO_LABEL}={}", spec.stamp.repo),
             bind(&worktree, &worktree, WRITE),
             bind(&repo, &repo, READ),
         ];
@@ -114,8 +114,8 @@ impl Container {
     }
 }
 
-/// Slot number and stamp per project container, running or not.
-pub fn slots(project: &Project) -> Result<BTreeMap<usize, Stamp>> {
+/// Slot number and stamp per slot container, running or not.
+pub fn slots() -> Result<BTreeMap<usize, Stamp>> {
     let listing = proc::run(
         BIN,
         here(),
@@ -128,18 +128,18 @@ pub fn slots(project: &Project) -> Result<BTreeMap<usize, Stamp>> {
     )?;
     let held: Vec<Listed> = serde_json::from_str(&listing)
         .map_err(|why| Error::Failed(format!("podman ps: reply must hold json: {why}")))?;
-    let prefix = format!("{NAME}-{project}-");
+    let prefix = format!("{NAME}-");
     Ok(held.iter().filter_map(|one| one.slot(&prefix)).collect())
 }
 
 /// Stamp the container of one slot carries. `None` when absent.
-pub fn stamp(project: &Project, index: usize) -> Result<Option<Stamp>> {
-    Ok(slots(project)?.remove(&index))
+pub fn stamp(index: usize) -> Result<Option<Stamp>> {
+    Ok(slots()?.remove(&index))
 }
 
 /// Drop the container of one slot. Does nothing when absent.
-pub fn remove(project: &Project, index: usize) -> Result<()> {
-    drop_container(&name(project, index))
+pub fn remove(index: usize) -> Result<()> {
+    drop_container(&name(index))
 }
 
 pub fn image_exists(image: &str) -> Result<bool> {
@@ -203,8 +203,8 @@ struct Listed {
 }
 
 impl Listed {
-    /// Slot number and stamp of a project container. Match is text: podman reads
-    /// `--filter name=` as regex, so project `a.b` would match `axb` too.
+    /// Slot number and stamp of a slot container. Match is text: podman reads
+    /// `--filter name=` as regex. A name with more than a number after the prefix is no slot.
     fn slot(&self, prefix: &str) -> Option<(usize, Stamp)> {
         let index = self
             .names
@@ -221,6 +221,7 @@ impl Listed {
             image: bare_id(&self.image),
             mounts: label(MOUNTS_LABEL),
             devices: label(DEVICES_LABEL),
+            repo: label(REPO_LABEL),
         };
         Some((index, stamp))
     }
@@ -243,8 +244,8 @@ fn bare_id(id: &str) -> String {
     id.strip_prefix(DIGEST).unwrap_or(id).to_string()
 }
 
-fn name(project: &Project, index: usize) -> String {
-    format!("{NAME}-{project}-{index}")
+fn name(index: usize) -> String {
+    format!("{NAME}-{index}")
 }
 
 fn drop_container(name: &str) -> Result<()> {
@@ -286,8 +287,7 @@ mod tests {
 
     #[test]
     fn reaps_with_init_and_binds_worktree_rw_repo_ro() {
-        let project = Project::try_from("alpha").expect("name must parse");
-        let container = Container::slot(&project, 2);
+        let container = Container::slot(2);
         let mounts = [Mount {
             host: "/records".to_string(),
             guest: "/mnt".to_string(),
@@ -296,6 +296,7 @@ mod tests {
             image: "swarm:latest".to_string(),
             mounts: "[\"/records:/mnt\"]".to_string(),
             devices: "[\"/dev/dri\"]".to_string(),
+            repo: "/repo.git".to_string(),
         };
         let args = container
             .run_args(&Spec {
@@ -307,7 +308,7 @@ mod tests {
             })
             .expect("utf-8 paths must build arguments");
         let holds = |arg: &str| args.iter().any(|held| held == arg);
-        assert!(holds("--name=scswarm-alpha-2"), "{args:?}");
+        assert!(holds("--name=scswarm-2"), "{args:?}");
         assert!(holds(INIT), "{args:?}");
         assert!(holds("--volume=/slot/2:/slot/2:rw,z"), "{args:?}");
         assert!(holds("--volume=/repo.git:/repo.git:ro,z"), "{args:?}");

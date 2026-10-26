@@ -6,7 +6,6 @@ use std::{env, fs};
 
 use crate::error::{Error, Result};
 use crate::event;
-use crate::git::Git;
 use crate::lock;
 use crate::paths::{self, Project};
 use crate::slot::{self, Slot};
@@ -16,8 +15,6 @@ use crate::work::Job;
 /// Workers by slot. Slot or row is taken while own worker runs it, or a worker
 /// left by an earlier `serve` holds its lock.
 pub struct Pool {
-    repo: Git,
-    project: Project,
     /// Resolved once: Linux names a replaced binary `<path> (deleted)`.
     exe: PathBuf,
     workers: BTreeMap<usize, Worker>,
@@ -27,45 +24,55 @@ pub struct Pool {
 
 struct Worker {
     child: Child,
+    project: Project,
     key: Key,
 }
 
 /// Queued rows of one track, in file order, with what orders the track.
 pub struct Queue {
+    /// Index of the track's project: rows running count per project too.
+    pub project: usize,
     pub priority: i32,
     pub running: usize,
     pub rows: Vec<usize>,
 }
 
-/// Up to `slots` (queue, row) picks: priority, then fewest rows running, so equal
-/// tracks take turns, then file order. No preemption.
+/// Up to `slots` (queue, row) picks. Rank: rows running in the project, priority,
+/// rows running in the track, file order. No preemption.
 pub fn schedule(queues: &[Queue], slots: usize) -> Vec<(usize, usize)> {
     let mut running: Vec<usize> = queues.iter().map(|queue| queue.running).collect();
+    let mut shares: BTreeMap<usize, usize> = BTreeMap::new();
+    for queue in queues {
+        *shares.entry(queue.project).or_default() += queue.running;
+    }
     let mut next = vec![0; queues.len()];
     let mut picked = Vec::new();
     while picked.len() < slots {
         let Some(at) = (0..queues.len())
             .filter(|&at| next[at] < queues[at].rows.len())
-            .min_by_key(|&at| (Reverse(queues[at].priority), running[at], at))
+            .min_by_key(|&at| {
+                let queue = &queues[at];
+                let share = shares.get(&queue.project).copied().unwrap_or_default();
+                (share, Reverse(queue.priority), running[at], at)
+            })
         else {
             break;
         };
         picked.push((at, queues[at].rows[next[at]]));
         next[at] += 1;
         running[at] += 1;
+        *shares.entry(queues[at].project).or_default() += 1;
     }
     picked
 }
 
 impl Pool {
     /// No slot yet: `converge` opens them.
-    pub fn open(repo: &Git, project: &Project) -> Result<Self> {
+    pub fn open() -> Result<Self> {
         let exe = env::current_exe().map_err(|why| {
             Error::Failed(format!("path of the running `scswarm` must resolve: {why}"))
         })?;
         Ok(Self {
-            repo: Git::at(repo.root().to_path_buf()),
-            project: project.clone(),
             exe,
             workers: BTreeMap::new(),
             attached: BTreeSet::new(),
@@ -76,7 +83,7 @@ impl Pool {
     /// slot drops once idle.
     pub fn converge(&mut self, workers: usize) -> Result<Vec<usize>> {
         let mut indices: BTreeSet<usize> = (0..workers).collect();
-        indices.extend(slot::indices(&self.project)?);
+        indices.extend(slot::indices()?);
         let mut idle = Vec::new();
         for index in indices {
             if self.busy(index)? {
@@ -111,30 +118,41 @@ impl Pool {
         }
     }
 
-    pub fn holds(&self, key: &Key) -> Result<bool> {
-        if self.workers.values().any(|worker| &worker.key == key) {
+    pub fn holds(&self, project: &Project, key: &Key) -> Result<bool> {
+        if self
+            .workers
+            .values()
+            .any(|worker| &worker.project == project && &worker.key == key)
+        {
             return Ok(true);
         }
-        lock::held(&paths::transcripts(&self.project, key)?)
+        lock::held(&paths::transcripts(project, key)?)
     }
 
     /// Spawn worker on an idle slot. Row lock taken here, inherited as stdin: held
     /// from spawn. Lock held since the scan, by a `status` probe say: next cycle.
-    pub fn assign(&mut self, job: Job) -> Result<()> {
+    pub fn assign(&mut self, project: &Project, job: Job) -> Result<()> {
         let key = job.key();
-        let logs = paths::transcripts(&self.project, &key)?;
+        let logs = paths::transcripts(project, &key)?;
         fs::create_dir_all(&logs)
             .map_err(|why| Error::Failed(format!("directory {}: {why}", logs.display())))?;
         let Some(row) = lock::take(&logs)? else {
             return Ok(());
         };
-        event::assign(&key, job.slot);
+        event::assign(key.label(project), job.slot);
         let child = Command::new(&self.exe)
-            .args(job.argv(&self.project))
+            .args(job.argv(project))
             .stdin(row.into_stdio())
             .spawn()
             .map_err(|why| stopped(job.slot, &format!("worker must start: {why}")))?;
-        self.workers.insert(job.slot, Worker { child, key });
+        self.workers.insert(
+            job.slot,
+            Worker {
+                child,
+                project: project.clone(),
+                key,
+            },
+        );
         Ok(())
     }
 
@@ -142,13 +160,13 @@ impl Pool {
         if self.workers.contains_key(&index) {
             return Ok(true);
         }
-        lock::held(&paths::slot(&self.project, index)?)
+        lock::held(&paths::slot(index)?)
     }
 
     /// Idle slot: free its branch once per `serve` life.
     fn attach(&mut self, index: usize) -> Result<()> {
         if self.attached.insert(index) {
-            Slot::open(&self.project, index)?.release()?;
+            Slot::open(index)?.release()?;
             event::attach(index);
         }
         Ok(())
@@ -157,7 +175,7 @@ impl Pool {
     fn remove(&mut self, index: usize) -> Result<()> {
         event::remove(index);
         self.attached.remove(&index);
-        slot::remove(&self.repo, &self.project, index)
+        slot::remove(index)
     }
 }
 
@@ -172,17 +190,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn priority_first_then_turns() {
-        let queue = |priority, running, rows: &[usize]| Queue {
+    fn projects_take_turns_then_priority() {
+        let queue = |project, priority, running, rows: &[usize]| Queue {
+            project,
             priority,
             running,
             rows: rows.to_vec(),
         };
         let queues = [
-            queue(0, 1, &[0, 1]),
-            queue(0, 0, &[2, 3]),
-            queue(5, 0, &[4]),
+            queue(0, 0, 1, &[0, 1]),
+            queue(0, 0, 0, &[2, 3]),
+            queue(0, 5, 0, &[4]),
+            queue(1, 0, 0, &[5, 6]),
         ];
-        assert_eq!(schedule(&queues, 4), [(2, 4), (1, 2), (0, 0), (1, 3)]);
+        assert_eq!(
+            schedule(&queues, 5),
+            [(3, 5), (2, 4), (3, 6), (1, 2), (0, 0)]
+        );
     }
 }

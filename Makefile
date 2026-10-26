@@ -12,6 +12,6 @@ fmt:
 test:
 	cargo test
 
-# live slot set and two tracks against rootless podman, Linux or macOS podman machine; no tokens spent.
+# live slot set, two tracks and two projects against rootless podman, Linux or macOS podman machine; no tokens spent.
 e2e:
 	cargo test --test e2e -- --ignored --nocapture

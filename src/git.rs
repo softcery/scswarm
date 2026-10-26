@@ -236,6 +236,17 @@ impl Git {
         Ok(parse_checkouts(&listing))
     }
 
+    /// Repo that owns this worktree, symlinks resolved. `None` when git finds no
+    /// repo here, for example once the owner is deleted.
+    pub fn owner(&self) -> Result<Option<PathBuf>> {
+        let args = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
+        let out = proc::answer(BIN, &self.root, &args)?;
+        Ok(out
+            .status
+            .success()
+            .then(|| paths::real(Path::new(String::from_utf8_lossy(&out.stdout).trim()))))
+    }
+
     pub fn worktree_add(&self, path: &Path, rev: &str) -> Result<()> {
         run(&self.root, &["worktree", "prune"])?;
         let path = paths::arg(path)?;

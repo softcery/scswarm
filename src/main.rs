@@ -27,11 +27,12 @@ mod yaml;
 
 use clap::{Parser, Subcommand};
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::git::Git;
 use crate::host::Host;
 use crate::paths::Project;
 use crate::state::Key;
+use crate::status::Source;
 use crate::work::Job;
 
 #[derive(Parser)]
@@ -43,10 +44,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    #[command(about = "Create bare repo and `origin`, fetch")]
-    Init { project: String },
-    #[command(about = "Run scheduler until stopped; each row runs as its own process")]
-    Serve { project: String },
+    #[command(
+        about = "Run scheduler for every project of the host file until stopped; each row runs as its own process"
+    )]
+    Serve,
     #[command(name = work::COMMAND, hide = true, about = "Run one row attempt; `serve` spawns it")]
     Work {
         project: String,
@@ -55,7 +56,7 @@ enum Command {
     },
     #[command(about = "Print every row of every track with state derived from git")]
     Status {
-        #[arg(required_unless_present = "tracks")]
+        /// One project of the host file. Absent: every project.
         project: Option<String>,
         /// Read the clone in the working directory instead: track branch prefix.
         #[arg(long, value_name = "PREFIX", conflicts_with = "project")]
@@ -77,39 +78,46 @@ fn main() {
     }
 }
 
-/// Every command but `status --tracks` names a project: stem of its host file.
-/// Working directory means nothing there.
+/// Projects are keys of the host file. Working directory means nothing but to
+/// `status --tracks`.
 fn dispatch(command: Command) -> Result<()> {
     let named = |name: &str| Project::try_from(name);
     match command {
-        Command::Init { project } => init::init(&named(&project)?),
-        Command::Serve { project } => {
-            let project = named(&project)?;
-            serve::serve(&init::open(&project)?, &project)
-        }
+        Command::Serve => serve::serve(),
         Command::Work { project, job } => {
             let project = named(&project)?;
             work::work(&init::open(&project)?, &project, &job)
         }
         Command::Status {
-            project: Some(project),
-            ..
-        } => {
-            let project = named(&project)?;
-            let tracks = Host::load(&project)?.tracks;
-            status::status(&init::open(&project)?, &tracks, Some(&project))
-        }
-        Command::Status {
             tracks: Some(prefix),
             ..
-        } => status::status(&Git::at(paths::here()?), &prefix, None),
-        Command::Status { .. } => Err(Error::Invalid(
-            "`status` must name a project, or a track branch prefix in `--tracks`".to_string(),
-        )),
+        } => status::status(&[Source {
+            project: None,
+            repo: Git::at(paths::here()?),
+            tracks: prefix,
+        }]),
+        Command::Status { project, .. } => {
+            let host = Host::load()?;
+            let projects = match project {
+                Some(project) => vec![named(&project)?],
+                None => host.projects.keys().cloned().collect(),
+            };
+            let sources = projects
+                .into_iter()
+                .map(|project| {
+                    Ok(Source {
+                        tracks: host.entry(&project)?.tracks.clone(),
+                        repo: init::open(&project)?,
+                        project: Some(project),
+                    })
+                })
+                .collect::<Result<Vec<Source>>>()?;
+            status::status(&sources)
+        }
         Command::Log { project, row } => log::log(&named(&project)?, &Key::try_from(row.as_str())?),
         Command::Reset { project, row } => {
             let project = named(&project)?;
-            let tracks = Host::load(&project)?.tracks;
+            let tracks = Host::load()?.entry(&project)?.tracks.clone();
             reset::reset(
                 &init::open(&project)?,
                 &tracks,
@@ -133,7 +141,10 @@ mod tests {
             id: "rag-04-review".to_string(),
             track_tip: "89abcdef0123456789abcdef0123456789abcdef".to_string(),
             base: "0123456789abcdef0123456789abcdef01234567".to_string(),
-            env: vec!["ANTHROPIC_API_KEY".to_string()],
+            env: vec![credential::Binding {
+                var: "ANTHROPIC_AUTH_TOKEN".to_string(),
+                file: "ALPHA_KEY".to_string(),
+            }],
             mounts: vec![host::Mount {
                 host: "/records".to_string(),
                 guest: "/mnt".to_string(),

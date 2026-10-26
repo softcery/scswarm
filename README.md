@@ -1,6 +1,6 @@
 # scswarm
 
-Runs coding agents on a task board with no human at the keyboard. One binary, one workstation.
+Runs coding agents on a task board with no human at the keyboard. One binary, one workstation, one swarm per user for any number of repos.
 
 Each team pushes a track: an orphan branch whose `SWARM.yaml` names a `from` branch, a `to` branch and the rows to run. Workers pick every row whose dependencies are pushed, run it in its own git worktree and container, merge it into `to` and push `to` to your remote. You review `to` and merge it.
 
@@ -19,19 +19,21 @@ cargo install --path .
 
 ## Quick start
 
-`PROJECT` below is any name you pick. It keys the host file, the bare repo and the containers.
+`PROJECT` below is any name you pick for one repo. It keys the bare repo, the logs and the commands.
 
-1. Write the host file `~/.config/scswarm/PROJECT.yaml`:
+1. Write the host file `~/.config/scswarm/host.yaml`:
 
    ```yaml
-   remote: git@github.com:org/myproject.git
-   tracks: track/
    workers: 2
-   mounts:
-     - ~/.cargo/registry:/home/dev/.cargo/registry
-   env:
-     - match: "*"
-       names: [ANTHROPIC_API_KEY]
+   projects:
+     PROJECT:
+       remote: git@github.com:org/myproject.git
+       tracks: track/
+       mounts:
+         - ~/cache/PROJECT/cargo:/home/dev/.cargo/registry
+       env:
+         - match: "*"
+           set: { ANTHROPIC_API_KEY: PROJECT_KEY }
    ```
 
 2. On `main`, commit `scswarm.yaml`, plus `Containerfile.swarm` when `image` names a file to build. Push. See [Configure](#configure).
@@ -44,27 +46,23 @@ cargo install --path .
    git push origin track/laser
    ```
 
-4. Build the bare repo:
-
-   ```
-   scswarm init PROJECT
-   ```
-
-5. Write one file per credential named in `env`, then run the loop:
+4. Write one file per credential named in `set`, then run the loop. `serve` makes each project's bare repo on first sight:
 
    ```
    mkdir -m 700 -p ~/.config/scswarm/credentials
-   printf '%s' "$KEY" > ~/.config/scswarm/credentials/ANTHROPIC_API_KEY
-   scswarm serve PROJECT
+   printf '%s' "$KEY" > ~/.config/scswarm/credentials/PROJECT_KEY
+   scswarm serve
    ```
 
-6. Watch from another terminal, or from any clone. A clone first runs `git config --add remote.origin.fetch '+refs/swarm/*:refs/swarm/*'` and `git fetch`:
+5. Watch from another terminal, or from any clone. A clone first runs `git config --add remote.origin.fetch '+refs/swarm/*:refs/swarm/*'` and `git fetch`:
 
    ```
-   scswarm status PROJECT
+   scswarm status
    scswarm status --tracks track/
    scswarm log PROJECT laser/<id>
    ```
+
+6. Add a repo: add an entry under `projects`. The next cycle picks it up.
 
 7. Review `to`, for example `feat/laser`, and merge it into `from`.
 
@@ -72,15 +70,15 @@ cargo install --path .
 
 Job queue with a worker pool. Queue = the track branches. Workers = slots. State = git.
 
-Every `poll` seconds, 5 by default, the loop:
+Every `poll` seconds, 5 by default, the loop runs each project in its own thread:
 
-1. Fetches every branch of `remote`. Pushes land and fail refs when they changed.
+1. Fetches every branch of `remote` once `fetch` seconds passed, 60 by default. Pushes land and fail refs when they changed.
 2. Reads each track branch under `tracks`. Makes and pushes each absent `to`.
 3. Parses `scswarm.yaml` at each `to` tip, derives the state of every row: waiting, queued, running, failed, pushed, merged.
-4. Starts one worker process, `scswarm work`, per queued row and free slot: highest `priority` first, then the track with fewest rows running.
-5. Sleeps.
 
-A slot is a git worktree at `~/swarm/slot/<project>/<n>` plus one long-lived container `scswarm-<project>-<n>`.
+Then it starts one worker process, `scswarm work`, per queued row and free slot: the project with fewest rows running first, then highest `priority` inside it, then the track with fewest rows running. Then it sleeps. A project whose remote fails skips the cycle; the others run.
+
+A slot is a git worktree at `~/swarm/slot/<n>/tree` plus one long-lived container `scswarm-<n>`. Slots take rows of any project. A row of another project drops the worktree and container and makes them from its own repo.
 
 One row is one session of scripted steps: agent prompts, shell `run` steps, and commit steps. The worker builds the image at the `to` tip, branches `swarm/<track>/<id>` from that tip, and commits at each commit step. At the last one it writes ref `refs/swarm/land/<track>/<id>`, merges the row into the `to` tip with one merge commit and pushes `to` with no force. A branch with no land ref holds a session cut short: the next cycle replays the row from the `to` tip.
 
@@ -112,27 +110,45 @@ The gitdir mounts read-only. `git status`, `git log`, `git diff` work. `git add`
 
 Host file, `scswarm.yaml`, track files, and a Containerfile when you build the image. Binding formats: [docs/spec/contract.md](docs/spec/contract.md).
 
-### Host file: `~/.config/scswarm/<project>.yaml`
+### Host file: `~/.config/scswarm/host.yaml`
 
-What this machine gives the swarm. Never committed.
+What this machine gives the swarm. One per user. Never committed.
 
 | Field | Meaning |
 |---|---|
-| `remote` | git URL or path the bare repo fetches from and pushes to |
-| `tracks` | branch name prefix of every track branch |
-| `workers` | slot count |
-| `mounts` | extra `host:container` binds, read-write. Build caches ride here |
+| `workers` | slot count, shared by every project |
 | `devices` | host device paths passed as `--device`, for example `/dev/dri` for a GPU |
-| `env` | ordered rules: the first whose `match` glob takes the track name lists the credentials forwarded into its containers, as environment variables |
 | `poll` | seconds between loop cycles. Absent = 5 |
+| `projects` | one entry per repo, keyed by project name |
+| `projects.*.remote` | git URL or path the bare repo fetches from and pushes to |
+| `projects.*.tracks` | branch name prefix of every track branch |
+| `projects.*.fetch` | seconds between fetches. Absent = 60 |
+| `projects.*.mounts` | extra `host:container` binds, read-write. Build caches ride here. Two projects never share a host path |
+| `projects.*.env` | ordered rules: the first whose `match` glob takes the track name binds credentials into its containers: `set` maps a variable to a credential |
 
-Every field reloads each cycle. `serve` drops slots at or above `workers`. The worker of each row makes its slot's container, and remakes it when the row's image, `mounts` or `devices` differ. A busy slot finishes its row first. `env` applies from the next row on, with no rebuild.
+Every field reloads each cycle. `serve` drops slots at or above `workers`. The worker of each row makes its slot's container, and remakes it when the row's image, project, `mounts` or `devices` differ. A busy slot finishes its row first. `env` applies from the next row on, with no rebuild.
 
 ### Credentials: `~/.config/scswarm/credentials/<NAME>`
 
-One file per name in `env`, contents = value. The directory must be mode `0700`. One trailing newline strips, so `echo` works. The worker reads each file at row start, so a new value reaches the next row with no restart. A track whose names lack a file skips with `skip`; the other tracks run. Only these files carry credentials: the `serve` environment carries none.
+One file per credential named in `set`, contents = value. The directory must be mode `0700`. One trailing newline strips, so `echo` works. The worker reads each file at row start, so a new value reaches the next row with no restart. A track whose credentials lack a file skips with `skip`; the other tracks run. Only these files carry credentials: the `serve` environment carries none.
 
-The machine pushes `to` and `refs/swarm/*`. Give it a deploy key or token with write access, outside every container.
+`set` lets each repo pass its own key under one variable name, for example a gateway key of an AI relay per repo:
+
+```yaml
+env:
+  - match: "*"
+    set: { ANTHROPIC_BASE_URL: RELAY_URL, ANTHROPIC_AUTH_TOKEN: ALPHA_GATEWAY_KEY }
+```
+
+The machine pushes `to` and `refs/swarm/*`. Give it a deploy key or token with write access per repo, outside every container. GitHub binds a deploy key to one repo, so give each `remote` an ssh host alias with its own `IdentityFile`.
+
+### Isolation between projects
+
+Every project's container runs as one unix user. The container is the wall: a slot worktree, a bare repo and `mounts` reach one project alone. For a stronger wall, from least to most:
+
+1. Set a VM-backed runtime for every container of the user in `~/.config/containers/containers.conf`, `[engine] runtime = "krun"`. Linux only, untested with scswarm.
+2. Run one swarm per unix user, one user per client group.
+3. Run one swarm per VM.
 
 ### `scswarm.yaml` in the code
 
@@ -182,7 +198,7 @@ RUN set -eu; \
     projects=$(trust "/home/dev/swarm/${PROJECT}.git"); \
     slot=0; \
     while [ "$slot" -lt "$WORKERS" ]; do \
-      projects="$projects,$(trust "/home/dev/swarm/slot/${PROJECT}/${slot}")"; \
+      projects="$projects,$(trust "/home/dev/swarm/slot/${slot}/tree")"; \
       slot=$((slot + 1)); \
     done; \
     printf '{"hasCompletedOnboarding":true,"bypassPermissionsModeAccepted":true,"projects":{%s}}' \
@@ -262,13 +278,11 @@ A track that fails a check skips; the others run. `status` prints the rest, then
 
 ## Commands
 
-`PROJECT` is the stem of the host file. `ROW` is `<track>/<id>`. The working directory means nothing, except to `status --tracks`.
+`PROJECT` is a key of the host file `projects`. `ROW` is `<track>/<id>`. The working directory means nothing, except to `status --tracks`.
 
 ```
-scswarm init PROJECT            bare repo, origin, first fetch; a new bare repo also fetches the
-                                  remote's land and fail refs; safe while `serve` runs
-scswarm serve PROJECT           foreground loop; run under systemd or launchd
-scswarm status PROJECT          one line per row of every track: row, state, branch, worker
+scswarm serve                   foreground loop over every project; run under systemd or launchd
+scswarm status [PROJECT]        one line per row of every track: project, row, state, branch, worker
 scswarm status --tracks PREFIX  same, from the clone in the working directory
 scswarm log PROJECT ROW         transcripts, one block per try or commit: row session, then merge
 scswarm reset PROJECT ROW       delete swarm/<track>/<id>, every dependant branch, their land and
@@ -279,25 +293,25 @@ Exit codes: 0 ok, 1 input invalid, 2 git or podman failure. A git or podman fail
 
 ## Run under systemd
 
-Copy the template unit [systemd/scswarm@.service](systemd/scswarm@.service) to `~/.config/systemd/user/`, then:
+Copy the unit [systemd/scswarm.service](systemd/scswarm.service) to `~/.config/systemd/user/`, then:
 
 ```
-systemctl --user enable --now scswarm@PROJECT
+systemctl --user enable --now scswarm
+loginctl enable-linger "$USER"
 ```
 
 ## Run under launchd
 
 macOS runs containers in a podman machine VM. Start it with `podman machine init --now` once, and `podman machine start` after each login.
 
-1. Copy the template agent [launchd/com.softcery.scswarm.plist](launchd/com.softcery.scswarm.plist) to `~/Library/LaunchAgents/com.softcery.scswarm.PROJECT.plist`.
-2. Fill in the project and your user name:
+1. Copy the agent [launchd/com.softcery.scswarm.plist](launchd/com.softcery.scswarm.plist) to `~/Library/LaunchAgents/`.
+2. Fill in your home:
 
    ```
-   F=~/Library/LaunchAgents/com.softcery.scswarm.PROJECT.plist
-   plutil -replace Label -string com.softcery.scswarm.PROJECT "$F"
-   plutil -replace ProgramArguments -json "[\"$HOME/.cargo/bin/scswarm\",\"serve\",\"PROJECT\"]" "$F"
-   plutil -replace StandardOutPath -string "$HOME/Library/Logs/scswarm-PROJECT.log" "$F"
-   plutil -replace StandardErrorPath -string "$HOME/Library/Logs/scswarm-PROJECT.log" "$F"
+   F=~/Library/LaunchAgents/com.softcery.scswarm.plist
+   plutil -replace ProgramArguments -json "[\"$HOME/.cargo/bin/scswarm\",\"serve\"]" "$F"
+   plutil -replace StandardOutPath -string "$HOME/Library/Logs/scswarm.log" "$F"
+   plutil -replace StandardErrorPath -string "$HOME/Library/Logs/scswarm.log" "$F"
    plutil -lint "$F"
    ```
 
@@ -305,18 +319,18 @@ macOS runs containers in a podman machine VM. Start it with `podman machine init
 4. Load the agent:
 
    ```
-   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.softcery.scswarm.PROJECT.plist
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.softcery.scswarm.plist
    ```
 
 ## Operate
 
 **Row shows `failed`.** Read `scswarm log PROJECT ROW` for the failing step. A failed row waits for a new track tip or `to` tip, so it costs one attempt per push, not one per cycle. To rerun without a push, run `reset`.
 
-**`serve` exits with `slot N stopped`.** Git or podman failed inside that slot, or the remote was unreachable. No row got a fail mark. A push the remote turns down, for example branch protection on `to`, fails that row instead. Read the cause in the journal, or in `~/Library/Logs/scswarm-PROJECT.log` on macOS, and fix the machine. Workers on other slots run on. systemd or launchd starts `serve` again, the next worker on each slot restarts its container, and the stopped row replays.
+**`serve` exits with `slot N stopped`.** Git or podman failed inside that slot, or the remote was unreachable. No row got a fail mark. A push the remote turns down, for example branch protection on `to`, fails that row instead. Read the cause in the journal, or in `~/Library/Logs/scswarm.log` on macOS, and fix the machine. Workers on other slots run on. systemd or launchd starts `serve` again, the next worker on each slot restarts its container, and the stopped row replays.
 
 **Rerun a row.** Wait until `status` shows no worker for it, then run `scswarm reset PROJECT ROW`. Its old commits stay on `to`: revert them there if you want them gone. A worker running that row recreates the refs at its next commit. Stopping `serve` stops no worker.
 
-**Upgrade.** Run `cargo install --path .`, then `systemctl --user restart scswarm@PROJECT`, or `launchctl kickstart -k gui/$(id -u)/com.softcery.scswarm.PROJECT` on macOS. Rows in flight finish on the old binary. New rows start on the new one.
+**Upgrade.** Run `cargo install --path .`, then `systemctl --user restart scswarm`, or `launchctl kickstart -k gui/$(id -u)/com.softcery.scswarm` on macOS. Rows in flight finish on the old binary. New rows start on the new one.
 
 `serve` makes the remote's `refs/swarm/*` match the bare repo's, so its first cycle deletes every remote land or fail ref the bare repo lacks. Before the first `serve` against a remote other hosts or clones wrote to, compare the two:
 
@@ -325,13 +339,15 @@ git ls-remote origin 'refs/swarm/*'
 git -C ~/swarm/PROJECT.git for-each-ref refs/swarm/
 ```
 
-**Stop.** `systemctl --user stop scswarm@PROJECT` ends `serve` alone: rows in flight finish, no new row starts. To end every worker too, run `systemctl --user kill --kill-whom=all scswarm@PROJECT`. On macOS, `launchctl bootout gui/$(id -u)/com.softcery.scswarm.PROJECT` ends `serve` alone; then `pkill -f 'scswarm work PROJECT '` ends the workers. Their rows replay from the `to` tip on the next start.
+**Stop.** `systemctl --user stop scswarm` ends `serve` alone: rows in flight finish, no new row starts. To end every worker too, run `systemctl --user kill --kill-whom=all scswarm`. On macOS, `launchctl bootout gui/$(id -u)/com.softcery.scswarm` ends `serve` alone; then `pkill -f 'scswarm work '` ends the workers. Their rows replay from the `to` tip on the next start.
 
-**Change workers, mounts, devices or env.** If `workers` grows past `ARG WORKERS` of the Containerfile, raise that value and push it on each `to` first. Then edit the host file. `serve` applies it on the next cycle, slot by slot as each goes idle.
+**Change workers, projects, mounts, devices or env.** If `workers` grows past `ARG WORKERS` of the Containerfile, raise that value and push it on each `to` first. Then edit the host file. `serve` applies it on the next cycle, slot by slot as each goes idle.
 
 **Change the image.** Push the Containerfile on `to`. Each row of that track builds it and remakes its slot's container.
 
 **Credential expired.** Every row it touches fails after 3 tries. Write the new value to its file, then `reset` each marked row.
+
+**Remove a project.** Drain its rows, delete its entry, then delete `~/swarm/PROJECT.git`, `~/swarm/log/PROJECT`, `~/swarm/build/PROJECT`, its credential files and its `mounts` host dirs.
 
 **Track done.** Merge `to` into `from`. Each row reads `merged` once its last commit is an ancestor of `from`.
 
@@ -361,7 +377,11 @@ git -C ~/swarm/PROJECT.git for-each-ref refs/swarm/
 - macOS: the podman machine does not start at login. Until it runs, each worker exits 2, so `serve` stops and launchd starts it again after 10 s.
 - Locks sit on `~/swarm`, which must be a local filesystem. NFS breaks them.
 - A worker hung outside a step holds its slot until killed.
-- A git or podman fault in one slot stops `serve` for every track.
+- A git or podman fault in one slot stops `serve` for every project.
+- One swarm per unix user. Shell access to that user reaches every project's repos, transcripts and credentials.
+- `devices` and the network reach every project's containers.
+- A slot that switches project drops its worktree: the next build starts cold unless its cache rides on `mounts`.
+- Upgrading from one host file per project: drain every row, write `host.yaml`, delete `~/swarm/slot`, then start `serve`.
 
 ## Contributing
 

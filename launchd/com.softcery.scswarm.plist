@@ -3,12 +3,11 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.softcery.scswarm.PROJECT</string>
+	<string>com.softcery.scswarm</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>/Users/USER/.cargo/bin/scswarm</string>
 		<string>serve</string>
-		<string>PROJECT</string>
 	</array>
 	<key>EnvironmentVariables</key>
 	<dict>
@@ -22,8 +21,8 @@
 	<key>AbandonProcessGroup</key>
 	<true/>
 	<key>StandardOutPath</key>
-	<string>/Users/USER/Library/Logs/scswarm-PROJECT.log</string>
+	<string>/Users/USER/Library/Logs/scswarm.log</string>
 	<key>StandardErrorPath</key>
-	<string>/Users/USER/Library/Logs/scswarm-PROJECT.log</string>
+	<string>/Users/USER/Library/Logs/scswarm.log</string>
 </dict>
 </plist>

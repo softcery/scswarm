@@ -23,7 +23,7 @@ projects:
   alpha:
     remote: git@github-alpha:client-a/alpha.git
     tracks: track/
-    poll: 30
+    fetch: 60
     mounts: [~/cache/alpha/sccache:/sccache]
     env:
       - match: "*"
@@ -33,9 +33,10 @@ projects:
 ```
 
 - Machine fields: `workers`, `poll`, `devices`.
-- Project fields: `remote`, `tracks`, `poll`, `mounts`, `env`.
+- Project fields: `remote`, `tracks`, `fetch`, `mounts`, `env`.
 - Project name = key under `projects`. Same check as today's `Project::try_from`.
-- Project `poll` absent = machine `poll`. Machine `poll` is the scheduler tick.
+- `poll`: seconds between scheduler cycles, 1 or more. Absent = 5. A cycle reads local refs alone, no network.
+- `fetch`: seconds between fetches of one remote, 1 or more. Absent = 60. Fetch picks up human input alone: tracks, `from`, commits on `to`. A worker push of `to` updates the remote-tracking ref, and kept refs live in the bare repo, so rows need no fetch. A new track waits up to `fetch` seconds for its first row.
 - `env` rule field `set` maps container variable name to credential file name. Today the file name is the container name (`src/podman.rs` lines 109-110), so two projects cannot pass different values under one name, for example `ANTHROPIC_AUTH_TOKEN`. The value still travels in the podman environment, never argv.
 - Check: host paths of `mounts` must not overlap between two projects. The error names both projects and field `mounts`.
 
@@ -61,7 +62,10 @@ projects:
 ### Serve
 
 - One lock for the machine, held by `serve`. Remote, build and row locks stay per project.
-- Each cycle, for each project due by its `poll`, in parallel through `std::thread::scope`: write `origin`, fetch, mirror kept refs, read tracks. Projects not due read local refs.
+- Each cycle, one thread per project through `std::thread::scope`:
+  1. If the project's `fetch` seconds passed since its last fetch, write `origin` and fetch.
+  2. If kept refs changed since the last mirror, mirror them. Today's rule (`src/serve.rs` lines 115-124).
+  3. Read tracks from local refs.
 - A fault skips its own project. Today a failed fetch skips the whole cycle (`src/serve.rs` lines 75-77).
 - A project new to the host file opens on first sight: bare repo, `origin`, fetch of remote `refs/swarm/*`, then the first mirror. Without that fetch the first mirror deletes the remote land and fail refs (`docs/spec/contract.md` line 170). `init` goes away.
 - A project gone from the host file stops scheduling. Its rows in flight run on.
@@ -125,7 +129,7 @@ Build caches ride on per-project `mounts`, for example pnpm store, sccache dir, 
 - Network stays on. An agent can send out its own project's code.
 - A pnpm store on a bind mount cannot hardlink into the worktree (`EXDEV`). pnpm falls back to copy.
 - sccache turns off incremental builds. The crate under work compiles in full each row.
-- Unverified: GitHub limits for dozens of remotes fetched each few seconds over ssh. Per-project `poll` is the lever.
+- Unverified: GitHub limits on ssh fetches from one host. 30 projects at `fetch: 60` make 30 fetches a minute. Per-project `fetch` is the lever.
 - Unverified: sccache local disk cache shared by several sccache servers at once.
 - Unverified: step 1, rootless podman with `krun` or `runsc` under `--userns=keep-id`, same-path binds, `restart --time=0`, `--device`.
 - Out of scope: slot affinity (issue #5), pause on usage limit (issue #6), runtime per project, transcript access without a shell on the swarm host.

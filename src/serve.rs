@@ -1,24 +1,25 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::panic;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
-use crate::board::{self, Track};
+use crate::board;
 use crate::credential;
 use crate::error::{Error, Result};
-use crate::event::{self, Latch};
-use crate::git::{self, Git, Push};
+use crate::event::{self, Latch, Seen};
+use crate::feed::{Backoff, Feed, Health};
+use crate::git::{self, Git};
 use crate::host::{self, Entry, Host};
 use crate::lock;
 use crate::paths::{self, Project};
-use crate::pool::{self, Pool, Queue};
+use crate::pool::{self, Demand, Pool, Queue};
 use crate::repo;
 use crate::state::{self, Address, Snapshot, State};
 use crate::work::Job;
 
-/// Refresh every project, spawn a worker per idle slot and queued row, sleep.
-/// Until killed. The lock on the swarm root keeps it one per user.
+/// Read every project from local refs, spawn a worker per idle slot and queued
+/// row, sleep. Until killed. The lock on the swarm root keeps it one per user.
 pub fn serve() -> Result<()> {
     let root = paths::swarm()?;
     fs::create_dir_all(&root)
@@ -36,39 +37,28 @@ struct Server {
     pool: Pool,
     host: Host,
     /// One per project of the host file. A project dropped from the file drops
-    /// its feed; its rows in flight run on.
-    feeds: BTreeMap<Project, Feed>,
+    /// its lane and feed; its rows in flight run on.
+    lanes: BTreeMap<Project, Lane>,
+    /// Feed threads of dropped lanes, until each ends its last call.
+    retired: BTreeMap<Project, JoinHandle<()>>,
     /// Rows assigned in this `serve` life: orders projects by turn.
     turn: u64,
     stale: Latch,
 }
 
-/// What `serve` knows of one project between cycles. A restart rebuilds it.
-#[derive(Default)]
-struct Feed {
-    /// `None` until the bare repo opens.
-    repo: Option<Git>,
-    /// Remote URL last written to the bare repo.
-    origin: Option<String>,
-    fetched: Option<Instant>,
-    /// Kept refs at the last mirror. `None`: a restart mirrors once.
-    mirrored: Option<BTreeMap<String, String>>,
-    /// Track tip and base last reported, by track name.
-    tips: BTreeMap<String, (String, String)>,
+/// What `serve` holds for one project between cycles. A restart rebuilds it.
+struct Lane {
+    feed: Feed,
     /// Turn of the last row assigned, 0 for none.
     served: u64,
-    /// `Some` while the project rests after a fault.
-    rest: Option<Rest>,
-    /// Faults of the project as a whole, then of single tracks.
+    /// Rest after workers that failed in a row. A worker that ends well ends it.
+    rest: Option<Backoff>,
+    /// Worker faults since a worker ended well, then read faults, then track faults.
+    workers: Seen,
     offline: Latch,
     skipped: Latch,
-}
-
-/// Failing project at rest: no network call, no row, until `until`.
-struct Rest {
-    until: Instant,
-    /// Rest length so far: doubles per fault in a row, up to `host::REST_MAX`.
-    wait: Duration,
+    /// Track tip and base last reported, by track name.
+    tips: BTreeMap<String, (String, String)>,
 }
 
 impl Server {
@@ -76,7 +66,8 @@ impl Server {
         Ok(Self {
             pool: Pool::open()?,
             host: Host::load()?,
-            feeds: BTreeMap::new(),
+            lanes: BTreeMap::new(),
+            retired: BTreeMap::new(),
             turn: 0,
             stale: Latch::default(),
         })
@@ -91,40 +82,34 @@ impl Server {
     }
 
     fn cycle(&mut self) -> Result<()> {
-        let projects = &self.host.projects;
-        self.feeds
-            .retain(|project, _| projects.contains_key(project));
-        for project in projects.keys() {
-            self.feeds.entry(project.clone()).or_default();
-        }
-        for (project, why) in self.pool.reap()? {
-            match (self.feeds.get_mut(&project), projects.get(&project)) {
-                (Some(feed), Some(entry)) => feed.fail(&project, entry, why),
-                _ => event::skip(&project, &why),
+        self.follow()?;
+        for ended in self.pool.reap()? {
+            let project = &ended.project;
+            match self.lanes.get_mut(project) {
+                Some(lane) => lane.ended(project, ended.result),
+                None => {
+                    if let Err(why) = &ended.result {
+                        event::skip(project, why);
+                    }
+                }
             }
         }
-        let snapshots = self.refresh();
+        let snapshots = self.read();
         let idle = self.pool.converge(self.host.workers)?;
-        let queues: Vec<Queue> = snapshots
+        let demands: Vec<Demand> = snapshots
             .iter()
-            .enumerate()
-            .flat_map(|(at, (_, project))| project.iter().map(move |one| queue(at, one)))
+            .map(|(project, held)| Demand {
+                served: self.lanes.get(project).map_or(0, |lane| lane.served),
+                queues: held.iter().map(queue).collect(),
+            })
             .collect();
-        let flat: Vec<(&Project, &Snapshot)> = snapshots
-            .iter()
-            .flat_map(|(project, held)| held.iter().map(move |one| (project, one)))
-            .collect();
-        let served: Vec<u64> = snapshots
-            .iter()
-            .map(|(project, _)| self.feeds.get(project).map_or(0, |feed| feed.served))
-            .collect();
-        let picks = pool::schedule(&queues, &served, idle.len());
-        for ((at, row), slot) in picks.into_iter().zip(idle) {
-            let (project, snapshot) = flat[at];
+        for (pick, slot) in pool::schedule(&demands, idle.len()).into_iter().zip(idle) {
+            let (project, held) = &snapshots[pick.project];
+            let (snapshot, row) = (&held[pick.queue], pick.row);
             let entry = self.host.entry(project)?;
             self.turn += 1;
-            if let Some(feed) = self.feeds.get_mut(project) {
-                feed.served = self.turn;
+            if let Some(lane) = self.lanes.get_mut(project) {
+                lane.served = self.turn;
             }
             let track = &snapshot.track;
             self.pool.assign(Job {
@@ -142,19 +127,62 @@ impl Server {
         Ok(())
     }
 
-    /// Every project at once, one thread each. A dead remote holds the cycle up
-    /// to its transport bounds, then rests. Snapshots by project, in host file order.
-    fn refresh(&mut self) -> Vec<(Project, Vec<Snapshot>)> {
+    /// One lane per project of the host file: opened on first sight once no
+    /// retired feed of it runs, dropped with its entry, its feed told of each change.
+    fn follow(&mut self) -> Result<()> {
+        let ended: Vec<Project> = self
+            .retired
+            .iter()
+            .filter(|(_, thread)| thread.is_finished())
+            .map(|(project, _)| project.clone())
+            .collect();
+        for project in ended {
+            if let Some(Err(panicked)) = self.retired.remove(&project).map(JoinHandle::join) {
+                panic::resume_unwind(panicked);
+            }
+        }
+        let (projects, poll) = (&self.host.projects, self.host.poll);
+        let gone: Vec<Project> = self
+            .lanes
+            .keys()
+            .filter(|project| !projects.contains_key(*project))
+            .cloned()
+            .collect();
+        for project in gone {
+            if let Some(thread) = self
+                .lanes
+                .remove(&project)
+                .and_then(|lane| lane.feed.retire())
+            {
+                self.retired.insert(project, thread);
+            }
+        }
+        for (project, entry) in projects {
+            match self.lanes.get_mut(project) {
+                Some(lane) => lane.feed.update(entry, poll),
+                None if !self.retired.contains_key(project) => {
+                    self.lanes
+                        .insert(project.clone(), Lane::open(project, entry, poll)?);
+                }
+                None => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Every project at once, one thread each, local refs alone. Snapshots by
+    /// project, in host file order.
+    fn read(&mut self) -> Vec<(Project, Vec<Snapshot>)> {
         let (host, pool) = (&self.host, &self.pool);
         thread::scope(|scope| {
             let running: Vec<_> = self
-                .feeds
+                .lanes
                 .iter_mut()
-                .filter_map(|(project, feed)| {
+                .filter_map(|(project, lane)| {
                     let entry = host.projects.get(project)?;
                     Some((
                         project,
-                        scope.spawn(move || feed.refresh(project, entry, pool)),
+                        scope.spawn(move || lane.read(project, entry, pool)),
                     ))
                 })
                 .collect();
@@ -183,16 +211,41 @@ impl Server {
     }
 }
 
-impl Feed {
-    /// Open, fetch when due, mirror on change, read every track. A fault of the
-    /// project rests it with no rows: a row to a dead remote burns a session for
-    /// nothing. The others run.
-    fn refresh(&mut self, project: &Project, entry: &Entry, pool: &Pool) -> Vec<Snapshot> {
-        if self
-            .rest
-            .as_ref()
-            .is_some_and(|rest| Instant::now() < rest.until)
-        {
+impl Lane {
+    fn open(project: &Project, entry: &Entry, tick: Duration) -> Result<Self> {
+        Ok(Self {
+            feed: Feed::start(project, entry, tick)?,
+            served: 0,
+            rest: None,
+            workers: Seen::default(),
+            offline: Latch::default(),
+            skipped: Latch::default(),
+            tips: BTreeMap::new(),
+        })
+    }
+
+    /// Exit 0 ends the rest. Exit 1 reports once. Any other end reports once and
+    /// rests the project, doubling per fault in a row.
+    fn ended(&mut self, project: &Project, result: Result<()>) {
+        let why = match result {
+            Ok(()) => {
+                self.rest = None;
+                self.workers.clear();
+                return;
+            }
+            Err(why) => why,
+        };
+        if matches!(why, Error::Failed(_)) {
+            self.rest = Some(Backoff::after(self.rest.as_ref(), host::REST_FIRST));
+        }
+        self.workers
+            .once(&why, |why: &Error| event::skip(project, why));
+    }
+
+    /// Tracks of a project whose feed is up and whose workers do not rest. A read
+    /// fault skips the project this cycle.
+    fn read(&mut self, project: &Project, entry: &Entry, pool: &Pool) -> Vec<Snapshot> {
+        if self.feed.health() != Health::Up || self.rest.as_ref().is_some_and(Backoff::holds) {
             return Vec::new();
         }
         let held = |key: &state::Key| {
@@ -201,88 +254,29 @@ impl Feed {
                 key: key.clone(),
             })
         };
-        let read = self.sync(project, entry).and_then(|()| match &self.repo {
-            Some(repo) => read(repo, project, entry, &held),
-            None => Ok((Vec::new(), Vec::new())),
-        });
-        match read {
+        let report = |why: &Error| event::skip(project, why);
+        match repo::open(project).and_then(|repo| read(&repo, entry, &held)) {
             Ok((snapshots, faults)) => {
-                self.rest = None;
-                let report = |why: &Error| event::skip(project, why);
                 self.offline.report(&[], report);
                 self.skipped.report(&faults, report);
                 self.report(project, &snapshots);
                 snapshots
             }
             Err(why) => {
-                self.fail(project, entry, why);
+                self.offline.report(&[why], report);
                 Vec::new()
             }
         }
     }
 
-    /// Report once per cause, then rest: `fetch` first, doubling per fault in a
-    /// row, up to `host::REST_MAX`.
-    fn fail(&mut self, project: &Project, entry: &Entry, why: Error) {
-        self.offline
-            .report(&[why], |why: &Error| event::skip(project, why));
-        let cap = host::REST_MAX.max(entry.fetch);
-        let wait = self
-            .rest
-            .as_ref()
-            .map_or(entry.fetch, |rest| (rest.wait * 2).min(cap));
-        self.rest = Some(Rest {
-            until: Instant::now() + wait,
-            wait,
-        });
-    }
-
-    /// Bare repo made on first sight, origin written on change, fetch once due
-    /// with one retry that heals a hand-edited repo, kept refs mirrored on change.
-    fn sync(&mut self, project: &Project, entry: &Entry) -> Result<()> {
-        let repo = match self.repo.take() {
-            Some(repo) => repo,
-            None => {
-                let (repo, made) = repo::open_or_make(project, &entry.remote)?;
-                if made {
-                    self.origin = Some(entry.remote.clone());
-                    self.fetched = Some(Instant::now());
-                }
-                repo
-            }
-        };
-        let repo = self.repo.insert(repo);
-        if self.origin.as_ref() != Some(&entry.remote) {
-            repo.set_origin(&entry.remote)?;
-            self.origin = Some(entry.remote.clone());
-        }
-        if self
-            .fetched
-            .is_none_or(|last| last.elapsed() >= entry.fetch)
-        {
-            if repo.fetch().is_err() {
-                repo.set_origin(&entry.remote)?;
-                repo.fetch()?;
-            }
-            self.fetched = Some(Instant::now());
-        }
-        let kept = repo.refs(git::KEPT)?;
-        if self.mirrored.as_ref() != Some(&kept) {
-            repo.mirror_kept()?;
-            event::mirror(project, kept.len());
-            self.mirrored = Some(kept);
-        }
-        Ok(())
-    }
-
-    /// One `fetch` line per track whose tip or base moved.
+    /// One `tip` line per track whose tip or base moved.
     fn report(&mut self, project: &Project, snapshots: &[Snapshot]) {
         let mut tips = BTreeMap::new();
         for snapshot in snapshots {
             let name = &snapshot.track.name;
             let now = (snapshot.track.tip.clone(), snapshot.base.clone());
             if self.tips.get(name) != Some(&now) {
-                event::fetch(project, name, &now.0, &now.1);
+                event::tip(project, name, &now.0, &now.1);
             }
             tips.insert(name.clone(), now);
         }
@@ -290,11 +284,10 @@ impl Feed {
     }
 }
 
-/// Every track that passes its checks, with rows and states, plus the fault of
-/// each track skipped. Git failing faults the project.
+/// Every track that passes its checks and whose `to` stands, with rows and
+/// states, plus the fault of each track skipped. Git failing faults the project.
 fn read(
     repo: &Git,
-    project: &Project,
     entry: &Entry,
     held: &dyn Fn(&state::Key) -> Result<bool>,
 ) -> Result<(Vec<Snapshot>, Vec<Error>)> {
@@ -306,14 +299,8 @@ fn read(
             faults.push(track.invalid(&why.to_string()));
             continue;
         }
-        match open_to(repo, project, &track) {
-            Ok(true) => {}
-            Ok(false) => continue,
-            Err(why @ Error::Invalid(_)) => {
-                faults.push(why);
-                continue;
-            }
-            Err(why) => return Err(why),
+        if repo.commit_of(&git::remote_branch(&track.to))?.is_none() {
+            continue;
         }
         match state::snapshot(repo, track, held) {
             Ok(snapshot) => snapshots.push(snapshot),
@@ -324,28 +311,8 @@ fn read(
     Ok((snapshots, faults))
 }
 
-/// True once `to` stands: made here at its start and pushed, when absent.
-/// `false`: another push made it first, the next fetch reads it.
-fn open_to(repo: &Git, project: &Project, track: &Track) -> Result<bool> {
-    if repo.commit_of(&git::remote_branch(&track.to))?.is_some() {
-        return Ok(true);
-    }
-    let start = track.start(repo)?;
-    match repo.push(&start, &track.to)? {
-        Push::Done => {
-            event::open(project, &track.name, &track.to, &start);
-            Ok(true)
-        }
-        Push::Behind => Ok(false),
-        Push::Declined(why) => Err(track.invalid(&format!(
-            "field `to` must name a branch the remote lets this host make: {why}"
-        ))),
-    }
-}
-
-/// Queued rows of one track of project number `project`: new rows, rows cut
-/// short, rows whose land commit left `to`.
-fn queue(project: usize, snapshot: &Snapshot) -> Queue {
+/// Queued rows of one track: new rows, rows cut short, rows whose land commit left `to`.
+fn queue(snapshot: &Snapshot) -> Queue {
     let rows = |state: State| {
         snapshot
             .states
@@ -355,7 +322,6 @@ fn queue(project: usize, snapshot: &Snapshot) -> Queue {
             .map(|(row, _)| row)
     };
     Queue {
-        project,
         priority: snapshot.track.priority,
         running: rows(State::Running).count(),
         rows: rows(State::Queued).collect(),

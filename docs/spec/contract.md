@@ -125,7 +125,8 @@ projects:
 - `mounts`: extra `host:container` binds, rw, into this project's containers alone. Both sides absolute; host side takes `~/` for home. Build caches ride here. A host path inside, or holding, a host path of another project's `mounts` fails the file: two projects share no writable path.
 - `env`: ordered rules. `match` is a glob on track names, `*` for any run of characters. The first rule that matches binds credentials into each container of that track's rows: `set` maps an environment variable name to a credential name. Both take letters, digits, `_`. No match: none. Value never reaches an argument list.
 - These fields cannot sit in a repo: `remote` and `tracks` say where repo text comes from, `env` keeps one team's key from another team's track, and the rest changes with the machine.
-- Every field reloads on the next cycle. A project added opens on the next cycle: bare repo, `origin`, fetch, then the land and fail refs of the remote. A project removed stops scheduling; its rows in flight run on.
+- Every field reloads on the next cycle. A project added starts its feed thread on the next cycle, which makes the bare repo: `origin`, fetch, then the land and fail refs of the remote. A project removed stops scheduling and its feed ends after its current call; added back before then, it opens once that call ends, so one feed at most runs per project; its rows in flight run on, and their land and fail refs reach the remote only once the project returns.
+- `remote` must match `origin` of a standing bare repo. Another URL skips the project, reported once, with no network call, until the bare repo is deleted: its land and fail refs belong to the old remote.
 - `serve` converges slots each cycle, at start too: drops each idle slot at or above `workers`, and frees the branch of each idle slot below it once per `serve` life. A busy slot drops after its row ends. The worker makes the worktree of its slot and the container. It remakes the worktree when the row's project differs, and the container when it differs from the row in `mounts`, device nodes, image ID or bare repo. A GPU node renumbered at boot remakes it at the next row.
 - `env` bindings and credential values apply from the next row on. No container bakes them.
 - Absent or unparsable at start: exit 1. Unparsable later: `serve` reports `stale` once per cause, keeps the last good copy, keeps running.
@@ -172,11 +173,11 @@ merge:
 ## Git
 
 - Remote: `remote` of the project entry. Humans push `from` branches, track branches, and commits on `to`. The tool pushes `to`, land refs and fail refs.
-- Workers and `reset` write land refs and fail refs in the bare repo alone. `serve`, each cycle they changed since its last push, and `reset`, when done, push `refs/swarm/*` with force and prune: the remote then holds exactly the bare repo's set.
-- Bare repo `~/swarm/<project>.git`, `origin` = `remote`, refspec `+refs/heads/*:refs/remotes/origin/*`: the layout of any clone. `serve` makes it on first sight of the project, writes `origin` when `remote` changes, and again after a failed fetch, so a hand-edited bare repo heals. A failed fetch, mirror or read reports `skip` once per cause, and its project rests: no network call and no row of it until the rest ends. The rest starts at `fetch` seconds and doubles per fault in a row, up to 15 min; a good cycle ends it. Other projects run. `status` reads the last fetch.
+- Workers and `reset` write land refs and fail refs in the bare repo alone. The project's feed thread, each `poll` they changed since its last push, and `reset`, when done, push `refs/swarm/*` with force and prune: the remote then holds exactly the bare repo's set.
+- Bare repo `~/swarm/<project>.git`, `origin` = `remote`, refspec `+refs/heads/*:refs/remotes/origin/*`: the layout of any clone. One feed thread per project makes every network call of `serve`; the scheduler cycle reads local refs alone. The feed makes the bare repo on first sight of the project, checks `origin` and writes the refspec at start and after a failed fetch, so a hand-edited refspec heals. One fetch per try. A failed open, fetch or mirror reports `skip` once per cause, and its project rests: no network call and no row of it until the rest ends. The rest starts at `fetch` seconds and doubles per fault in a row, up to 15 min; a good sync ends it. A failed local read skips the project for that cycle and reports once. Other projects run. `status` reads the last fetch.
 - Every git call to a remote runs with `core.sshCommand=ssh -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4`, `http.lowSpeedLimit=1000` and `http.lowSpeedTime=60`. A dead or stalled remote fails the call; git exits on its own and drops its locks.
 - A new bare repo fetches the land refs and fail refs of the remote once, before any mirror. Without that fetch, the first push of `refs/swarm/*` deletes them on the remote. The repo grows at `~/swarm/<project>.git.partial` and takes its name once that fetch lands, so a fault leaves no half-made repo.
-- `serve` makes each absent `to` at `at`, or at the `from` tip, and pushes it.
+- The feed makes each absent `to` at `at`, or at the `from` tip, and pushes it after each fetch. A track with no `to` runs no row.
 
 | Ref | Holds | Where |
 |---|---|---|
@@ -211,7 +212,7 @@ merge:
 - A branch with no land ref holds a session cut short, unless a worker holds the row lock. `serve` reads it as queued and the worker replays the row from the `to` tip.
 - A pushed row clears its own fail refs. `reset <track>/<id>` clears branch, land ref and fail refs of the row and of every dependant in its track, here, then on the remote.
 - A try fails on non-zero exit, a signal, `timeout`, a blank agent commit reply, or no `session_id` from an agent with `resume`. A step whose tries are spent fails the row and marks it, except a `run` step with `continue_on_error`.
-- A git or podman failure in a slot is no row failure. It writes no mark: the worker exits 2, `serve` reports `skip` for the project, its project rests: no network call and no row of it until the rest ends. The rest starts at `fetch` seconds and doubles per fault in a row, up to 15 min; a good cycle ends it, and the row replays. Workers on other slots run on. A failed image build or pull is a row failure: the worker reaches podman before it builds, so a podman that answers nothing stays a machine fault.
+- A git or podman failure in a slot is no row failure. It writes no mark: the worker exits 2, `serve` reports `skip` for the project once per cause, and the project rests: no row of it until the rest ends, then the row replays. The rest starts at 60 s and doubles per fault in a row, up to 15 min. Only a worker of the project that exits 0 ends the doubling and clears the reported causes. Workers on other slots run on. A failed image build or pull is a row failure: the worker reaches podman before it builds, so a podman that answers nothing stays a machine fault.
 - Locks: flock on 5 standing directories, no file written. The kernel drops a lock when its holder dies, so a crash leaves nothing to clean.
 
 | Lock | Directory | Holder | `serve` while held |
@@ -247,7 +248,7 @@ scswarm work PROJECT --slot N --track NAME --row ID --track-tip SHA --base SHA
 
 Event lines name a row `<project>/<track>/<id>`, and a project fault `skip project=<project>`.
 
-Exit codes: 0 ok, 1 input invalid (host file, track file, config, unknown row), 2 git or podman failure. `serve` exits 1 only on a host file invalid at start: an invalid track or config skips that track. `work` exits 0 once it pushes the row or writes the fail refs, 2 on a git or podman failure. A worker exit other than 0 rests its project; `serve` runs on.
+Exit codes: 0 ok, 1 input invalid (host file, track file, config, unknown row), 2 git or podman failure. `serve` exits 1 only on a host file invalid at start: an invalid track or config skips that track. `work` exits 0 once it pushes the row or writes the fail refs, 2 on a git or podman failure. A worker exit 1 reports `skip` once and rests nothing. Any other worker failure, a signal included, rests its project; `serve` runs on.
 
 `work` argv and stdin bind across versions: a `serve` started before `cargo install` spawns the new binary. Stdin holds the row lock: `work` refuses a stdin that is not that directory. A change to either needs a release note.
 
@@ -297,7 +298,10 @@ Image: `image` names a Containerfile at the base, built with no tag and run by I
 - The transcript keeps full stdout and stderr of every try. Redirect big output to a file.
 - A git or podman failure in one slot rests its project. That row replays from base once the rest ends; rows on other slots run on. A remote out of reach is such a failure; a remote that turns a push down fails the row.
 - Podman broken for every slot rests every project in turn, and `serve` keeps running. The journal shows one `skip` per project and cause.
-- A dead remote holds each cycle that tries it up to the transport bounds. The ssh bound replaces any `core.sshCommand` in git config.
+- A dead remote holds its own feed thread up to the transport bounds; other projects schedule on. The ssh bound replaces any `core.sshCommand` in git config.
+- The scheduler reads refs while a fetch writes them: one cycle can see a new track tip with the old `to`. Each worker runs on the tips it was handed.
+- A worker exit 1 rests nothing: a row whose input fails every time spawns a worker each cycle until its track or `to` moves.
+- Old slot containers `scswarm-<project>-<n>` from before one swarm ran many repos stay after the upgrade: `podman rm --force` them.
 - A kill between the failure and the fail ref write loses the mark. The row runs once more.
 - A kill between the commit and the land ref write leaves a branch the next cycle replays. A kill after the land ref write leaves a row the next cycle merges into `to`.
 - `reset` a row only while no worker runs it. A running worker recreates the refs at its next commit, and stopping `serve` stops no worker.

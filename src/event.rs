@@ -6,9 +6,9 @@ use crate::paths::Project;
 
 /// Sole writer of `serve` loop lines. Progress on stdout, faults on stderr.
 /// journald stamps each line, so none carries a time field.
-pub fn fetch(project: &Project, track: &str, tip: &str, to: &str) {
+pub fn tip(project: &Project, track: &str, tip: &str, to: &str) {
     println!(
-        "fetch project={project} track={track} tip={} to={}",
+        "tip project={project} track={track} tip={} to={}",
         short(tip),
         short(to)
     );
@@ -82,6 +82,22 @@ impl Latch {
             }
         }
         self.0 = causes;
+    }
+}
+
+/// Causes reported since the last `clear`, however many cycles ago. A repeat stays quiet.
+#[derive(Default)]
+pub struct Seen(BTreeSet<String>);
+
+impl Seen {
+    pub fn once(&mut self, why: &Error, emit: impl Fn(&Error)) {
+        if self.0.insert(why.to_string()) {
+            emit(why);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
     }
 }
 

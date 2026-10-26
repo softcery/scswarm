@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::{lock, paths, proc};
+use crate::{host, lock, paths, proc};
 
 const BIN: &str = "git";
 
@@ -22,15 +22,6 @@ const REF_STORE: &str = "refs";
 const REFUSED: char = '!';
 const BEHIND: &str = "[rejected]";
 const DECLINED: &str = "[remote rejected]";
-/// Remote call bounds: git fails on its own and drops its locks.
-const NETWORK: [&str; 6] = [
-    "-c",
-    "core.sshCommand=ssh -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4",
-    "-c",
-    "http.lowSpeedLimit=1000",
-    "-c",
-    "http.lowSpeedTime=60",
-];
 
 pub const HEADS: &str = "refs/heads/";
 const HEAD: &str = "HEAD";
@@ -73,6 +64,12 @@ impl Git {
         self.set_config(ORIGIN_FETCH, BRANCHES)
     }
 
+    /// URL `origin` points at. `None` when unset.
+    pub fn origin(&self) -> Result<Option<String>> {
+        let url = proc::lookup(BIN, &self.root, &["config", "--get", ORIGIN_URL])?;
+        Ok(url.map(|url| url.trim().to_string()))
+    }
+
     fn set_config(&self, key: &str, value: &str) -> Result<()> {
         run(&self.root, &["config", "--replace-all", key, value]).map(drop)
     }
@@ -101,7 +98,7 @@ impl Git {
     pub fn push(&self, commit: &str, branch: &str) -> Result<Push> {
         let _store = lock::hold(&self.root.join(REF_STORE))?;
         let spec = format!("{commit}:{}", branch_ref(branch));
-        let args = [&NETWORK[..], &["push", "--porcelain", ORIGIN, &spec]].concat();
+        let args = bounded(&["push", "--porcelain", ORIGIN, &spec]);
         let out = proc::answer(BIN, &self.root, &args)?;
         if out.status.success() {
             return Ok(Push::Done);
@@ -354,7 +351,24 @@ fn run(dir: &Path, args: &[&str]) -> Result<String> {
 }
 
 fn remote(dir: &Path, args: &[&str]) -> Result<String> {
-    run(dir, &[&NETWORK[..], args].concat())
+    proc::run(BIN, dir, &bounded(args))
+}
+
+/// `args` after the transport bounds of `host`.
+fn bounded(args: &[&str]) -> Vec<String> {
+    let ssh = format!(
+        "core.sshCommand=ssh -o ConnectTimeout={} -o ServerAliveInterval={} -o ServerAliveCountMax={}",
+        host::SSH_CONNECT,
+        host::SSH_ALIVE,
+        host::SSH_ALIVE_MISSED
+    );
+    let speed = format!("http.lowSpeedLimit={}", host::LOW_SPEED);
+    let time = format!("http.lowSpeedTime={}", host::LOW_SPEED_TIME);
+    ["-c", &ssh, "-c", &speed, "-c", &time]
+        .into_iter()
+        .chain(args.iter().copied())
+        .map(str::to_string)
+        .collect()
 }
 
 fn probe(dir: &Path, args: &[&str]) -> Result<bool> {

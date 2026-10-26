@@ -5,6 +5,7 @@ mod credential;
 mod device;
 mod error;
 mod event;
+mod feed;
 mod git;
 mod host;
 mod lock;

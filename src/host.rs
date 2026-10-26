@@ -16,9 +16,17 @@ use crate::yaml;
 const POLL: u64 = 5;
 /// Seconds between fetches of one remote when its entry sets none.
 const FETCH: u64 = 60;
-/// Longest rest of a project whose remote or worker failed. Waits double from
-/// `fetch` up to this.
+/// First rest of a project whose worker failed. A failed remote rests `fetch` first.
+pub const REST_FIRST: Duration = Duration::from_secs(60);
+/// Longest rest of a project: each rest doubles up to this.
 pub const REST_MAX: Duration = Duration::from_secs(900);
+/// Bounds of each git call to a remote, in seconds and bytes per second: a dead
+/// or stalled remote fails the call, so git drops its own locks.
+pub const SSH_CONNECT: u64 = 30;
+pub const SSH_ALIVE: u64 = 15;
+pub const SSH_ALIVE_MISSED: u64 = 4;
+pub const LOW_SPEED: u64 = 1000;
+pub const LOW_SPEED_TIME: u64 = 60;
 /// Glob character that stands for any run of characters in `env` field `match`.
 const ANY: char = '*';
 
@@ -34,7 +42,7 @@ pub struct Host {
 }
 
 /// One project: where its repo text comes from, what its rows get.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     /// Git URL or path the bare repo fetches from and pushes to. `~/` resolved.
     pub remote: String,
@@ -48,7 +56,7 @@ pub struct Entry {
 }
 
 /// Credentials bound into the containers of every track `pattern` matches.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvRule {
     pub pattern: String,
     pub set: Vec<Binding>,

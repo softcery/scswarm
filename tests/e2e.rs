@@ -20,6 +20,8 @@ const ROWS: [&str; 3] = ["a/row-1", "a/row-2", "a/row-3"];
 const OTHER: &str = "b/other-1";
 /// Sole row of the second project.
 const ELSEWHERE: &str = "c/one";
+/// Third project: its remote never exists.
+const DEAD: &str = "scswarm-e2e-dead";
 /// First line of every host file the test writes. Any other host file is a live swarm.
 const MARK: &str = "# scswarm-e2e";
 /// Every slot container: `scswarm-<n>`.
@@ -52,6 +54,7 @@ fn slot_set_follows_host_file_live() {
     survives_bad_track(&swarm);
     rolls_image(&swarm);
     switches_project(&swarm);
+    rests_dead_project(&swarm);
     let restarted = outlives_serve(&mut swarm);
     pushes_every_track(&swarm, restarted);
     let creates = swarm
@@ -193,7 +196,7 @@ fn survives_bad_track(swarm: &Swarm) {
     assert_eq!(skips, 1, "a repeated track fault must report once");
     swarm.commit_on("track/a", "SWARM.yaml", &track_a(), "e2e: track fixed");
     let fixed = swarm.mark();
-    swarm.wait(&format!("fetch project={PROJECT} track=a "), fixed);
+    swarm.wait(&format!("tip project={PROJECT} track=a "), fixed);
     swarm.rerun(&ROWS[1..2], fixed);
     swarm.wait(&format!("push row={} ", label(ROWS[1])), fixed);
     swarm.quiet(from);
@@ -255,6 +258,24 @@ fn switches_project(swarm: &Swarm) {
     }
 }
 
+/// Third project whose remote is gone: one `skip` while it rests, and the first
+/// project lands a row meanwhile.
+fn rests_dead_project(swarm: &Swarm) {
+    let from = swarm.mark();
+    swarm.with_dead(3, &[EXTRA.0]);
+    let skip = format!("skip project={DEAD} ");
+    swarm.wait(&skip, from);
+    swarm.rerun(&ROWS[..1], from);
+    swarm.wait(&format!("push row={} ", label(ROWS[0])), from);
+    let skips = swarm.lines()[from..]
+        .iter()
+        .filter(|line| line.starts_with(&skip))
+        .count();
+    assert_eq!(skips, 1, "a dead remote must report once");
+    swarm.with_second(3, &[EXTRA.0]);
+    thread::sleep(CYCLES);
+}
+
 /// SIGKILL on `serve` mid-row: the worker runs on, a new `serve` waits on its
 /// locks. The row lands once, one try per step. Returns the restart line.
 fn outlives_serve(swarm: &mut Swarm) -> usize {
@@ -266,7 +287,7 @@ fn outlives_serve(swarm: &mut Swarm) -> usize {
     swarm.kill();
     let restarted = swarm.mark();
     swarm.serve();
-    swarm.wait("fetch project=", restarted);
+    swarm.wait("tip project=", restarted);
     let second = command()
         .arg("serve")
         .output()
@@ -428,14 +449,24 @@ impl Swarm {
     }
 
     fn host(&self, workers: usize, env: &[&str]) {
-        self.write_host(workers, env, false);
+        self.write_host(workers, env, &[]);
     }
 
     fn with_second(&self, workers: usize, env: &[&str]) {
-        self.write_host(workers, env, true);
+        self.write_host(workers, env, &[(SECOND, self.second_remote())]);
     }
 
-    fn write_host(&self, workers: usize, env: &[&str], second: bool) {
+    fn with_dead(&self, workers: usize, env: &[&str]) {
+        let dead = scratch().join("dead.git");
+        self.write_host(
+            workers,
+            env,
+            &[(SECOND, self.second_remote()), (DEAD, dead)],
+        );
+    }
+
+    /// First project, then each of `others` by name and remote.
+    fn write_host(&self, workers: usize, env: &[&str], others: &[(&str, PathBuf)]) {
         let file = host_file();
         fs::create_dir_all(file.parent().expect("host file has a dir"))
             .expect("config dir must be writable");
@@ -445,7 +476,7 @@ impl Swarm {
             .map(|name| format!("{name}: {name}"))
             .collect::<Vec<_>>()
             .join(", ");
-        let entry = |name: &str, remote: PathBuf| {
+        let entry = |name: &str, remote: &PathBuf| {
             format!(
                 "  {name}:\n    remote: {}\n    tracks: track/\n    fetch: 1\n    env:\n      - match: '*'\n        set: {{ {set} }}\n",
                 remote.display()
@@ -453,10 +484,10 @@ impl Swarm {
         };
         let mut text = format!(
             "{MARK}\nworkers: {workers}\npoll: 1\nprojects:\n{}",
-            entry(PROJECT, self.remote())
+            entry(PROJECT, &self.remote())
         );
-        if second {
-            text.push_str(&entry(SECOND, self.second_remote()));
+        for (name, remote) in others {
+            text.push_str(&entry(name, remote));
         }
         fs::write(&file, text).expect("host file must be writable");
     }
@@ -702,9 +733,10 @@ fn clean() {
     }
     let swarm = home().join("swarm");
     let _ = fs::remove_dir_all(swarm.join("slot"));
-    for project in [PROJECT, SECOND] {
+    for project in [PROJECT, SECOND, DEAD] {
         for dir in [
             swarm.join(format!("{project}.git")),
+            swarm.join(format!("{project}.git.partial")),
             swarm.join("log").join(project),
             swarm.join("build").join(project),
         ] {

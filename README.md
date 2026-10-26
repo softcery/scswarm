@@ -70,13 +70,18 @@ cargo install --path .
 
 Job queue with a worker pool. Queue = the track branches. Workers = slots. State = git.
 
-Every `poll` seconds, 5 by default, the loop runs each project in its own thread:
+Each project has its own feed thread for the network. Every `poll` seconds, 5 by default, it:
 
-1. Fetches every branch of `remote` once `fetch` seconds passed, 60 by default. Pushes land and fail refs when they changed.
-2. Reads each track branch under `tracks`. Makes and pushes each absent `to`.
-3. Parses `scswarm.yaml` at each `to` tip, derives the state of every row: waiting, queued, running, failed, pushed, merged.
+1. Fetches every branch of `remote` once `fetch` seconds passed, 60 by default.
+2. Pushes land and fail refs when they changed.
+3. After a fetch, makes and pushes each absent `to`.
 
-Then it starts one worker process, `scswarm work`, per queued row and free slot: the project with fewest rows running first, then the project served longest ago, then highest `priority` inside it, then the track with fewest rows running. Then it sleeps. A project whose remote fails skips the cycle; the others run.
+Every `poll` seconds the loop reads each project from local refs, in its own thread:
+
+1. Reads each track branch under `tracks`.
+2. Parses `scswarm.yaml` at each `to` tip, derives the state of every row: waiting, queued, running, failed, pushed, merged.
+
+Then it starts one worker process, `scswarm work`, per queued row and free slot: the project with fewest rows running first, then the project served longest ago, then highest `priority` inside it, then the track with fewest rows running. Then it sleeps. A project whose remote fails rests; the others run.
 
 A slot is a git worktree at `~/swarm/slot/<n>/tree` plus one long-lived container `scswarm-<n>`. Slots take rows of any project. A row of another project drops the worktree and container and makes them from its own repo.
 
@@ -326,7 +331,9 @@ macOS runs containers in a podman machine VM. Start it with `podman machine init
 
 **Row shows `failed`.** Read `scswarm log PROJECT ROW` for the failing step. A failed row waits for a new track tip or `to` tip, so it costs one attempt per push, not one per cycle. To rerun without a push, run `reset`.
 
-**`skip project=P` with no track.** The remote of `P` was out of reach, or git or podman failed in one of its rows. No row got a fail mark. A push the remote turns down, for example branch protection on `to`, fails that row instead. `P` rests: no fetch and no row for 1 `fetch` interval, doubling per fault in a row, up to 15 min. The other projects run on. Read the cause in the journal, or in `~/Library/Logs/scswarm.log` on macOS, and fix the remote or the machine. The first good cycle after the rest ends it, and the row replays.
+**`skip project=P` with no track.** The remote of `P` was out of reach, or git or podman failed in one of its rows. No row got a fail mark. A push the remote turns down, for example branch protection on `to`, fails that row instead. `P` rests: no row for 1 `fetch` interval after a remote fault, 60 s after a slot fault, doubling per fault in a row, up to 15 min. The other projects run on. Read the cause in the journal, or in `~/Library/Logs/scswarm.log` on macOS, and fix the remote or the machine. A remote fault ends at the first good fetch; a slot fault ends once a worker of `P` exits 0. The row replays.
+
+**`skip project=P` naming field `remote`.** `remote` names another URL than `origin` of `~/swarm/P.git`. If the repo moved and the old one is gone, delete `~/swarm/P.git`: the next cycle makes it again from the new remote.
 
 **Rerun a row.** Wait until `status` shows no worker for it, then run `scswarm reset PROJECT ROW`. Its old commits stay on `to`: revert them there if you want them gone. A worker running that row recreates the refs at its next commit. Stopping `serve` stops no worker.
 
@@ -378,7 +385,8 @@ git -C ~/swarm/PROJECT.git for-each-ref refs/swarm/
 - Locks sit on `~/swarm`, which must be a local filesystem. NFS breaks them.
 - A worker hung outside a step holds its slot until killed.
 - A git or podman fault in one slot rests its project, up to 15 min.
-- A dead remote holds each cycle that tries it up to 30 s on connect, or about 60 s on a stalled transfer.
+- A dead remote holds its project's feed up to 30 s on connect, or about 60 s on a stalled transfer. Other projects run on.
+- After the upgrade to one swarm for many repos, old containers `scswarm-<project>-<n>` stay. Remove them with `podman rm --force`.
 - scswarm sets `core.sshCommand` for each remote call, which replaces your own. Put per-repo keys in `~/.ssh/config`.
 - One swarm per unix user. Shell access to that user reaches every project's repos, transcripts and credentials.
 - `devices` and the network reach every project's containers.

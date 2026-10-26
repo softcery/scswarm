@@ -10,11 +10,15 @@ pub enum Error {
     Failed(String),
 }
 
+/// Exit codes, also read back from workers.
+pub const INVALID: i32 = 1;
+pub const FAILED: i32 = 2;
+
 impl Error {
     pub fn code(&self) -> i32 {
         match self {
-            Error::Invalid(_) => 1,
-            Error::Failed(_) => 2,
+            Error::Invalid(_) => INVALID,
+            Error::Failed(_) => FAILED,
         }
     }
 }

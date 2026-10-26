@@ -230,7 +230,8 @@ merge:
 ```
 scswarm serve                   foreground loop over every project; run under systemd or launchd
 scswarm status [PROJECT]        one line per row of every track: project, row, state, branch,
-                                  worker; every project when none is named
+                                  worker; every project when none is named. A project
+                                  with no bare repo yet exits 1 after the others print
                                   state: waiting, queued, running, failed, pushed, merged
 scswarm status --tracks PREFIX  same, read from the clone in the working directory; that
                                   clone fetches +refs/swarm/*:refs/swarm/*. Running reads as

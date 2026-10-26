@@ -22,11 +22,10 @@ pub struct Source {
     pub tracks: String,
 }
 
-/// One line per row of every track of every source, from git and row locks. A
-/// clone has no locks, so running reads as queued. A failed track check exits 1.
-pub fn status(sources: &[Source]) -> Result<()> {
+/// One line per row of every source, from git and row locks; a clone reads running
+/// as queued. Exit 1 on a failed track check or any of `faults`.
+pub fn status(sources: &[Source], mut faults: Vec<Error>) -> Result<()> {
     let mut table = vec![HEADER.map(str::to_string)];
-    let mut faults = Vec::new();
     for source in sources {
         faults.extend(list(source, &mut table)?);
     }

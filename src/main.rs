@@ -87,28 +87,33 @@ fn dispatch(command: Command) -> Result<()> {
         Command::Status {
             tracks: Some(prefix),
             ..
-        } => status::status(&[Source {
-            project: None,
-            repo: Git::at(paths::here()?),
-            tracks: prefix,
-        }]),
+        } => status::status(
+            &[Source {
+                project: None,
+                repo: Git::at(paths::here()?),
+                tracks: prefix,
+            }],
+            Vec::new(),
+        ),
         Command::Status { project, .. } => {
             let host = Host::load()?;
             let projects = match project {
                 Some(project) => vec![project],
                 None => host.projects.keys().cloned().collect(),
             };
-            let sources = projects
-                .into_iter()
-                .map(|project| {
-                    Ok(Source {
-                        tracks: host.entry(&project)?.tracks.clone(),
-                        repo: repo::open(&project)?,
+            let (mut sources, mut faults) = (Vec::new(), Vec::new());
+            for project in projects {
+                let tracks = host.entry(&project)?.tracks.clone();
+                match repo::open(&project) {
+                    Ok(repo) => sources.push(Source {
                         project: Some(project),
-                    })
-                })
-                .collect::<Result<Vec<Source>>>()?;
-            status::status(&sources)
+                        repo,
+                        tracks,
+                    }),
+                    Err(why) => faults.push(why),
+                }
+            }
+            status::status(&sources, faults)
         }
         Command::Log { project, row } => log::log(&Address {
             project,

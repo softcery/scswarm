@@ -38,6 +38,8 @@ struct Server {
     /// One per project of the host file. A project dropped from the file drops
     /// its feed; its rows in flight run on.
     feeds: BTreeMap<Project, Feed>,
+    /// Rows assigned in this `serve` life: orders projects by turn.
+    turn: u64,
     stale: Latch,
 }
 
@@ -53,6 +55,8 @@ struct Feed {
     mirrored: Option<BTreeMap<String, String>>,
     /// Track tip and base last reported, by track name.
     tips: BTreeMap<String, (String, String)>,
+    /// Turn of the last row assigned, 0 for none.
+    served: u64,
     /// `Some` while the project rests after a fault.
     rest: Option<Rest>,
     /// Faults of the project as a whole, then of single tracks.
@@ -73,6 +77,7 @@ impl Server {
             pool: Pool::open()?,
             host: Host::load()?,
             feeds: BTreeMap::new(),
+            turn: 0,
             stale: Latch::default(),
         })
     }
@@ -109,9 +114,18 @@ impl Server {
             .iter()
             .flat_map(|(project, held)| held.iter().map(move |one| (project, one)))
             .collect();
-        for ((at, row), slot) in pool::schedule(&queues, idle.len()).into_iter().zip(idle) {
+        let served: Vec<u64> = snapshots
+            .iter()
+            .map(|(project, _)| self.feeds.get(project).map_or(0, |feed| feed.served))
+            .collect();
+        let picks = pool::schedule(&queues, &served, idle.len());
+        for ((at, row), slot) in picks.into_iter().zip(idle) {
             let (project, snapshot) = flat[at];
             let entry = self.host.entry(project)?;
+            self.turn += 1;
+            if let Some(feed) = self.feeds.get_mut(project) {
+                feed.served = self.turn;
+            }
             let track = &snapshot.track;
             self.pool.assign(Job {
                 project: project.clone(),

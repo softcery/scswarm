@@ -253,7 +253,7 @@ Exit codes: 0 ok, 1 input invalid (host file, track file, config, unknown row), 
 
 `serve` spawns each worker with stdout and stderr shared, so worker lines reach the same journal, also after `serve` dies. A worker whose `serve` died runs to its end; the process manager reaps it. `systemctl stop` and `restart` end `serve` alone under the shipped unit, `KillMode=process`: rows in flight finish, no new row starts. The shipped launchd agent does the same through `AbandonProcessGroup`, for `launchctl kickstart -k` and `bootout`.
 
-Scheduling: each idle slot, lowest number first, takes a queued row. The project with fewest rows running first, so projects take turns; inside it, highest `priority`; among tracks of equal priority, the track with fewest rows running, so tracks take turns; file order inside a track. No preemption. `priority` never reaches across projects.
+Scheduling: each idle slot, lowest number first, takes a queued row. The project with fewest rows running first, then the project served longest ago, so projects take turns; inside it, highest `priority`; among tracks of equal priority, the track with fewest rows running, so tracks take turns; file order inside a track. No preemption. `priority` never reaches across projects. `serve` keeps served order in memory: a restart starts every project even.
 
 ## Container
 

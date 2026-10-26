@@ -36,13 +36,13 @@ pub struct Queue {
     pub rows: Vec<usize>,
 }
 
-/// Up to `slots` (queue, row) picks. Rank: rows running in the project, priority,
-/// rows running in the track, file order. No preemption.
-pub fn schedule(queues: &[Queue], slots: usize) -> Vec<(usize, usize)> {
+/// Up to `slots` (queue, row) picks. `served`: last turn per project index. Project
+/// by rows running, turn, index; inside it priority, track rows running, file order.
+pub fn schedule(queues: &[Queue], served: &[u64], slots: usize) -> Vec<(usize, usize)> {
     let mut running: Vec<usize> = queues.iter().map(|queue| queue.running).collect();
-    let mut shares: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut shares = vec![0; served.len()];
     for queue in queues {
-        *shares.entry(queue.project).or_default() += queue.running;
+        shares[queue.project] += queue.running;
     }
     let mut next = vec![0; queues.len()];
     let mut picked = Vec::new();
@@ -51,8 +51,9 @@ pub fn schedule(queues: &[Queue], slots: usize) -> Vec<(usize, usize)> {
             .filter(|&at| next[at] < queues[at].rows.len())
             .min_by_key(|&at| {
                 let queue = &queues[at];
-                let share = shares.get(&queue.project).copied().unwrap_or_default();
-                (share, Reverse(queue.priority), running[at], at)
+                let project = queue.project;
+                let own = (Reverse(queue.priority), running[at], at);
+                (shares[project], served[project], project, own)
             })
         else {
             break;
@@ -60,7 +61,7 @@ pub fn schedule(queues: &[Queue], slots: usize) -> Vec<(usize, usize)> {
         picked.push((at, queues[at].rows[next[at]]));
         next[at] += 1;
         running[at] += 1;
-        *shares.entry(queues[at].project).or_default() += 1;
+        shares[queues[at].project] += 1;
     }
     picked
 }
@@ -200,8 +201,38 @@ mod tests {
             queue(1, 0, 0, &[5, 6]),
         ];
         assert_eq!(
-            schedule(&queues, 5),
+            schedule(&queues, &[0, 0], 5),
             [(3, 5), (2, 4), (3, 6), (1, 2), (0, 0)]
         );
+    }
+
+    /// One slot, both projects idle each cycle: neither name order nor a
+    /// higher `priority` keeps the slot.
+    #[test]
+    fn idle_projects_alternate_across_cycles() {
+        let queues = [
+            Queue {
+                project: 0,
+                priority: 10,
+                running: 0,
+                rows: vec![0],
+            },
+            Queue {
+                project: 1,
+                priority: 0,
+                running: 0,
+                rows: vec![1],
+            },
+        ];
+        let mut served = [0, 0];
+        let mut picks = Vec::new();
+        for turn in 1..=4 {
+            let [(at, row)] = schedule(&queues, &served, 1)[..] else {
+                panic!("one slot must take one row");
+            };
+            served[queues[at].project] = turn;
+            picks.push(row);
+        }
+        assert_eq!(picks, [0, 1, 0, 1]);
     }
 }

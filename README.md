@@ -76,7 +76,7 @@ Every `poll` seconds, 5 by default, the loop runs each project in its own thread
 2. Reads each track branch under `tracks`. Makes and pushes each absent `to`.
 3. Parses `scswarm.yaml` at each `to` tip, derives the state of every row: waiting, queued, running, failed, pushed, merged.
 
-Then it starts one worker process, `scswarm work`, per queued row and free slot: the project with fewest rows running first, then highest `priority` inside it, then the track with fewest rows running. Then it sleeps. A project whose remote fails skips the cycle; the others run.
+Then it starts one worker process, `scswarm work`, per queued row and free slot: the project with fewest rows running first, then the project served longest ago, then highest `priority` inside it, then the track with fewest rows running. Then it sleeps. A project whose remote fails skips the cycle; the others run.
 
 A slot is a git worktree at `~/swarm/slot/<n>/tree` plus one long-lived container `scswarm-<n>`. Slots take rows of any project. A row of another project drops the worktree and container and makes them from its own repo.
 

@@ -386,6 +386,7 @@ git -C ~/swarm/PROJECT.git for-each-ref refs/swarm/
 - A worker hung outside a step holds its slot until killed.
 - A git or podman fault in one slot rests its project, up to 15 min.
 - A dead remote holds its project's feed up to 30 s on connect, or about 60 s on a stalled transfer. Other projects run on.
+- `mounts` refuses host paths under `~/swarm` or `~/.config/scswarm`, and `..`.
 - After the upgrade to one swarm for many repos, old containers `scswarm-<project>-<n>` stay. Remove them with `podman rm --force`.
 - scswarm sets `core.sshCommand` for each remote call, which replaces your own. Put per-repo keys in `~/.ssh/config`.
 - One swarm per unix user. Shell access to that user reaches every project's repos, transcripts and credentials.

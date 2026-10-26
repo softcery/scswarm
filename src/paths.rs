@@ -62,13 +62,18 @@ impl fmt::Display for Project {
     }
 }
 
+/// Host file and credentials.
+pub fn config() -> Result<PathBuf> {
+    Ok(config_home()?.join(CONFIG_DIR))
+}
+
 pub fn host_file() -> Result<PathBuf> {
-    Ok(config_home()?.join(CONFIG_DIR).join(HOST_FILE))
+    Ok(config()?.join(HOST_FILE))
 }
 
 /// One file per credential, shared by every project.
 pub fn credentials() -> Result<PathBuf> {
-    Ok(config_home()?.join(CONFIG_DIR).join(CREDENTIALS_DIR))
+    Ok(config()?.join(CREDENTIALS_DIR))
 }
 
 /// `serve` locks it: one scheduler per user.

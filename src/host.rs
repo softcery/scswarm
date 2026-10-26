@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -130,8 +130,8 @@ impl Host {
         })
     }
 
-    /// No host path bound into two projects: a shared writable dir lets one
-    /// project's agent plant files another project's build reads.
+    /// No host path bound into two projects, none in the swarm or config dirs: a
+    /// shared writable dir lets one project's agent reach another project.
     fn check_mounts(&self, file: &str) -> Result<()> {
         let binds: Vec<(&Project, usize, &Path)> = self
             .projects
@@ -144,11 +144,22 @@ impl Host {
                     .map(move |(index, mount)| (project, index + 1, Path::new(&mount.host)))
             })
             .collect();
+        let overlap = |one: &Path, other: &Path| one.starts_with(other) || other.starts_with(one);
+        let reserved = [paths::swarm()?, paths::config()?].map(|dir| paths::real(&dir));
+        for (project, entry, path) in &binds {
+            if let Some(dir) = reserved.iter().find(|dir| overlap(path, dir)) {
+                return Err(invalid(
+                    file,
+                    &format!(
+                        "field `projects.{project}.mounts` entry {entry} must not share a host path with {}",
+                        dir.display()
+                    ),
+                ));
+            }
+        }
         for (at, (one, one_entry, one_path)) in binds.iter().enumerate() {
             for (other, other_entry, other_path) in &binds[at + 1..] {
-                if one != other
-                    && (one_path.starts_with(other_path) || other_path.starts_with(one_path))
-                {
+                if one != other && overlap(one_path, other_path) {
                     return Err(invalid(
                         file,
                         &format!(
@@ -264,8 +275,9 @@ impl WrittenEntry {
             .mounts
             .into_iter()
             .map(|mount| {
+                let host = paths::expand(&mount.host)?;
                 Ok(Mount {
-                    host: paths::expand(&mount.host)?,
+                    host: paths::arg(&paths::real(Path::new(&host)))?,
                     guest: mount.guest,
                 })
             })
@@ -302,6 +314,12 @@ impl TryFrom<String> for Mount {
         };
         if !host.starts_with('/') && !host.starts_with("~/") {
             return Err(shaped("a host side neither absolute nor under `~/`"));
+        }
+        if Path::new(host)
+            .components()
+            .any(|part| part == Component::ParentDir)
+        {
+            return Err(shaped("a host side with `..`"));
         }
         if !guest.starts_with('/') {
             return Err(shaped("a container side not absolute"));
@@ -419,6 +437,11 @@ projects:
             .expect_err("a shared host path must fail")
             .to_string();
         assert!(why.contains("`projects.alpha.mounts` entry 1"), "{why}");
+        assert!(why.contains("`projects.beta.mounts` entry 1"), "{why}");
+        let text = EXAMPLE.replace("/cache/beta:/cache", "~/swarm/alpha.git:/cache");
+        let why = Host::parse(FILE, &text)
+            .expect_err("a host path in the swarm dir must fail")
+            .to_string();
         assert!(why.contains("`projects.beta.mounts` entry 1"), "{why}");
     }
 }

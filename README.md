@@ -289,7 +289,7 @@ scswarm reset PROJECT ROW       delete swarm/<track>/<id>, every dependant branc
                                   fail refs, here, then on the remote
 ```
 
-Exit codes: 0 ok, 1 input invalid, 2 git or podman failure. A git or podman failure inside a slot also stops `serve` with exit 2 and marks no row.
+Exit codes: 0 ok, 1 input invalid, 2 git or podman failure. A git or podman failure inside a slot marks no row: `serve` rests that project and runs on.
 
 ## Run under systemd
 
@@ -326,7 +326,7 @@ macOS runs containers in a podman machine VM. Start it with `podman machine init
 
 **Row shows `failed`.** Read `scswarm log PROJECT ROW` for the failing step. A failed row waits for a new track tip or `to` tip, so it costs one attempt per push, not one per cycle. To rerun without a push, run `reset`.
 
-**`serve` exits with `slot N stopped`.** Git or podman failed inside that slot, or the remote was unreachable. No row got a fail mark. A push the remote turns down, for example branch protection on `to`, fails that row instead. Read the cause in the journal, or in `~/Library/Logs/scswarm.log` on macOS, and fix the machine. Workers on other slots run on. systemd or launchd starts `serve` again, the next worker on each slot restarts its container, and the stopped row replays.
+**`skip project=P` with no track.** The remote of `P` was out of reach, or git or podman failed in one of its rows. No row got a fail mark. A push the remote turns down, for example branch protection on `to`, fails that row instead. `P` rests: no fetch and no row for 1 `fetch` interval, doubling per fault in a row, up to 15 min. The other projects run on. Read the cause in the journal, or in `~/Library/Logs/scswarm.log` on macOS, and fix the remote or the machine. The first good cycle after the rest ends it, and the row replays.
 
 **Rerun a row.** Wait until `status` shows no worker for it, then run `scswarm reset PROJECT ROW`. Its old commits stay on `to`: revert them there if you want them gone. A worker running that row recreates the refs at its next commit. Stopping `serve` stops no worker.
 
@@ -374,10 +374,12 @@ git -C ~/swarm/PROJECT.git for-each-ref refs/swarm/
 - `systemctl stop` and `launchctl bootout` leave rows in flight running.
 - macOS: `devices` must stay empty. Device nodes live in the podman machine VM.
 - macOS: a Mac asleep pauses the VM. Steps in flight can hit `timeout` and spend tries.
-- macOS: the podman machine does not start at login. Until it runs, each worker exits 2, so `serve` stops and launchd starts it again after 10 s.
+- macOS: the podman machine does not start at login. Until it runs, each worker exits 2 and its project rests.
 - Locks sit on `~/swarm`, which must be a local filesystem. NFS breaks them.
 - A worker hung outside a step holds its slot until killed.
-- A git or podman fault in one slot stops `serve` for every project.
+- A git or podman fault in one slot rests its project, up to 15 min.
+- A dead remote holds each cycle that tries it up to 30 s on connect, or about 60 s on a stalled transfer.
+- scswarm sets `core.sshCommand` for each remote call, which replaces your own. Put per-repo keys in `~/.ssh/config`.
 - One swarm per unix user. Shell access to that user reaches every project's repos, transcripts and credentials.
 - `devices` and the network reach every project's containers.
 - A slot that switches project drops its worktree: the next build starts cold unless its cache rides on `mounts`.

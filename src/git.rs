@@ -22,6 +22,15 @@ const REF_STORE: &str = "refs";
 const REFUSED: char = '!';
 const BEHIND: &str = "[rejected]";
 const DECLINED: &str = "[remote rejected]";
+/// Remote call bounds: git fails on its own and drops its locks.
+const NETWORK: [&str; 6] = [
+    "-c",
+    "core.sshCommand=ssh -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4",
+    "-c",
+    "http.lowSpeedLimit=1000",
+    "-c",
+    "http.lowSpeedTime=60",
+];
 
 pub const HEADS: &str = "refs/heads/";
 const HEAD: &str = "HEAD";
@@ -71,28 +80,28 @@ impl Git {
     /// Bare repo alone: every remote branch, pruned.
     pub fn fetch(&self) -> Result<()> {
         let _store = lock::hold(&self.root.join(REF_STORE))?;
-        run(&self.root, &["fetch", "--prune", "--quiet", ORIGIN]).map(drop)
+        remote(&self.root, &["fetch", "--prune", "--quiet", ORIGIN]).map(drop)
     }
 
     /// Bare repo alone: land refs and fail refs the remote holds.
     pub fn fetch_kept(&self) -> Result<()> {
         let _store = lock::hold(&self.root.join(REF_STORE))?;
         let spec = format!("+{KEPT_SPEC}");
-        run(&self.root, &["fetch", "--quiet", ORIGIN, &spec]).map(drop)
+        remote(&self.root, &["fetch", "--quiet", ORIGIN, &spec]).map(drop)
     }
 
     /// Bare repo alone: remote holds exactly the land and fail refs held here.
     pub fn mirror_kept(&self) -> Result<()> {
         let _store = lock::hold(&self.root.join(REF_STORE))?;
         let args = ["push", "--quiet", "--force", "--prune", ORIGIN, KEPT_SPEC];
-        run(&self.root, &args).map(drop)
+        remote(&self.root, &args).map(drop)
     }
 
     /// Bare repo alone: push `commit` to remote `branch`, no force.
     pub fn push(&self, commit: &str, branch: &str) -> Result<Push> {
         let _store = lock::hold(&self.root.join(REF_STORE))?;
         let spec = format!("{commit}:{}", branch_ref(branch));
-        let args = ["push", "--porcelain", ORIGIN, &spec];
+        let args = [&NETWORK[..], &["push", "--porcelain", ORIGIN, &spec]].concat();
         let out = proc::answer(BIN, &self.root, &args)?;
         if out.status.success() {
             return Ok(Push::Done);
@@ -342,6 +351,10 @@ fn parse_checkouts(listing: &str) -> BTreeMap<String, PathBuf> {
 
 fn run(dir: &Path, args: &[&str]) -> Result<String> {
     proc::run(BIN, dir, args)
+}
+
+fn remote(dir: &Path, args: &[&str]) -> Result<String> {
+    run(dir, &[&NETWORK[..], args].concat())
 }
 
 fn probe(dir: &Path, args: &[&str]) -> Result<bool> {

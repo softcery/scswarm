@@ -99,8 +99,9 @@ impl Pool {
         Ok(idle)
     }
 
-    /// Free each slot whose worker ended. Non-zero exit is a machine fault: fatal.
-    pub fn reap(&mut self) -> Result<()> {
+    /// Free each slot whose worker ended. A non-zero exit is a machine fault of its
+    /// project, returned with it: no mark, the row replays.
+    pub fn reap(&mut self) -> Result<Vec<(Project, Error)>> {
         let mut ended = Vec::new();
         for (&index, worker) in &mut self.workers {
             let status = worker
@@ -109,13 +110,20 @@ impl Pool {
                 .map_err(|why| stopped(index, &why.to_string()))?;
             ended.extend(status.map(|status| (index, status)));
         }
-        for (index, _) in &ended {
-            self.workers.remove(index);
+        let mut faults = Vec::new();
+        for (index, status) in ended {
+            let Some(worker) = self.workers.remove(&index) else {
+                continue;
+            };
+            if !status.success() {
+                let why = format!(
+                    "row {} on slot {index}: worker {status}: row replays",
+                    worker.key
+                );
+                faults.push((worker.project, Error::Failed(why)));
+            }
         }
-        match ended.into_iter().find(|(_, status)| !status.success()) {
-            Some((index, status)) => Err(stopped(index, &format!("worker {status}"))),
-            None => Ok(()),
-        }
+        Ok(faults)
     }
 
     pub fn holds(&self, project: &Project, key: &Key) -> Result<bool> {

@@ -173,7 +173,8 @@ merge:
 
 - Remote: `remote` of the project entry. Humans push `from` branches, track branches, and commits on `to`. The tool pushes `to`, land refs and fail refs.
 - Workers and `reset` write land refs and fail refs in the bare repo alone. `serve`, each cycle they changed since its last push, and `reset`, when done, push `refs/swarm/*` with force and prune: the remote then holds exactly the bare repo's set.
-- Bare repo `~/swarm/<project>.git`, `origin` = `remote`, refspec `+refs/heads/*:refs/remotes/origin/*`: the layout of any clone. `serve` makes it on first sight of the project, writes `origin` when `remote` changes, and again after a failed fetch, so a hand-edited bare repo heals. A failed fetch reports `skip` for that project and costs it one cycle; other projects run. `status` reads the last fetch.
+- Bare repo `~/swarm/<project>.git`, `origin` = `remote`, refspec `+refs/heads/*:refs/remotes/origin/*`: the layout of any clone. `serve` makes it on first sight of the project, writes `origin` when `remote` changes, and again after a failed fetch, so a hand-edited bare repo heals. A failed fetch, mirror or read reports `skip` once per cause, and its project rests: no network call and no row of it until the rest ends. The rest starts at `fetch` seconds and doubles per fault in a row, up to 15 min; a good cycle ends it. Other projects run. `status` reads the last fetch.
+- Every git call to a remote runs with `core.sshCommand=ssh -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4`, `http.lowSpeedLimit=1000` and `http.lowSpeedTime=60`. A dead or stalled remote fails the call; git exits on its own and drops its locks.
 - A new bare repo fetches the land refs and fail refs of the remote once, before any mirror. Without that fetch, the first push of `refs/swarm/*` deletes them on the remote. The repo grows at `~/swarm/<project>.git.partial` and takes its name once that fetch lands, so a fault leaves no half-made repo.
 - `serve` makes each absent `to` at `at`, or at the `from` tip, and pushes it.
 
@@ -210,7 +211,7 @@ merge:
 - A branch with no land ref holds a session cut short, unless a worker holds the row lock. `serve` reads it as queued and the worker replays the row from the `to` tip.
 - A pushed row clears its own fail refs. `reset <track>/<id>` clears branch, land ref and fail refs of the row and of every dependant in its track, here, then on the remote.
 - A try fails on non-zero exit, a signal, `timeout`, a blank agent commit reply, or no `session_id` from an agent with `resume`. A step whose tries are spent fails the row and marks it, except a `run` step with `continue_on_error`.
-- A git or podman failure in a slot is no row failure. It writes no mark: the worker exits 2, `serve` exits 2, and the row replays on the next start. Workers on other slots run on. A failed image build or pull is a row failure: the worker reaches podman before it builds, so a podman that answers nothing stays a machine fault.
+- A git or podman failure in a slot is no row failure. It writes no mark: the worker exits 2, `serve` reports `skip` for the project, its project rests: no network call and no row of it until the rest ends. The rest starts at `fetch` seconds and doubles per fault in a row, up to 15 min; a good cycle ends it, and the row replays. Workers on other slots run on. A failed image build or pull is a row failure: the worker reaches podman before it builds, so a podman that answers nothing stays a machine fault.
 - Locks: flock on 5 standing directories, no file written. The kernel drops a lock when its holder dies, so a crash leaves nothing to clean.
 
 | Lock | Directory | Holder | `serve` while held |
@@ -246,7 +247,7 @@ scswarm work PROJECT --slot N --track NAME --row ID --track-tip SHA --base SHA
 
 Event lines name a row `<project>/<track>/<id>`, and a project fault `skip project=<project>`.
 
-Exit codes: 0 ok, 1 input invalid (host file, track file, config, unknown row), 2 git or podman failure. `serve` exits 1 only on a host file invalid at start: an invalid track or config skips that track. `work` exits 0 once it pushes the row or writes the fail refs, 2 on a git or podman failure. A worker exit other than 0 exits `serve` 2.
+Exit codes: 0 ok, 1 input invalid (host file, track file, config, unknown row), 2 git or podman failure. `serve` exits 1 only on a host file invalid at start: an invalid track or config skips that track. `work` exits 0 once it pushes the row or writes the fail refs, 2 on a git or podman failure. A worker exit other than 0 rests its project; `serve` runs on.
 
 `work` argv and stdin bind across versions: a `serve` started before `cargo install` spawns the new binary. Stdin holds the row lock: `work` refuses a stdin that is not that directory. A change to either needs a release note.
 
@@ -294,7 +295,9 @@ Image: `image` names a Containerfile at the base, built with no tag and run by I
 - A step with no `timeout` runs without limit. No cap counts tokens.
 - A podman fault inside `exec` exits 125 and counts as a failed try. A step command that exits 125 reads the same: `sh -c` passes the code through.
 - The transcript keeps full stdout and stderr of every try. Redirect big output to a file.
-- A git or podman failure in one slot stops `serve` for every project. That row replays from base; rows on other slots run on. A remote out of reach is such a failure; a remote that turns a push down fails the row.
+- A git or podman failure in one slot rests its project. That row replays from base once the rest ends; rows on other slots run on. A remote out of reach is such a failure; a remote that turns a push down fails the row.
+- Podman broken for every slot rests every project in turn, and `serve` keeps running. The journal shows one `skip` per project and cause.
+- A dead remote holds each cycle that tries it up to the transport bounds. The ssh bound replaces any `core.sshCommand` in git config.
 - A kill between the failure and the fail ref write loses the mark. The row runs once more.
 - A kill between the commit and the land ref write leaves a branch the next cycle replays. A kill after the land ref write leaves a row the next cycle merges into `to`.
 - `reset` a row only while no worker runs it. A running worker recreates the refs at its next commit, and stopping `serve` stops no worker.
@@ -303,7 +306,7 @@ Image: `image` names a Containerfile at the base, built with no tag and run by I
 - macOS: `devices` must stay empty. Device nodes live in the podman machine VM, so the host check fails each entry.
 - macOS: `mounts` host sides must sit under a podman machine share: `/Users`, `/private`, `/var/folders` by default.
 - macOS: a Mac asleep pauses the VM. Steps in flight can hit `timeout` and spend tries.
-- macOS: the podman machine does not start at login. Until it runs, workers exit 2 and launchd starts `serve` again every 10 s.
+- macOS: the podman machine does not start at login. Until it runs, workers exit 2 and their projects rest.
 - systemd logs a left-over process line per running worker at each restart. Expected under `KillMode=process`.
 - Ctrl-C in a terminal reaches the whole process group: `serve` and its workers stop.
 - Rows started before an upgrade finish on the old binary. Branch, land ref and fail ref names must read the same in both versions.

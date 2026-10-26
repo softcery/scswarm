@@ -200,15 +200,19 @@ fn survives_bad_track(swarm: &Swarm) {
 }
 
 /// Containerfile change pushed on `to`: each slot builds it and remakes its
-/// container at its next row, and all end on one new image.
+/// container at its next row, and all end on one new image. Rows rerun once
+/// `serve` reads the new tip: `reset` acts at once, a fetch on its own clock.
 fn rolls_image(swarm: &Swarm) {
     let old = swarm.images();
+    let pushed = swarm.mark();
     swarm.commit_on(
         "feat/a",
         CONTAINERFILE,
         &containerfile(2),
         "e2e: image change",
     );
+    let tip = swarm.head();
+    swarm.wait(&format!("to={}", &tip[..7]), pushed);
     let from = swarm.mark();
     swarm.rerun(&ROWS, from);
     for slot in 0..3 {
@@ -588,6 +592,16 @@ impl Swarm {
         let tip = format!("origin/{branch}");
         self.git(&["checkout", "--quiet", "--force", "-B", branch, &tip]);
         self.commit_here(file, text, message, branch);
+    }
+
+    /// Commit the scratch clone holds checked out.
+    fn head(&self) -> String {
+        succeed(
+            git().arg("-C").arg(&self.work).args(["rev-parse", "HEAD"]),
+            "git",
+        )
+        .trim()
+        .to_string()
     }
 
     fn commit_here(&self, file: &str, text: &str, message: &str, branch: &str) {

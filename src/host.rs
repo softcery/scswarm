@@ -16,6 +16,9 @@ use crate::yaml;
 const POLL: u64 = 5;
 /// Seconds between fetches of one remote when its entry sets none.
 const FETCH: u64 = 60;
+/// Longest rest of a project whose remote or worker failed. Waits double from
+/// `fetch` up to this.
+pub const REST_MAX: Duration = Duration::from_secs(900);
 /// Glob character that stands for any run of characters in `env` field `match`.
 const ANY: char = '*';
 

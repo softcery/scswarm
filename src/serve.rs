@@ -2,14 +2,14 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::panic;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::board::{self, Track};
 use crate::credential;
 use crate::error::{Error, Result};
 use crate::event::{self, Latch};
 use crate::git::{self, Git, Push};
-use crate::host::{Entry, Host};
+use crate::host::{self, Entry, Host};
 use crate::init;
 use crate::lock;
 use crate::paths::{self, Project};
@@ -53,9 +53,18 @@ struct Feed {
     mirrored: Option<BTreeMap<String, String>>,
     /// Track tip and base last reported, by track name.
     tips: BTreeMap<String, (String, String)>,
+    /// `Some` while the project rests after a fault.
+    rest: Option<Rest>,
     /// Faults of the project as a whole, then of single tracks.
     offline: Latch,
     skipped: Latch,
+}
+
+/// Failing project at rest: no network call, no row, until `until`.
+struct Rest {
+    until: Instant,
+    /// Rest length so far: doubles per fault in a row, up to `host::REST_MAX`.
+    wait: Duration,
 }
 
 impl Server {
@@ -77,12 +86,17 @@ impl Server {
     }
 
     fn cycle(&mut self) -> Result<()> {
-        self.pool.reap()?;
         let projects = &self.host.projects;
         self.feeds
             .retain(|project, _| projects.contains_key(project));
         for project in projects.keys() {
             self.feeds.entry(project.clone()).or_default();
+        }
+        for (project, why) in self.pool.reap()? {
+            match (self.feeds.get_mut(&project), projects.get(&project)) {
+                (Some(feed), Some(entry)) => feed.fail(&project, entry, why),
+                _ => event::skip(&project, &why),
+            }
         }
         let snapshots = self.refresh();
         let idle = self.pool.converge(self.host.workers)?;
@@ -116,8 +130,8 @@ impl Server {
         Ok(())
     }
 
-    /// Every project at once, one thread each: a slow or dead remote holds up
-    /// none of the others. Snapshots by project, in host file order.
+    /// Every project at once, one thread each. A dead remote holds the cycle up
+    /// to its transport bounds, then rests. Snapshots by project, in host file order.
     fn refresh(&mut self) -> Vec<(Project, Vec<Snapshot>)> {
         let (host, pool) = (&self.host, &self.pool);
         thread::scope(|scope| {
@@ -159,31 +173,51 @@ impl Server {
 
 impl Feed {
     /// Open, fetch when due, mirror on change, read every track. A fault of the
-    /// project skips it this cycle with no rows; the others run.
+    /// project rests it with no rows: a row to a dead remote burns a session for
+    /// nothing. The others run.
     fn refresh(&mut self, project: &Project, entry: &Entry, pool: &Pool) -> Vec<Snapshot> {
-        let report = |why: &Error| event::skip(project, why);
-        match self.sync(project, entry) {
-            Ok(()) => self.offline.report(&[], report),
-            Err(why) => {
-                self.offline.report(&[why], report);
-                return Vec::new();
-            }
-        }
-        let Some(repo) = &self.repo else {
+        if self
+            .rest
+            .as_ref()
+            .is_some_and(|rest| Instant::now() < rest.until)
+        {
             return Vec::new();
-        };
+        }
         let held = |key: &state::Key| pool.holds(project, key);
-        match read(repo, project, entry, &held) {
+        let read = self.sync(project, entry).and_then(|()| match &self.repo {
+            Some(repo) => read(repo, project, entry, &held),
+            None => Ok((Vec::new(), Vec::new())),
+        });
+        match read {
             Ok((snapshots, faults)) => {
+                self.rest = None;
+                let report = |why: &Error| event::skip(project, why);
+                self.offline.report(&[], report);
                 self.skipped.report(&faults, report);
                 self.report(project, &snapshots);
                 snapshots
             }
             Err(why) => {
-                self.offline.report(&[why], report);
+                self.fail(project, entry, why);
                 Vec::new()
             }
         }
+    }
+
+    /// Report once per cause, then rest: `fetch` first, doubling per fault in a
+    /// row, up to `host::REST_MAX`.
+    fn fail(&mut self, project: &Project, entry: &Entry, why: Error) {
+        self.offline
+            .report(&[why], |why: &Error| event::skip(project, why));
+        let cap = host::REST_MAX.max(entry.fetch);
+        let wait = self
+            .rest
+            .as_ref()
+            .map_or(entry.fetch, |rest| (rest.wait * 2).min(cap));
+        self.rest = Some(Rest {
+            until: Instant::now() + wait,
+            wait,
+        });
     }
 
     /// Bare repo made on first sight, origin written on change, fetch once due

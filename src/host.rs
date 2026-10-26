@@ -26,15 +26,15 @@ pub struct Host {
     /// Host device nodes each container gets at the same path. Resolved at load.
     pub devices: Vec<String>,
     /// Ordered rules: the first rule whose `match` takes a track names its variables.
-    pub env: Vec<Credential>,
+    pub env: Vec<EnvRule>,
     /// Pause between loop cycles. Reloads each cycle.
     pub poll: Duration,
 }
 
-/// Host variables forwarded into the containers of every track `pattern` matches.
+/// Credentials forwarded into the containers of every track `pattern` matches.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Credential {
+pub struct EnvRule {
     #[serde(rename = "match")]
     pub pattern: String,
     pub names: Vec<String>,
@@ -70,7 +70,7 @@ struct Written {
     #[serde(default)]
     devices: Vec<String>,
     #[serde(default)]
-    env: Vec<Credential>,
+    env: Vec<EnvRule>,
     #[serde(default)]
     poll: Option<u64>,
 }
@@ -175,7 +175,9 @@ impl Written {
             {
                 return Err(invalid(
                     file,
-                    &format!("{entry}: field `names` must list host environment variables"),
+                    &format!(
+                        "{entry}: field `names` must list credential names: letters, digits, `_`"
+                    ),
                 ));
             }
         }

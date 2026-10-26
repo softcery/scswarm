@@ -50,9 +50,11 @@ cargo install --path .
    scswarm init PROJECT
    ```
 
-5. Export the credentials named in `env`, then run the loop:
+5. Write one file per credential named in `env`, then run the loop:
 
    ```
+   mkdir -m 700 -p ~/.config/scswarm/credentials
+   printf '%s' "$KEY" > ~/.config/scswarm/credentials/ANTHROPIC_API_KEY
    scswarm serve PROJECT
    ```
 
@@ -121,10 +123,14 @@ What this machine gives the swarm. Never committed.
 | `workers` | slot count |
 | `mounts` | extra `host:container` binds, read-write. Build caches ride here |
 | `devices` | host device paths passed as `--device`, for example `/dev/dri` for a GPU |
-| `env` | ordered rules: the first whose `match` glob takes the track name lists the host variables forwarded into its containers. Credentials ride here |
+| `env` | ordered rules: the first whose `match` glob takes the track name lists the credentials forwarded into its containers, as environment variables |
 | `poll` | seconds between loop cycles. Absent = 5 |
 
 Every field reloads each cycle. `serve` drops slots at or above `workers`. The worker of each row makes its slot's container, and remakes it when the row's image, `mounts` or `devices` differ. A busy slot finishes its row first. `env` applies from the next row on, with no rebuild.
+
+### Credentials: `~/.config/scswarm/credentials/<NAME>`
+
+One file per name in `env`, contents = value. The directory must be mode `0700`. One trailing newline strips, so `echo` works. The worker reads each file at row start, so a new value reaches the next row with no restart. A track whose names lack a file skips with `skip`; the other tracks run. Only these files carry credentials: the `serve` environment carries none.
 
 The machine pushes `to` and `refs/swarm/*`. Give it a deploy key or token with write access, outside every container.
 
@@ -261,7 +267,7 @@ A track that fails a check skips; the others run. `status` prints the rest, then
 ```
 scswarm init PROJECT            bare repo, origin, first fetch; a new bare repo also fetches the
                                   remote's land and fail refs; safe while `serve` runs
-scswarm serve PROJECT           foreground loop; run under systemd
+scswarm serve PROJECT           foreground loop; run under systemd or launchd
 scswarm status PROJECT          one line per row of every track: row, state, branch, worker
 scswarm status --tracks PREFIX  same, from the clone in the working directory
 scswarm log PROJECT ROW         transcripts, one block per try or commit: row session, then merge
@@ -279,15 +285,38 @@ Copy the template unit [systemd/scswarm@.service](systemd/scswarm@.service) to `
 systemctl --user enable --now scswarm@PROJECT
 ```
 
+## Run under launchd
+
+macOS runs containers in a podman machine VM. Start it with `podman machine init --now` once, and `podman machine start` after each login.
+
+1. Copy the template agent [launchd/com.softcery.scswarm.plist](launchd/com.softcery.scswarm.plist) to `~/Library/LaunchAgents/com.softcery.scswarm.PROJECT.plist`.
+2. Fill in the project and your user name:
+
+   ```
+   F=~/Library/LaunchAgents/com.softcery.scswarm.PROJECT.plist
+   plutil -replace Label -string com.softcery.scswarm.PROJECT "$F"
+   plutil -replace ProgramArguments -json "[\"$HOME/.cargo/bin/scswarm\",\"serve\",\"PROJECT\"]" "$F"
+   plutil -replace StandardOutPath -string "$HOME/Library/Logs/scswarm-PROJECT.log" "$F"
+   plutil -replace StandardErrorPath -string "$HOME/Library/Logs/scswarm-PROJECT.log" "$F"
+   plutil -lint "$F"
+   ```
+
+3. If podman sits outside `/opt/homebrew/bin` and `/usr/local/bin`, set `EnvironmentVariables.PATH` to hold it. launchd starts agents with `PATH=/usr/bin:/bin:/usr/sbin:/sbin`.
+4. Load the agent:
+
+   ```
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.softcery.scswarm.PROJECT.plist
+   ```
+
 ## Operate
 
 **Row shows `failed`.** Read `scswarm log PROJECT ROW` for the failing step. A failed row waits for a new track tip or `to` tip, so it costs one attempt per push, not one per cycle. To rerun without a push, run `reset`.
 
-**`serve` exits with `slot N stopped`.** Git or podman failed inside that slot, or the remote was unreachable. No row got a fail mark. A push the remote turns down, for example branch protection on `to`, fails that row instead. Read the cause in the journal and fix the machine. Workers on other slots run on. systemd starts `serve` again, the next worker on each slot restarts its container, and the stopped row replays.
+**`serve` exits with `slot N stopped`.** Git or podman failed inside that slot, or the remote was unreachable. No row got a fail mark. A push the remote turns down, for example branch protection on `to`, fails that row instead. Read the cause in the journal, or in `~/Library/Logs/scswarm-PROJECT.log` on macOS, and fix the machine. Workers on other slots run on. systemd or launchd starts `serve` again, the next worker on each slot restarts its container, and the stopped row replays.
 
 **Rerun a row.** Wait until `status` shows no worker for it, then run `scswarm reset PROJECT ROW`. Its old commits stay on `to`: revert them there if you want them gone. A worker running that row recreates the refs at its next commit. Stopping `serve` stops no worker.
 
-**Upgrade.** Run `cargo install --path .`, then `systemctl --user restart scswarm@PROJECT`. Rows in flight finish on the old binary. New rows start on the new one.
+**Upgrade.** Run `cargo install --path .`, then `systemctl --user restart scswarm@PROJECT`, or `launchctl kickstart -k gui/$(id -u)/com.softcery.scswarm.PROJECT` on macOS. Rows in flight finish on the old binary. New rows start on the new one.
 
 `serve` makes the remote's `refs/swarm/*` match the bare repo's, so its first cycle deletes every remote land or fail ref the bare repo lacks. Before the first `serve` against a remote other hosts or clones wrote to, compare the two:
 
@@ -296,13 +325,13 @@ git ls-remote origin 'refs/swarm/*'
 git -C ~/swarm/PROJECT.git for-each-ref refs/swarm/
 ```
 
-**Stop.** `systemctl --user stop scswarm@PROJECT` ends `serve` alone: rows in flight finish, no new row starts. To end every worker too, run `systemctl --user kill --kill-whom=all scswarm@PROJECT`. Their rows replay from the `to` tip on the next start.
+**Stop.** `systemctl --user stop scswarm@PROJECT` ends `serve` alone: rows in flight finish, no new row starts. To end every worker too, run `systemctl --user kill --kill-whom=all scswarm@PROJECT`. On macOS, `launchctl bootout gui/$(id -u)/com.softcery.scswarm.PROJECT` ends `serve` alone; then `pkill -f 'scswarm work PROJECT '` ends the workers. Their rows replay from the `to` tip on the next start.
 
 **Change workers, mounts, devices or env.** If `workers` grows past `ARG WORKERS` of the Containerfile, raise that value and push it on each `to` first. Then edit the host file. `serve` applies it on the next cycle, slot by slot as each goes idle.
 
 **Change the image.** Push the Containerfile on `to`. Each row of that track builds it and remakes its slot's container.
 
-**Credential expired.** Every row it touches fails after 3 tries. Fix the credential, restart `serve`, then `reset` each marked row.
+**Credential expired.** Every row it touches fails after 3 tries. Write the new value to its file, then `reset` each marked row.
 
 **Track done.** Merge `to` into `from`. Each row reads `merged` once its last commit is an ancestor of `from`.
 
@@ -326,7 +355,10 @@ git -C ~/swarm/PROJECT.git for-each-ref refs/swarm/
 - Built images carry no tag and stay until `podman image prune`.
 - Mounts use the host path inside the container, so a podman machine must share that path.
 - The merge check reads `MERGE_HEAD`. An agent that commits conflict markers passes it.
-- `systemctl stop` leaves rows in flight running.
+- `systemctl stop` and `launchctl bootout` leave rows in flight running.
+- macOS: `devices` must stay empty. Device nodes live in the podman machine VM.
+- macOS: a Mac asleep pauses the VM. Steps in flight can hit `timeout` and spend tries.
+- macOS: the podman machine does not start at login. Until it runs, each worker exits 2, so `serve` stops and launchd starts it again after 10 s.
 - Locks sit on `~/swarm`, which must be a local filesystem. NFS breaks them.
 - A worker hung outside a step holds its slot until killed.
 - A git or podman fault in one slot stops `serve` for every track.

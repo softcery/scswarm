@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::thread;
 
 use crate::board::{self, Track};
+use crate::credential;
 use crate::error::{Error, Result};
 use crate::event::{self, Latch};
 use crate::git::{self, Git, Push};
@@ -131,6 +132,10 @@ impl<'a> Server<'a> {
         let mut snapshots = Vec::new();
         let held = |key: &state::Key| self.pool.holds(key);
         for track in scan.tracks {
+            if let Err(why) = credential::check(self.host.env(&track.name)) {
+                faults.push(track.invalid(&why.to_string()));
+                continue;
+            }
             match self.open_to(&track) {
                 Ok(true) => {}
                 Ok(false) => continue,

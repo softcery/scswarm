@@ -4,6 +4,7 @@ use std::thread;
 use serde_json::Value;
 
 use crate::config::{Agent, SESSION_SLOT};
+use crate::credential::Credential;
 use crate::error::Result;
 use crate::event;
 use crate::proc::{self, Captured, Exit};
@@ -19,8 +20,8 @@ const ARGV0: &str = "scswarm";
 /// container restart, so no process outlives its try.
 pub struct Call<'a> {
     pub slot: &'a Slot,
-    /// Host variables each try gets.
-    pub env: &'a [String],
+    /// Credentials each try gets.
+    pub credentials: &'a [Credential],
     pub policy: &'a Policy,
     pub transcript: &'a Transcript,
     /// Row the step belongs to: event context only.
@@ -106,10 +107,10 @@ impl Call<'_> {
 
     /// Exec, judge, record.
     fn tried<A: Ask>(&self, ask: &A) -> Result<Judged<A::Reply>> {
-        let command = self
-            .slot
-            .container()
-            .exec(self.slot.path(), self.env, &ask.argv())?;
+        let command =
+            self.slot
+                .container()
+                .exec(self.slot.path(), self.credentials, &ask.argv())?;
         let captured = proc::capture(command, self.policy.timeout)?;
         let judged = judge(ask, &captured);
         let entry = ask.sent(Entry {

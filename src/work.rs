@@ -6,6 +6,7 @@ use clap::Args;
 
 use crate::board::{self, Row, Track};
 use crate::config::Config;
+use crate::credential;
 use crate::error::{Error, Result};
 use crate::event;
 use crate::git::{self, Git, Push};
@@ -45,7 +46,7 @@ pub struct Job {
     /// `to` tip: config, image, branch base.
     #[arg(long = BASE, value_name = "SHA")]
     pub base: String,
-    /// Host variables each exec gets, values inherited.
+    /// Credential names each exec gets. The worker reads the values at row start.
     #[arg(long = ENV, value_name = "NAME")]
     pub env: Vec<String>,
     #[arg(long = MOUNT, value_name = "HOST:GUEST", value_parser = mount)]
@@ -138,10 +139,11 @@ impl Attempt<'_> {
         }
     }
 
-    /// Image, container, the row session unless a land ref stands, then the merge
+    /// Credentials, image, container, the row session unless a land ref stands, then the merge
     /// into `to`. Podman answers before the build, so a failed build is the row's.
     fn attempt(&mut self) -> Result<Outcome<()>> {
         let (slot, job, key) = (self.slot, self.job, self.key);
+        let credentials = credential::load(&job.env)?;
         let standing = slot.stamp()?;
         let image = match self.image()? {
             Ok(image) => image,
@@ -156,7 +158,7 @@ impl Attempt<'_> {
             &job.mounts,
             &job.devices,
         )?;
-        let mut session = Session::open(slot, &job.env, self.config, self.row, key)?;
+        let mut session = Session::open(slot, &credentials, self.config, self.row, key)?;
         let land = match self.repo.commit_of(&key.land_ref())? {
             Some(land) => land,
             None => {

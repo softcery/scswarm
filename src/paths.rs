@@ -20,6 +20,7 @@ const CONFIG_HOME: &str = "XDG_CONFIG_HOME";
 const CONFIG_FALLBACK: &str = ".config";
 const CONFIG_DIR: &str = "scswarm";
 const CONFIG_EXT: &str = "yaml";
+const CREDENTIALS_DIR: &str = "credentials";
 
 /// Project name: stem of host file. Rides into paths, image and container names.
 /// Lowercase only: container names are lowercase.
@@ -54,6 +55,11 @@ pub fn host_file(project: &Project) -> Result<PathBuf> {
     Ok(config_home()?
         .join(CONFIG_DIR)
         .join(format!("{project}.{CONFIG_EXT}")))
+}
+
+/// One file per credential, shared by every project of this machine.
+pub fn credentials() -> Result<PathBuf> {
+    Ok(config_home()?.join(CONFIG_DIR).join(CREDENTIALS_DIR))
 }
 
 /// Bare repo the workers read and write. Fetches from and pushes to the remote.

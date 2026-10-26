@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
-use std::env;
 use std::path::Path;
 use std::process::Command;
 
 use serde::Deserialize;
 
+use crate::credential::Credential;
 use crate::error::{Error, Result};
 use crate::host::{Mount, Stamp};
 use crate::paths::{self, Project};
@@ -98,16 +98,16 @@ impl Container {
         Ok(args)
     }
 
-    /// Command running `argv` in container, at host path `dir`, with host
-    /// variables `env`.
-    pub fn exec(&self, dir: &Path, env: &[String], argv: &[String]) -> Result<Command> {
+    /// `argv` in container at host path `dir`. Values in podman env, names in argv.
+    pub fn exec(&self, dir: &Path, credentials: &[Credential], argv: &[String]) -> Result<Command> {
         let mut command = Command::new(BIN);
         command
             .arg("exec")
             .arg(format!("--workdir={}", paths::arg(dir)?));
-        for name in env {
-            present(name)?;
-            command.arg(format!("--env={name}"));
+        for credential in credentials {
+            command
+                .env(&credential.name, &credential.value)
+                .arg(format!("--env={}", credential.name));
         }
         command.arg(&self.name).args(argv);
         Ok(command)
@@ -254,16 +254,6 @@ fn drop_container(name: &str) -> Result<()> {
         "--ignore".to_string(),
         name.to_string(),
     ])
-}
-
-/// Value stays on host: podman reads variable from own environment.
-fn present(name: &str) -> Result<()> {
-    if env::var_os(name).is_none() {
-        return Err(Error::Failed(format!(
-            "environment variable {name}, named in the host file field `env`, must hold a value"
-        )));
-    }
-    Ok(())
 }
 
 /// podman takes paths as arguments; working dir holds no meaning.

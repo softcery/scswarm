@@ -2,7 +2,7 @@ image: Containerfile.swarm
 default_agent: claude
 agents:
   claude:
-    exec: CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 claude --dangerously-skip-permissions --disallowedTools Agent Skill SendMessage ListAgents RemoteTrigger PushNotification -p --output-format json
+    exec: CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 claude-swarm --dangerously-skip-permissions --disallowedTools Agent Skill SendMessage ListAgents RemoteTrigger PushNotification -p --output-format json
     resume: --resume {session}
 commit: "Reply with the commit message for the work in this session, in Conventional Commits format per CONTRIBUTING.md. Message only, plain text: no quotes, backticks or code fence."
 merge:

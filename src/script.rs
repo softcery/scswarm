@@ -7,7 +7,7 @@ use crate::event;
 use crate::slot::Slot;
 use crate::state::Address;
 use crate::step::{Outcome, Policy, Step, Steps};
-use crate::transcript::{Entry, Transcript};
+use crate::transcript::{Kind, Transcript};
 
 /// First character of every slot name.
 const SLOT_OPEN: char = '{';
@@ -166,10 +166,10 @@ impl<'a> Session<'a> {
     fn commit(&self, number: usize, message: &str, pass: Pass) -> Result<String> {
         let commit = self.slot.commit(message)?;
         event::commit(&self.key, &commit);
-        pass.transcript.append(&Entry {
-            commit: Some(commit.clone()),
-            message: Some(message.to_string()),
-            ..Entry::new(number)
+        pass.transcript.append(Kind::Commit {
+            step: number,
+            commit: commit.clone(),
+            message: message.to_string(),
         })?;
         Ok(commit)
     }

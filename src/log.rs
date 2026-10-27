@@ -51,12 +51,12 @@ fn block(name: &str, line: &str) -> String {
             format!("{name} step {step} commit {commit}"),
             [(COMMIT, Some(message))],
         ),
-        Kind::Try(record) => attempt(name, record),
+        Kind::Try(record) => tried(name, record),
     }
 }
 
 /// Step, exit and context in the header; sent text, reply, output, fault below.
-fn attempt(name: &str, record: Try) -> String {
+fn tried(name: &str, record: Try) -> String {
     let mut head = format!("{name} step {}", record.step);
     if let Some(code) = record.exit {
         head.push_str(&format!(" exit {code}"));

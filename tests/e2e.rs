@@ -252,7 +252,7 @@ fn switches_project(swarm: &Swarm) {
             table.lines().any(|line| {
                 let cells: Vec<&str> = line.split_whitespace().collect();
                 cells[..3] == [project, row, "pushed"]
-                    && cells[5].ends_with('Z')
+                    && utc_minute(cells[5])
                     && cells[6] == CONTEXT
             }),
             "status must list {project} {row} as pushed, started, at {CONTEXT}:\n{table}"
@@ -844,4 +844,17 @@ fn home() -> PathBuf {
     env::var_os("HOME")
         .map(PathBuf::from)
         .expect("HOME must hold the home dir")
+}
+
+/// `YYYY-MM-DDTHH:MMZ`: digits at every place but the separators.
+fn utc_minute(cell: &str) -> bool {
+    const SHAPE: &str = "dddd-dd-ddTdd:ddZ";
+    cell.len() == SHAPE.len()
+        && cell
+            .chars()
+            .zip(SHAPE.chars())
+            .all(|(got, want)| match want {
+                'd' => got.is_ascii_digit(),
+                _ => got == want,
+            })
 }

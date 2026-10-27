@@ -1,12 +1,17 @@
 #!/bin/sh
 # Claude Code reply plus `context`: input tokens of the last API call, and the model window.
+# Output jq cannot parse passes as is: the reply then holds no `context`.
 out=$(claude "$@")
 code=$?
 if [ "$code" -ne 0 ]; then
   printf '%s\n' "$out"
   exit "$code"
 fi
-printf '%s\n' "$out" | jq -c '.usage.iterations[-1]? as $last | . + {context: {
+if mapped=$(printf '%s\n' "$out" | jq -c '.usage.iterations[-1]? as $last | . + {context: {
   used: ($last.input_tokens + $last.cache_read_input_tokens + $last.cache_creation_input_tokens),
   window: ([.modelUsage[]?.contextWindow] | max)
-}}'
+}}' 2>/dev/null); then
+  printf '%s\n' "$mapped"
+else
+  printf '%s\n' "$out"
+fi

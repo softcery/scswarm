@@ -6,12 +6,18 @@ States:
   pushed   its last commit is in `to`
   merged   its last commit is in `from`
 
+Columns:
+  started  last attempt start, UTC
+  context  used/window, thousands of tokens, at the last passed agent
+           try; needs `context` in the agent reply
+
 Read state from a clone:
   The clone's `origin` must be the project's `remote`.
   git config --add remote.origin.fetch '+refs/swarm/*:refs/swarm/*'
   git fetch origin
   scswarm status --tracks track/
-  A clone prints `running` as `queued` and the project as `-`.
+  A clone prints `running` as `queued`; project, started and
+  context as `-`.
 
 Faults:
   A track that fails a check prints a fault naming the track, row and

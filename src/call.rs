@@ -1,6 +1,7 @@
 use std::fmt;
 use std::thread;
 
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::config::{Agent, SESSION_SLOT};
@@ -10,7 +11,7 @@ use crate::event;
 use crate::proc::{self, Captured, Exit};
 use crate::slot::Slot;
 use crate::step::{Outcome, Policy};
-use crate::transcript::{Entry, Transcript};
+use crate::transcript::{Context, Kind, Sent, Transcript, Try};
 
 const SHELL: &str = "sh";
 /// Shell `$0`, so prompt stays `$1`.
@@ -35,14 +36,14 @@ pub trait Ask {
 
     fn argv(&self) -> Vec<String>;
 
-    /// `entry` with what this step sent.
-    fn sent(&self, entry: Entry) -> Entry;
+    /// What this step sends.
+    fn sent(&self) -> Sent;
 
     /// Reply read from stdout of a try that exited 0.
     fn reply(&self, stdout: &str) -> Judged<Self::Reply>;
 
-    /// `entry` with what a passed try keeps.
-    fn kept(&self, reply: &Self::Reply, captured: &Captured, entry: Entry) -> Entry;
+    /// `record` with what a passed try keeps.
+    fn kept(&self, reply: &Self::Reply, captured: &Captured, record: Try) -> Try;
 }
 
 pub type Judged<T> = std::result::Result<T, Fault>;
@@ -64,6 +65,7 @@ pub struct Shell<'a>(pub &'a str);
 pub struct Reply {
     pub session: Option<String>,
     pub result: String,
+    pub context: Option<Context>,
 }
 
 /// Why one try failed.
@@ -113,21 +115,21 @@ impl Call<'_> {
                 .exec(self.slot.path(), self.credentials, &ask.argv())?;
         let captured = proc::capture(command, self.policy.timeout)?;
         let judged = judge(ask, &captured);
-        let entry = ask.sent(Entry {
+        let record = Try {
             exit: match captured.exit {
                 Exit::Code(code) => Some(code),
                 Exit::Signal | Exit::Timeout => None,
             },
-            ..Entry::new(self.step)
-        });
-        self.transcript.append(&match &judged {
-            Ok(reply) => ask.kept(reply, &captured, entry),
-            Err(Fault::Exit(_)) => output(&captured, entry),
-            Err(fault) => Entry {
+            ..Try::new(self.step, ask.sent())
+        };
+        self.transcript.append(Kind::Try(match &judged {
+            Ok(reply) => ask.kept(reply, &captured, record),
+            Err(Fault::Exit(_)) => output(&captured, record),
+            Err(fault) => Try {
                 fault: Some(fault.to_string()),
-                ..output(&captured, entry)
+                ..output(&captured, record)
             },
-        })?;
+        }))?;
         Ok(judged)
     }
 }
@@ -154,11 +156,8 @@ impl Ask for Turn<'_> {
         argv
     }
 
-    fn sent(&self, entry: Entry) -> Entry {
-        Entry {
-            prompt: Some(self.text.to_string()),
-            ..entry
-        }
+    fn sent(&self) -> Sent {
+        Sent::Prompt(self.text.to_string())
     }
 
     /// An agent that resumes must name its session, or the next turn starts blank.
@@ -170,11 +169,12 @@ impl Ask for Turn<'_> {
         }
     }
 
-    fn kept(&self, reply: &Reply, _: &Captured, entry: Entry) -> Entry {
-        Entry {
+    fn kept(&self, reply: &Reply, _: &Captured, record: Try) -> Try {
+        Try {
             session: reply.session.clone(),
             result: Some(reply.result.clone()),
-            ..entry
+            context: reply.context,
+            ..record
         }
     }
 }
@@ -186,8 +186,8 @@ impl Ask for Message<'_> {
         self.0.argv()
     }
 
-    fn sent(&self, entry: Entry) -> Entry {
-        self.0.sent(entry)
+    fn sent(&self) -> Sent {
+        self.0.sent()
     }
 
     fn reply(&self, stdout: &str) -> Judged<Reply> {
@@ -198,8 +198,8 @@ impl Ask for Message<'_> {
         }
     }
 
-    fn kept(&self, reply: &Reply, captured: &Captured, entry: Entry) -> Entry {
-        self.0.kept(reply, captured, entry)
+    fn kept(&self, reply: &Reply, captured: &Captured, record: Try) -> Try {
+        self.0.kept(reply, captured, record)
     }
 }
 
@@ -210,19 +210,16 @@ impl Ask for Shell<'_> {
         vec![SHELL.to_string(), "-c".to_string(), self.0.to_string()]
     }
 
-    fn sent(&self, entry: Entry) -> Entry {
-        Entry {
-            run: Some(self.0.to_string()),
-            ..entry
-        }
+    fn sent(&self) -> Sent {
+        Sent::Run(self.0.to_string())
     }
 
     fn reply(&self, _: &str) -> Judged<()> {
         Ok(())
     }
 
-    fn kept(&self, (): &(), captured: &Captured, entry: Entry) -> Entry {
-        output(captured, entry)
+    fn kept(&self, (): &(), captured: &Captured, record: Try) -> Try {
+        output(captured, record)
     }
 }
 
@@ -250,11 +247,11 @@ fn judge<A: Ask>(ask: &A, captured: &Captured) -> Judged<A::Reply> {
     }
 }
 
-fn output(captured: &Captured, entry: Entry) -> Entry {
-    Entry {
+fn output(captured: &Captured, record: Try) -> Try {
+    Try {
         stdout: Some(captured.stdout.trim().to_string()),
         stderr: Some(captured.stderr.trim().to_string()),
-        ..entry
+        ..record
     }
 }
 
@@ -270,5 +267,9 @@ fn parse(stdout: &str) -> Reply {
     Reply {
         session: field("session_id"),
         result: field("result").unwrap_or_else(|| stdout.trim().to_string()),
+        context: value
+            .as_ref()
+            .and_then(|value| value.get("context"))
+            .and_then(|context| Context::deserialize(context).ok()),
     }
 }

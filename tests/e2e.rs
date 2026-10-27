@@ -234,7 +234,7 @@ fn rolls_image(swarm: &Swarm) {
 
 /// Second project listed: its row takes slot 0, whose worktree and container
 /// move to the second repo, then a row of the first project moves them back.
-/// `status` with no project lists both.
+/// `status` with no project lists both, each with start time and context.
 fn switches_project(swarm: &Swarm) {
     let from = swarm.mark();
     swarm.with_second(3, &[EXTRA.0]);
@@ -252,8 +252,10 @@ fn switches_project(swarm: &Swarm) {
             table.lines().any(|line| {
                 let cells: Vec<&str> = line.split_whitespace().collect();
                 cells[..3] == [project, row, "pushed"]
+                    && cells[5].ends_with('Z')
+                    && cells[6] == CONTEXT
             }),
-            "status must list {project} {row} as pushed:\n{table}"
+            "status must list {project} {row} as pushed, started, at {CONTEXT}:\n{table}"
         );
     }
 }
@@ -282,7 +284,7 @@ fn outlives_serve(swarm: &mut Swarm) -> usize {
     let row = ROWS[0];
     let from = swarm.mark();
     swarm.rerun(&[row], from);
-    swarm.wait(&format!("step row={} step=1", label(row)), from);
+    swarm.wait(&format!("step row={} step=2", label(row)), from);
     let before = swarm.containers();
     swarm.kill();
     let restarted = swarm.mark();
@@ -308,7 +310,11 @@ fn outlives_serve(swarm: &mut Swarm) -> usize {
         1,
         "row must not reassign"
     );
-    assert_eq!(count(&format!("step row={row} ")), 1, "row must not replay");
+    assert_eq!(
+        count(&format!("step row={row} step=1")),
+        1,
+        "row must not replay"
+    );
     assert_eq!(
         count(&format!("attempt row={row} ")),
         0,
@@ -661,14 +667,16 @@ impl Drop for Swarm {
     }
 }
 
-const CONFIG: &str = "\
+/// Stub agent: one reply with `context`; `true` takes the prompt argv.
+const CONFIG: &str = r#"
 image: Containerfile.e2e
-default_agent: none
+default_agent: stub
 agents:
-  none:
-    exec: \"false\"
-commit: \"unused: rows hold literal commits only\"
-";
+  stub:
+    exec: "echo '{\"result\":\"done\",\"context\":{\"used\":14431,\"window\":1000000}}'; true"
+commit: "unused: rows hold literal commits only"
+"#;
+const CONTEXT: &str = "14k/1000k";
 
 fn track_a() -> String {
     track("main", "feat/a", 0, &ROWS)
@@ -685,7 +693,7 @@ fn track(from: &str, to: &str, priority: i32, rows: &[&str]) -> String {
         .map(|key| {
             let id = key.split_once('/').expect("key holds a `/`").1;
             format!(
-                "  - id: {id}\n    steps:\n      - run: test \"${}\" = {} && sleep {ROW_SECONDS}\n      - commit: \"{id}\"\n",
+                "  - id: {id}\n    steps:\n      - prompt: Work.\n      - run: test \"${}\" = {} && sleep {ROW_SECONDS}\n      - commit: \"{id}\"\n",
                 CREDENTIAL.0, CREDENTIAL.1
             )
         })

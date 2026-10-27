@@ -18,7 +18,7 @@ use crate::script::Session;
 use crate::slot::Slot;
 use crate::state::{Address, Key};
 use crate::step::Outcome;
-use crate::transcript::Transcript;
+use crate::transcript::{Kind, Transcript};
 
 pub const COMMAND: &str = "work";
 const SLOT: &str = "slot";
@@ -145,11 +145,14 @@ impl Attempt<'_> {
         }
     }
 
-    /// Credentials, image, container, the row session unless a land ref stands, then the merge
+    /// Start line, credentials, image, container, the row session unless a land ref stands, then the merge
     /// into `to`. Podman answers before the build, so a failed build is the row's.
     fn attempt(&mut self) -> Result<Outcome<()>> {
         let (slot, job, address) = (self.slot, self.job, self.address);
         let key = &address.key;
+        self.transcript(paths::RUN_LOG)?.append(Kind::Start {
+            base: job.base.clone(),
+        })?;
         let credentials = credential::load(&job.env)?;
         let standing = slot.stamp()?;
         let image = match self.image()? {

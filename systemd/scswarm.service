@@ -6,7 +6,7 @@ After=default.target
 Type=simple
 # Host file: %h/.config/scswarm/host.yaml
 # Credentials: %h/.config/scswarm/credentials/, one file per name in `set`
-ExecStart=%h/.cargo/bin/scswarm serve
+ExecStart=%h/.local/bin/scswarm serve
 Restart=always
 RestartSec=5
 # Stop and restart end `serve` alone: rows in flight finish on their workers.

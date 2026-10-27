@@ -101,14 +101,14 @@ docs/
   refs/architecture.md   loop, state, isolation
   spec/contract.md       track file, host file, scswarm.yaml, git, CLI
   rfcs/                  accepted designs not yet built; flow in README.md
-scripts/       comment-budget.py
+scripts/       comment-budget.py, dist.sh
 ```
 </index>
 
 <tools>
 ## Tools
 
-- Build: `cargo build --release`. Install: `cargo install --path .`. Iterate: `cargo run -- <args>`.
+- Build: `cargo build --release`. Install: `cargo install --locked --root ~/.local --path .`. Release: `make dist`. Iterate: `cargo run -- <args>`.
 - Test: `cargo test`. Lint: `make lint`.
 - E2E: `make e2e`. Linux rootless podman or macOS podman machine, about 150 s, no tokens. Refuses a user with a live host file. Run after slot, pool or podman changes.
 - `rmap tree|module|refs|body|deps|graph`: Rust code map. `--crate <name>` reads dependency source from cargo registry; use for clap, serde-saphyr, never guess API.

@@ -31,7 +31,7 @@ const MOUNT: &str = "mount";
 const DEVICE: &str = "device";
 
 /// One row attempt on one slot. Argv of `scswarm work`, row lock on stdin: old
-/// `serve` spawns new binary across `cargo install`, so a change needs a release note.
+/// `serve` spawns new binary after upgrade, so change needs release note.
 #[derive(Args, Debug, PartialEq, Eq)]
 pub struct Job {
     pub project: Project,

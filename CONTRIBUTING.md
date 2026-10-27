@@ -28,6 +28,17 @@ printf '#!/bin/sh\nexec make lint\n' > .git/hooks/pre-commit
 chmod +x .git/hooks/pre-commit
 ```
 
+## Release
+
+Releases build on two machines: an Apple silicon Mac for `aarch64-apple-darwin`, and an x86_64 Linux host for `x86_64-unknown-linux-musl`. On the Linux host, run `rustup target add x86_64-unknown-linux-musl` once.
+
+1. Set `version` in `Cargo.toml`, commit it as `build(release): vX.Y.Z`, and push.
+2. Tag the commit `vX.Y.Z` and push the tag.
+3. On the Mac, run `make dist`, then `gh release create vX.Y.Z --generate-notes dist/*`.
+4. On the Linux host, check out the tag, run `make dist`, then `gh release upload vX.Y.Z dist/*`.
+
+`make dist` refuses a tree with uncommitted changes, or a `HEAD` that is not tag `v<Cargo.toml version>`. It writes `dist/scswarm-vX.Y.Z-<target>.tar.gz` and its `.sha256` file. If the release changes `work` argv or stdin, write a release note.
+
 ## Comment budget
 
 `scripts/comment-budget.py` caps comment prose in `.rs`, `.py`, `.ts`, `.tsx`, `.js`, `.jsx` and `.md` files.

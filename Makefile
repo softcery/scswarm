@@ -1,4 +1,4 @@
-.PHONY: lint fmt test e2e
+.PHONY: lint fmt test e2e dist
 
 # comment budget + slop scan, then rust fmt check + clippy. pre-commit hook runs same.
 lint:
@@ -15,3 +15,7 @@ test:
 # live slot set, two tracks and two projects against rootless podman, Linux or macOS podman machine; no tokens spent.
 e2e:
 	cargo test --test e2e -- --ignored --nocapture
+
+# release archive for this host into dist/; HEAD must be tag v<Cargo.toml version>.
+dist:
+	scripts/dist.sh

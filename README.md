@@ -8,14 +8,30 @@ Each team pushes a track: an orphan branch whose `SWARM.yaml` names a `from` bra
 
 - Linux or macOS with rootless podman.
 - git 2.30 or newer.
-- Rust toolchain to build. See [rust-toolchain.toml](rust-toolchain.toml).
 - An agent CLI that takes a prompt as an argument and prints its reply. Example: `claude -p --output-format json`.
 
 ## Install
 
-```
-cargo install --path .
-```
+Releases ship `aarch64-apple-darwin` (Apple silicon) and `x86_64-unknown-linux-musl` (static, any x86_64 distro). The service units run `~/.local/bin/scswarm`.
+
+1. Download the archive for your machine from [GitHub releases of softcery/scswarm](https://github.com/softcery/scswarm/releases):
+
+   ```
+   gh release download -R softcery/scswarm -p '*aarch64-apple-darwin.tar.gz'
+   ```
+
+2. Unpack it:
+
+   ```
+   mkdir -p ~/.local/bin
+   tar -xzf scswarm-*.tar.gz -C ~/.local/bin
+   ```
+
+3. If `~/.local/bin` is not on `PATH`, add it. macOS has no such entry by default.
+
+If you download through a browser, macOS Gatekeeper blocks the unsigned binary. Clear the flag: `xattr -d com.apple.quarantine ~/.local/bin/scswarm`.
+
+To build from source instead, install the Rust toolchain of [rust-toolchain.toml](rust-toolchain.toml), then run `cargo install --locked --root ~/.local --path .`.
 
 ## Quick start
 
@@ -314,7 +330,7 @@ macOS runs containers in a podman machine VM. Start it with `podman machine init
 
    ```
    F=~/Library/LaunchAgents/com.softcery.scswarm.plist
-   plutil -replace ProgramArguments -json "[\"$HOME/.cargo/bin/scswarm\",\"serve\"]" "$F"
+   plutil -replace ProgramArguments -json "[\"$HOME/.local/bin/scswarm\",\"serve\"]" "$F"
    plutil -replace StandardOutPath -string "$HOME/Library/Logs/scswarm.log" "$F"
    plutil -replace StandardErrorPath -string "$HOME/Library/Logs/scswarm.log" "$F"
    plutil -lint "$F"
@@ -337,7 +353,7 @@ macOS runs containers in a podman machine VM. Start it with `podman machine init
 
 **Rerun a row.** Wait until `status` shows no worker for it, then run `scswarm reset PROJECT ROW`. Its old commits stay on `to`: revert them there if you want them gone. A worker running that row recreates the refs at its next commit. Stopping `serve` stops no worker.
 
-**Upgrade.** Run `cargo install --path .`, then `systemctl --user restart scswarm`, or `launchctl kickstart -k gui/$(id -u)/com.softcery.scswarm` on macOS. Rows in flight finish on the old binary. New rows start on the new one.
+**Upgrade.** Unpack the new release into `~/.local/bin`, or rerun the source build, then run `systemctl --user restart scswarm`, or `launchctl kickstart -k gui/$(id -u)/com.softcery.scswarm` on macOS. Rows in flight finish on the old binary. New rows start on the new one.
 
 `serve` makes the remote's `refs/swarm/*` match the bare repo's, so its first cycle deletes every remote land or fail ref the bare repo lacks. Before the first `serve` against a remote other hosts or clones wrote to, compare the two:
 

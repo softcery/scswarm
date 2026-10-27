@@ -6,7 +6,7 @@
 	<string>com.softcery.scswarm</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Users/USER/.cargo/bin/scswarm</string>
+		<string>/Users/USER/.local/bin/scswarm</string>
 		<string>serve</string>
 	</array>
 	<key>EnvironmentVariables</key>

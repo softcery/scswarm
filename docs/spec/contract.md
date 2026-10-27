@@ -251,7 +251,7 @@ Event lines name a row `<project>/<track>/<id>`, and a project fault `skip proje
 
 Exit codes: 0 ok, 1 input invalid (host file, track file, config, unknown row), 2 git or podman failure. `serve` exits 1 only on a host file invalid at start: an invalid track or config skips that track. `work` exits 0 once it pushes the row or writes the fail refs, 2 on a git or podman failure. A worker exit 1 reports `skip` once and rests nothing. Any other worker failure, a signal included, rests its project; `serve` runs on.
 
-`work` argv and stdin bind across versions: a `serve` started before `cargo install` spawns the new binary. Stdin holds the row lock: `work` refuses a stdin that is not that directory. A change to either needs a release note.
+`work` argv and stdin bind across versions: a `serve` started before an upgrade spawns the new binary. Stdin holds the row lock: `work` refuses a stdin that is not that directory. A change to either needs a release note.
 
 `serve` spawns each worker with stdout and stderr shared, so worker lines reach the same journal, also after `serve` dies. A worker whose `serve` died runs to its end; the process manager reaps it. `systemctl stop` and `restart` end `serve` alone under the shipped unit, `KillMode=process`: rows in flight finish, no new row starts. The shipped launchd agent does the same through `AbandonProcessGroup`, for `launchctl kickstart -k` and `bootout`.
 

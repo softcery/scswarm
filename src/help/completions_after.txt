@@ -1,0 +1,5 @@
+Install:
+  scswarm completions bash \
+    > ~/.local/share/bash-completion/completions/scswarm
+  scswarm completions zsh > "${fpath[1]}/_scswarm"
+  scswarm completions fish > ~/.config/fish/completions/scswarm.fish

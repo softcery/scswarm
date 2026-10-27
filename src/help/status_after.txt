@@ -1,0 +1,23 @@
+States:
+  waiting  a row in its `after` is not pushed yet
+  queued   ready; starts on the next free slot
+  running  a worker holds it
+  failed   tries spent; runs again once the track tip or `to` tip moves
+  pushed   its last commit is in `to`
+  merged   its last commit is in `from`
+
+Read state from a clone:
+  The clone's `origin` must be the project's `remote`.
+  git config --add remote.origin.fetch '+refs/swarm/*:refs/swarm/*'
+  git fetch origin
+  scswarm status --tracks track/
+  A clone prints `running` as `queued` and the project as `-`.
+
+Faults:
+  A track that fails a check prints a fault naming the track, row and
+  field. The other tracks print, then the command exits 1.
+
+Examples:
+  scswarm status
+  scswarm status alpha
+  scswarm status --tracks track/

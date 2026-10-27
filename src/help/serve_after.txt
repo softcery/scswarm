@@ -1,0 +1,20 @@
+
+  - Path: ~/.config/scswarm/host.yaml. `serve` reloads it every cycle.
+  - Two projects share no `mounts` host path.
+
+Credentials:
+  One file per name in `set`, in ~/.config/scswarm/credentials/, holding
+  the value. The directory is mode 0700. One trailing newline strips.
+  Each row reads its credentials when it starts.
+
+Remotes:
+  The host pushes `to` and refs/swarm/* to each remote, so it needs write
+  access to each, outside every container.
+
+Log lines:
+  A row reads `<project>/<track>/<id>`. `skip project=<name>` means the
+  project rests after a remote, git or podman fault; other projects run.
+
+Stop:
+  systemctl --user stop scswarm                  # `serve` alone
+  systemctl --user kill --kill-whom=all scswarm  # workers too

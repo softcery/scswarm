@@ -1,0 +1,6 @@
+Run the scheduler in the foreground until stopped, under systemd or
+launchd. One `serve` per user runs every project of the host file.
+
+Each cycle reads every track, derives each row's state from git and starts
+one `scswarm work` process per queued row and free slot. Workers keep
+running when `serve` stops or restarts.

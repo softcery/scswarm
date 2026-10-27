@@ -1,0 +1,10 @@
+Print the transcripts of one row: the row session, then the merge into
+`to` if it conflicted. Each try or commit prints one block:
+
+  run step 2 exit 0     transcript, step, exit code, commit
+  > prompt              `$` for a run command, `@` for a commit message
+  < reply or stdout
+  2> stderr
+  ! fault
+
+A replay of the row appends, so step numbers start again.

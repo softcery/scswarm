@@ -1,0 +1,17 @@
+Git in the container:
+  Read-only: status, log and diff work; add, commit and checkout fail.
+  The host stages every change with `git add --all` at each commit step,
+  so ignored files miss the commit.
+
+Files:
+  ~/.config/scswarm/host.yaml         workers, devices, projects
+  ~/.config/scswarm/credentials/NAME  one secret per file; directory 0700
+  ~/swarm/                            bare repos, slots, transcripts
+
+Exit status:
+  0  ok
+  1  invalid input: usage, host file, track file, scswarm.yaml, row
+  2  git, podman or file system failure
+
+See also:
+  scswarm help <command>, man scswarm-<command>

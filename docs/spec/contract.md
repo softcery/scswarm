@@ -240,6 +240,8 @@ scswarm log PROJECT ROW         transcript, one block per try or commit: prompt,
                                   message, then reply, stdout, stderr, faults
 scswarm reset PROJECT ROW       delete swarm/<track>/<id>, every dependant branch, their land refs
                                   and fail refs, here, then on the remote
+scswarm completions SHELL       completion script on stdout: bash, zsh, fish, elvish, powershell
+scswarm man DIR                 one roff page per visible command into DIR, which must exist
 scswarm work PROJECT --slot N --track NAME --row ID --track-tip SHA --base SHA
              [--env VAR=FILE]... [--mount HOST:GUEST]... [--device PATH]...
                                 internal, hidden from --help: one row attempt; `serve` spawns one
@@ -249,7 +251,9 @@ scswarm work PROJECT --slot N --track NAME --row ID --track-tip SHA --base SHA
 
 Event lines name a row `<project>/<track>/<id>`, and a project fault `skip project=<project>`.
 
-Exit codes: 0 ok, 1 input invalid (host file, track file, config, unknown row), 2 git or podman failure. `serve` exits 1 only on a host file invalid at start: an invalid track or config skips that track. `work` exits 0 once it pushes the row or writes the fail refs, 2 on a git or podman failure. A worker exit 1 reports `skip` once and rests nothing. Any other worker failure, a signal included, rests its project; `serve` runs on.
+Exit codes: 0 ok, 1 input invalid (host file, track file, config, unknown row, usage), 2 git, podman or file system failure. A usage error of `work` exits 2: its argv comes from `serve`, so a mismatch is a binary fault and rests the project. `serve` exits 1 only on a host file invalid at start: an invalid track or config skips that track. `work` exits 0 once it pushes the row or writes the fail refs, 2 on a git or podman failure. A worker exit 1 reports `skip` once and rests nothing. Any other worker failure, a signal included, rests its project; `serve` runs on.
+
+`--version` prints the package version, plus the commit when built from a checkout of this repo, marked `-dirty` when `src`, `build.rs` or the manifests differ from it.
 
 `work` argv and stdin bind across versions: a `serve` started before an upgrade spawns the new binary. Stdin holds the row lock: `work` refuses a stdin that is not that directory. A change to either needs a release note.
 

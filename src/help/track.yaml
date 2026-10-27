@@ -1,0 +1,18 @@
+  from: main             # branch the work belongs to
+  at: a1b2c3d            # optional: commit on `from` where `to` starts
+  to: feat/laser         # output branch; made on first sight
+  priority: 10           # higher runs first in the project; 0 if absent
+  rows:
+    - id: retriever      # lowercase ASCII, no space or `/`; unique
+      agent: claude      # key of `agents`; `default_agent` if absent
+      steps:
+        - "Swap the retriever to hybrid BM25. Spec in docs/retrieval.md."
+        - commit:        # the agent writes the message, the host commits
+        - run: make bench > bench/out.txt  # sh -c in the container
+          timeout: 1800
+        - commit: "bench: hybrid retriever"  # the host commits this text
+    - id: review
+      after: [retriever] # waits until these rows are pushed
+      steps:
+        - "Read bench/out.txt. Audit the retriever swap. Fix every gap."
+        - commit:

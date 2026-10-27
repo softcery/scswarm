@@ -1,0 +1,16 @@
+
+  Step fields, on prompt, run and `commit:` steps:
+    tries              tries before the row fails; prompt 3, run 1
+    wait, wait_max     seconds between tries, doubling; 1 and 60
+    timeout            seconds per try; no limit if absent
+    continue_on_error  `run` alone: go on after the last failed try
+
+  - SWARM.yaml sits at the root of the track branch, alone.
+  - The last step of a row is a commit.
+  - Steps of a row share one worktree and one agent session.
+  - `after` names rows of the same track. For another track's output, set
+    `from` to that track's `to`.
+  - `to` differs from `from`, sits outside the track prefix and belongs to
+    one track.
+  - Quote a prompt that starts with `{`, or that YAML reads as a bool or
+    a number, for example "yes" or "42".

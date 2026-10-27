@@ -7,9 +7,11 @@ mod error;
 mod event;
 mod feed;
 mod git;
+mod help;
 mod host;
 mod lock;
 mod log;
+mod man;
 mod paths;
 mod podman;
 mod pool;
@@ -26,9 +28,13 @@ mod transcript;
 mod work;
 mod yaml;
 
-use clap::{Parser, Subcommand};
+use std::io;
+use std::path::PathBuf;
 
-use crate::error::Result;
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap_complete::Shell;
+
+use crate::error::{Error, Result};
 use crate::git::Git;
 use crate::host::Host;
 use crate::paths::Project;
@@ -37,7 +43,12 @@ use crate::status::Source;
 use crate::work::Job;
 
 #[derive(Parser)]
-#[command(version, about)]
+#[command(
+    version = help::VERSION,
+    about,
+    long_about = help::ROOT_ABOUT,
+    after_help = help::ROOT_EXAMPLES
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -46,7 +57,8 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     #[command(
-        about = "Run scheduler for every project of the host file until stopped; each row runs as its own process"
+        about = "Run the scheduler for every project of the host file until stopped",
+        long_about = help::SERVE_ABOUT
     )]
     Serve,
     #[command(name = work::COMMAND, hide = true, about = "Run one row attempt; `serve` spawns it")]
@@ -54,28 +66,74 @@ enum Command {
         #[command(flatten)]
         job: Job,
     },
-    #[command(about = "Print every row of every track with state derived from git")]
+    #[command(
+        about = "Print the state of every row of every track",
+        long_about = help::STATUS_ABOUT
+    )]
     Status {
-        /// One project of the host file. Absent: every project.
+        /// Key of `projects` in the host file. Absent: every project.
         project: Option<Project>,
-        /// Read the clone in the working directory instead: track branch prefix.
+        /// Track branch prefix, for example `track/`. Reads the clone in this
+        /// directory instead of the host.
         #[arg(long, value_name = "PREFIX", conflicts_with = "project")]
         tracks: Option<String>,
     },
-    #[command(about = "Print the agent transcripts of one row, `<track>/<id>`")]
-    Log { project: Project, row: String },
     #[command(
-        about = "Delete the branch, land ref and fail refs of one row, `<track>/<id>`, and of every dependant"
+        about = "Print the agent transcripts of one row",
+        long_about = help::LOG_ABOUT
     )]
-    Reset { project: Project, row: String },
+    Log {
+        /// Key of `projects` in the host file.
+        project: Project,
+        /// Row as `<track>/<id>`, for example `laser/retriever`.
+        row: String,
+    },
+    #[command(
+        about = "Delete one row and its dependants so they run again",
+        long_about = help::RESET_ABOUT
+    )]
+    Reset {
+        /// Key of `projects` in the host file.
+        project: Project,
+        /// Row as `<track>/<id>`, for example `laser/retriever`.
+        row: String,
+    },
+    #[command(about = "Print the shell completion script for SHELL")]
+    Completions { shell: Shell },
+    #[command(about = "Write one man page per command into DIR")]
+    Man {
+        /// Directory that exists, for example `~/.local/share/man/man1`.
+        dir: PathBuf,
+    },
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let parsed = cli()
+        .try_get_matches()
+        .and_then(|matches| Cli::from_arg_matches(&matches));
+    let cli = parsed.unwrap_or_else(|why| {
+        let _ = why.print();
+        std::process::exit(usage_code(&why));
+    });
     if let Err(why) = dispatch(cli.command) {
         eprintln!("{why}");
         std::process::exit(why.code());
     }
+}
+
+/// Help, version: 0. User usage error: 1. Bad `work` argv means binary
+/// mismatch with `serve`: 2, so its project rests as on machine fault.
+fn usage_code(why: &clap::Error) -> i32 {
+    match (why.use_stderr(), std::env::args().nth(1).as_deref()) {
+        (false, _) => 0,
+        (true, Some(work::COMMAND)) => error::FAILED,
+        (true, _) => error::INVALID,
+    }
+}
+
+/// Command tree with every help section attached: parse and man read this one.
+fn cli() -> clap::Command {
+    help::attach(Cli::command())
 }
 
 /// Projects are keys of the host file. Working directory means nothing but to
@@ -127,6 +185,12 @@ fn dispatch(command: Command) -> Result<()> {
                 &Key::try_from(row.as_str())?,
             )
         }
+        Command::Completions { shell } => {
+            clap_complete::generate(shell, &mut cli(), help::ROOT_NAME, &mut io::stdout());
+            Ok(())
+        }
+        Command::Man { dir } => man::write(cli(), &dir)
+            .map_err(|why| Error::Failed(format!("man pages into {}: {why}", dir.display()))),
     }
 }
 

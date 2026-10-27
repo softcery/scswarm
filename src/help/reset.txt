@@ -1,0 +1,7 @@
+Delete branch swarm/<track>/<id>, its land and fail refs, and those of every
+row of the track that depends on it. Delete them on the swarm host, then on
+the remote. The next cycle runs the rows again from the `to` tip.
+
+Run it once `status` shows no worker for the row: a running worker writes
+the refs again. Pushed commits stay on `to`; revert them there with
+`git revert -m 1 <merge commit>`.

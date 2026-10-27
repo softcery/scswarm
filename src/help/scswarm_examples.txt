@@ -1,0 +1,4 @@
+Examples:
+  scswarm status
+  scswarm log alpha laser/retriever
+  scswarm --help    guide: queue work, SWARM.yaml, scswarm.yaml, files

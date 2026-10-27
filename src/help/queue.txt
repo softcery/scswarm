@@ -1,0 +1,10 @@
+Queue work:
+  From a clone of the project:
+  1. Commit scswarm.yaml, plus the Containerfile `image` names, on `from`.
+     Once `to` exists, commit changes to them on `to`.
+  2. git switch --orphan track/laser
+  3. Write SWARM.yaml as shown below.
+  4. git add SWARM.yaml && git commit -m "track: laser"
+  5. git push <remote> track/laser   # <remote>: the project's `remote`
+  6. Watch the rows on the swarm host: scswarm status <project>
+  7. Fetch `to`, review it, merge it into `from`.

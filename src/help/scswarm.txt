@@ -1,0 +1,15 @@
+Run coding agents on queued work, with no human at the keyboard.
+
+You push a track: an orphan branch whose SWARM.yaml lists rows of work.
+`scswarm serve` runs each row in its own git worktree and container, once
+the rows it depends on are pushed. It merges each row into the track's
+`to` branch and pushes `to`. You review `to` and merge it into `from`.
+
+Terms:
+  project  one repo; a key of `projects` in the host file
+  track    branch <prefix><name> that holds SWARM.yaml alone
+  row      one unit of work: one agent session on branch swarm/<track>/<id>
+  step     one prompt, shell command or commit in a row
+  from     branch the work belongs to
+  to       output branch; rows start at its tip and merge back into it
+  slot     one worktree and one container; runs one row at a time

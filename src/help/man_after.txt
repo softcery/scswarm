@@ -1,0 +1,4 @@
+Install:
+  mkdir -p ~/.local/share/man/man1
+  scswarm man ~/.local/share/man/man1
+  man scswarm

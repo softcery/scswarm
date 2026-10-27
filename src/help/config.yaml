@@ -1,0 +1,12 @@
+  image: Containerfile.swarm  # Containerfile in the repo, or an image name
+  default_agent: claude
+  agents:
+    claude:
+      exec: claude -p --output-format json  # the prompt goes last
+      resume: --resume {session}            # added from the second turn on
+  commit: "Reply with the commit message for this session. Message only."
+  defaults:                   # step fields per kind: prompt, run
+    run: { timeout: 7200 }
+  merge:                      # steps run when the merge into `to` conflicts
+    - "Resolve every conflict of the merge of row {id} into {parent}."
+    - commit:

@@ -1,0 +1,2 @@
+Examples:
+  scswarm reset alpha laser/retriever

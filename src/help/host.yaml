@@ -1,0 +1,13 @@
+  workers: 3                  # slots, shared by every project
+  devices: [/dev/dri]         # host devices passed to every container
+  poll: 5                     # seconds between cycles
+  projects:
+    alpha:                    # project name: a-z, 0-9, `.`, `_`, `-`
+      remote: ~/git/alpha.git # git URL or path, fetched and pushed
+      tracks: track/          # branch prefix of every track
+      fetch: 60               # seconds between fetches
+      mounts:                 # host:container binds, read-write
+        - ~/cache/alpha/cargo:/home/dev/.cargo/registry
+      env:                    # first rule whose glob matches the track
+        - match: "*"
+          set: { ANTHROPIC_API_KEY: ALPHA_KEY }  # variable: credential

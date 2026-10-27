@@ -308,9 +308,13 @@ scswarm status --tracks PREFIX  same, from the clone in the working directory
 scswarm log PROJECT ROW         transcripts, one block per try or commit: row session, then merge
 scswarm reset PROJECT ROW       delete swarm/<track>/<id>, every dependant branch, their land and
                                   fail refs, here, then on the remote
+scswarm completions SHELL       print the completion script: bash, zsh, fish, elvish, powershell
+scswarm man DIR                 write one man page per command into DIR
 ```
 
-Exit codes: 0 ok, 1 input invalid, 2 git or podman failure. A git or podman failure inside a slot marks no row: `serve` rests that project and runs on.
+`scswarm --help` prints the full guide: queue steps, `SWARM.yaml`, `scswarm.yaml`, files. `scswarm help <command>` prints one command.
+
+Exit codes: 0 ok, 1 input invalid, usage errors included, 2 git, podman or file system failure. A git or podman failure inside a slot marks no row: `serve` rests that project and runs on.
 
 ## Run under systemd
 

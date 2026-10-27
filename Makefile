@@ -1,4 +1,4 @@
-.PHONY: lint fmt test e2e dist
+.PHONY: lint fmt test e2e release
 
 # comment budget + slop scan, then rust fmt check + clippy. pre-commit hook runs same.
 lint:
@@ -16,6 +16,6 @@ test:
 e2e:
 	cargo test --test e2e -- --ignored --nocapture
 
-# release archive for this host into dist/; HEAD must be tag v<Cargo.toml version>.
-dist:
-	scripts/dist.sh
+# tag HEAD v<Cargo.toml version>, build macOS arm64 and linux x86_64 musl, publish GitHub release. macOS only.
+release:
+	scripts/release.sh

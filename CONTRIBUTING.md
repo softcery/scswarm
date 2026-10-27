@@ -30,14 +30,12 @@ chmod +x .git/hooks/pre-commit
 
 ## Release
 
-Releases build on two machines: an Apple silicon Mac for `aarch64-apple-darwin`, and an x86_64 Linux host for `x86_64-unknown-linux-musl`. On the Linux host, run `rustup target add x86_64-unknown-linux-musl` once.
+Releases build on a Mac with `gh` logged in. The Mac builds `aarch64-apple-darwin` natively and `x86_64-unknown-linux-musl` with the `rust-lld` linker that Rust ships, so it needs no Linux host.
 
 1. Set `version` in `Cargo.toml`, commit it as `build(release): vX.Y.Z`, and push.
-2. Tag the commit `vX.Y.Z` and push the tag.
-3. On the Mac, run `make dist`, then `gh release create vX.Y.Z --generate-notes dist/*`.
-4. On the Linux host, check out the tag, run `make dist`, then `gh release upload vX.Y.Z dist/*`.
+2. Run `make release`.
 
-`make dist` refuses a tree with uncommitted changes, or a `HEAD` that is not tag `v<Cargo.toml version>`. It writes `dist/scswarm-vX.Y.Z-<target>.tar.gz` and its `.sha256` file. If the release changes `work` argv or stdin, write a release note.
+`make release` builds committed `HEAD` in a temporary worktree, so uncommitted changes never ship. After the build it tags `HEAD` `vX.Y.Z`, pushes the tag and publishes `scswarm-vX.Y.Z-<target>.tar.gz` for each target plus `SHA256SUMS`. It refuses a logged-out `gh`, a `HEAD` not on `origin/main`, an existing release, or a tag on another commit. A Mac cannot run the Linux binary: a Linux user smoke-tests it after the release. If the release changes `work` argv or stdin, write a release note.
 
 ## Comment budget
 

@@ -191,6 +191,11 @@ impl Track {
         Ok(Board { rows })
     }
 
+    /// Row `id` stands in the file. No config read.
+    pub fn has_row(&self, id: &str) -> bool {
+        self.drafts.iter().any(|draft| draft.id == id)
+    }
+
     /// Commit `to` starts at: `at` on `from`, else the `from` tip. Read until `to`
     /// stands; then `from` and `at` start nothing.
     pub fn start(&self, git: &Git) -> Result<String> {

@@ -130,9 +130,8 @@ impl Pool {
         Ok(idle)
     }
 
-    /// Free each slot whose worker ended. Exit 1 is input invalid, exit 3 a stop
-    /// that ends nothing for its project, any other failure a machine fault: no
-    /// mark, the row replays.
+    /// Free each slot whose worker ended. Exit 1: input invalid. Exit 3: stop, not
+    /// reported. Other failure: machine fault, no mark, the row replays.
     pub fn reap(&mut self) -> Result<Vec<Ended>> {
         let mut done = Vec::new();
         for (&index, worker) in &mut self.workers {

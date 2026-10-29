@@ -361,7 +361,7 @@ macOS runs containers in a podman machine VM. Start it with `podman machine init
 
 **Rerun a row.** If a worker runs it, `stop` it first. Once `status` shows no worker, run `scswarm reset PROJECT ROW`. Its old commits stay on `to`: revert them there if you want them gone. Stopping `serve` stops no worker.
 
-**Upgrade.** Unpack the new release into `~/.local/bin`, or rerun the source build, then run `systemctl --user restart scswarm`, or `launchctl kickstart -k gui/$(id -u)/com.softcery.scswarm` on macOS. Rows in flight finish on the old binary. New rows start on the new one.
+**Upgrade.** Unpack the new release into `~/.local/bin`, or rerun the source build, then run `systemctl --user restart scswarm`, or `launchctl kickstart -k gui/$(id -u)/com.softcery.scswarm` on macOS. Rows in flight finish on the old binary. New rows start on the new one. Restart right after the unpack: until then the old `serve` spawns the new binary, and a release that changes `work` flags rests each project.
 
 `serve` makes the remote's `refs/swarm/*` match the bare repo's, so its first cycle deletes every remote land or fail ref the bare repo lacks. Before the first `serve` against a remote other hosts or clones wrote to, compare the two:
 

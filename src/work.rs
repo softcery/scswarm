@@ -83,7 +83,9 @@ pub fn work(repo: &Git, job: &Job) -> Result<Outcome<()>> {
             board::FILE
         ))
     })?;
-    let watch = Watch::new(repo, &address.key, &board::branch(&job.tracks, &job.track));
+    let branch = board::branch(&job.tracks, &job.track);
+    stop::settle(repo, &address.key, &branch)?;
+    let watch = Watch::new(repo, &address.key, &branch);
     Attempt {
         slot: &Slot::open(job.slot)?,
         stop: &|| watch.stopped(),
@@ -143,8 +145,7 @@ struct Attempt<'a> {
 
 impl Attempt<'_> {
     /// Release before the outcome: no fault leaves the branch held. A fault of the
-    /// attempt outranks one of the release. Then the fail refs of a spent attempt,
-    /// or the land ref drop of a stopped one.
+    /// attempt outranks one of the release. Then the fail refs of a spent attempt.
     fn run(mut self) -> Result<Outcome<()>> {
         let outcome = self.attempt();
         let released = self.slot.release();
@@ -159,7 +160,6 @@ impl Attempt<'_> {
             }
             Outcome::Stopped => {
                 event::stop(self.address);
-                stop::drop_land(self.repo, &self.address.key)?;
                 Ok(Outcome::Stopped)
             }
         }

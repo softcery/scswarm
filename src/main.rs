@@ -127,10 +127,11 @@ fn main() {
         let _ = why.print();
         std::process::exit(usage_code(&why));
     });
-    if let Err(why) = dispatch(cli.command) {
+    let code = dispatch(cli.command).unwrap_or_else(|why| {
         eprintln!("{why}");
-        std::process::exit(why.code());
-    }
+        why.code()
+    });
+    std::process::exit(code);
 }
 
 /// Help, version: 0. User usage error: 1. Bad `work` argv means binary
@@ -149,14 +150,16 @@ fn cli() -> clap::Command {
 }
 
 /// Projects are keys of the host file. Working directory means nothing but to
-/// `status --tracks`.
-fn dispatch(command: Command) -> Result<()> {
+/// `status --tracks`. Ok: exit code.
+fn dispatch(command: Command) -> Result<i32> {
     match command {
         Command::Serve => serve::serve(),
-        Command::Work { job } => match work::work(&repo::open(&job.project)?, &job)? {
-            Outcome::Stopped => std::process::exit(error::STOPPED),
-            Outcome::Done(()) | Outcome::Spent(_) => Ok(()),
-        },
+        Command::Work { job } => {
+            return Ok(match work::work(&repo::open(&job.project)?, &job)? {
+                Outcome::Stopped => error::STOPPED,
+                Outcome::Done(()) | Outcome::Spent(_) => error::OK,
+            });
+        }
         Command::Status {
             tracks: Some(prefix),
             ..
@@ -202,8 +205,11 @@ fn dispatch(command: Command) -> Result<()> {
         }
         Command::Stop { project, row } => {
             let tracks = Host::load()?.entry(&project)?.tracks.clone();
-            let key = Key::try_from(row.as_str())?;
-            stop::stop(&repo::open(&project)?, &tracks, &Address { project, key })
+            stop::stop(
+                &repo::open(&project)?,
+                &tracks,
+                &Key::try_from(row.as_str())?,
+            )
         }
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut cli(), help::ROOT_NAME, &mut io::stdout());
@@ -212,6 +218,7 @@ fn dispatch(command: Command) -> Result<()> {
         Command::Man { dir } => man::write(cli(), &dir)
             .map_err(|why| Error::Failed(format!("man pages into {}: {why}", dir.display()))),
     }
+    .map(|()| error::OK)
 }
 
 #[cfg(test)]

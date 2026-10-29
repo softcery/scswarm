@@ -3,8 +3,8 @@ the remote. The row reads `stopped` and runs no more until its track branch
 moves or `scswarm reset` clears it. Rows after it wait.
 
 A running worker sees the ref within 1 s, kills its try, restarts its
-container, drops the land ref and exits. Its project does not rest. A
-waiting, queued or failed row holds in place. A pushed or merged row
-refuses: its work sits on `to`.
+container and exits. Its project does not rest. A waiting, queued or failed
+row holds in place. A pushed or merged row refuses: its work sits on `to`.
 
 Run it on the swarm host. A push to the track, for any row, ends the stop.
+The row then starts over: work it did before the stop never merges.

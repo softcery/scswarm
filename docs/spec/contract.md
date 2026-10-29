@@ -216,7 +216,8 @@ merge:
 - A pushed row clears its own fail refs and stop ref. `reset <track>/<id>` clears branch, land ref, fail refs and stop ref of the row and of every dependant in its track, here, then on the remote.
 - A try fails on non-zero exit, a signal, `timeout`, a blank agent commit reply, or no `session_id` from an agent with `resume`. A step whose tries are spent fails the row and marks it, except a `run` step with `continue_on_error`.
 - A git or podman failure in a slot is no row failure. It writes no mark: the worker exits 2, `serve` reports `skip` for the project once per cause, and the project rests: no row of it until the rest ends, then the row replays. The rest starts at 60 s and doubles per fault in a row, up to 15 min. Only a worker of the project that exits 0 ends the doubling and clears the reported causes. Workers on other slots run on. A failed image build or pull is a row failure: the worker reaches podman before it builds, so a podman that answers nothing stays a machine fault.
-- `stop` writes the stop ref, then drops the land ref when no worker holds the row lock, then mirrors. A running worker checks the stop predicate once per second: each tick of a try, of the pause between tries, of an image build or pull, and before each push of `to`. On a hit it kills the try, restarts the container as after any try, aborts a merge in flight, drops the land ref, writes no fail ref, logs `stop row=`, exits 3. The transcript line of the killed try names the fault `killed on scswarm stop`.
+- `stop` reads the track file alone, no config. It refuses a pushed or merged row, writes the stop ref, then mirrors. A running worker ends once its stop ref equals the current track tip, the check `state` reads. It checks once per second: each tick of a try, of the pause between tries, of an image build or pull, and before each push of `to`. On a hit it kills the try, restarts the container as after any try, aborts a merge in flight, writes no fail ref, logs `stop row=`, exits 3. The transcript line of the killed try names the fault `killed on scswarm stop`.
+- Once the track moves, the next worker of a stopped row finds the stop ref at an older tip. Under the row lock it drops the land ref, then deletes the stop ref only if it still holds the value read. The stopped work never merges; a `stop` written meanwhile stands.
 - Locks: flock on 5 standing directories, no file written. The kernel drops a lock when its holder dies, so a crash leaves nothing to clean.
 
 | Lock | Directory | Holder | `serve` while held |
@@ -319,11 +320,13 @@ Image: `image` names a Containerfile at the base, built with no tag and run by I
 - `systemctl stop` and `launchctl bootout` leave rows in flight running. `stop` ends one row.
 - A `stop` that loses the race to the push of `to` leaves the row `pushed`. Revert its merge commit, `git revert -m 1`.
 - A track push within 1 s of a `stop` moves the tip before the worker checks: the row runs on.
+- A `stop` mid-build kills `podman build`. What a killed build leaves in podman storage is unmeasured.
 - A worker waiting on the slot lock or the build lock sees a stop once it holds the lock.
 - `stop` runs on the swarm host. The feed fetches `refs/heads/*` alone, so a stop ref pushed from a clone never reaches the bare repo, and the next mirror prunes it on the remote.
 - Each running worker reads 2 refs per second for its stop check.
+- A `serve` older than its binary spawns `work` with old argv. A `work` with new flags exits 2 on it, so each project rests until `serve` restarts.
 - A worker started before an upgrade to a binary with `stop` never checks: its row runs to its end.
-- A stop ref stays after its track moves, until the row pushes or `reset` runs.
+- A stop ref and the land ref of a stopped row stay after its track moves, until the row's next worker starts or `reset` runs. A row dropped from its track keeps both until `reset`.
 - macOS: `devices` must stay empty. Device nodes live in the podman machine VM, so the host check fails each entry.
 - macOS: `mounts` host sides must sit under a podman machine share: `/Users`, `/private`, `/var/folders` by default.
 - macOS: a Mac asleep pauses the VM. Steps in flight can hit `timeout` and spend tries.

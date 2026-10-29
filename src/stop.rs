@@ -5,56 +5,54 @@ use crate::board;
 use crate::error::{Error, Result};
 use crate::git::{self, Git};
 use crate::host;
-use crate::lock;
-use crate::paths;
-use crate::state::{self, Address, Key, State};
+use crate::state::{self, Key};
 
-/// Hold `address` at its track tip: here, then on the remote by mirror. A worker
-/// running it ends at its next check; with none, the land ref goes here.
-pub fn stop(repo: &Git, tracks: &str, address: &Address) -> Result<()> {
-    let key = &address.key;
-    let held = |key: &Key| {
-        lock::held(&paths::transcripts(&Address {
-            project: address.project.clone(),
-            key: key.clone(),
-        })?)
-    };
+/// Hold `key` at its track tip: here, then on the remote by mirror. A worker
+/// running it ends at its next check.
+pub fn stop(repo: &Git, tracks: &str, key: &Key) -> Result<()> {
     let track = board::track(repo, tracks, &key.track)?.ok_or_else(|| {
         Error::Invalid(format!(
             "row `{key}` must name a track branch: no branch `{}`",
             board::branch(tracks, &key.track)
         ))
     })?;
-    let snapshot = state::snapshot(repo, track, &held)?;
-    let index = snapshot
-        .board
-        .rows()
-        .iter()
-        .position(|row| row.id == key.id)
-        .ok_or_else(|| {
-            Error::Invalid(format!(
-                "row `{key}` must name a row of its track: {} holds no id `{}`",
-                board::FILE,
-                key.id
-            ))
-        })?;
-    if let state @ (State::Pushed | State::Merged) = snapshot.states[index] {
+    if !track.has_row(&key.id) {
+        return Err(Error::Invalid(format!(
+            "row `{key}` must name a row of its track: {} holds no id `{}`",
+            board::FILE,
+            key.id
+        )));
+    }
+    if let Some(state) = state::landed(repo, &track, key)? {
         return Err(Error::Invalid(format!(
             "row `{key}` must not be pushed or merged to stop: it reads {state}; \
              `scswarm reset` it, then `git revert -m 1 <merge commit>` on `{}`",
-            snapshot.track.to
+            track.to
         )));
     }
-    repo.ref_set(&key.stop_ref(), &snapshot.track.tip)?;
-    println!("stopped {key} at {}", snapshot.track.tip);
-    if !held(key)? && drop_land(repo, key)? {
-        println!("deleted {}", key.land_ref());
-    }
+    repo.ref_set(&key.stop_ref(), &track.tip)?;
+    println!("stopped {key} at {}", track.tip);
     repo.mirror_kept()
 }
 
-/// Stop check of one running row: its stop ref against the current track tip,
-/// read once per `host::STOP_POLL`. Once true, stays true.
+/// Worker start, under the row lock. A stop ref at an older track tip: the row
+/// stopped, then its track moved. Its old work must not merge: drop the land
+/// ref, then the stop ref, unless a new `stop` moved it meanwhile.
+pub fn settle(repo: &Git, key: &Key, branch: &str) -> Result<()> {
+    let stop_ref = key.stop_ref();
+    let Some(stop) = repo.commit_of(&stop_ref)? else {
+        return Ok(());
+    };
+    let tip = repo.commit_of(&git::remote_branch(branch))?;
+    if state::stops(Some(&stop), tip.as_deref()) {
+        return Ok(());
+    }
+    repo.ref_delete(&key.land_ref())?;
+    repo.ref_delete_at(&stop_ref, &stop)
+}
+
+/// Stop check of one running row: `state::stops` on its stop ref and the current
+/// track tip, read once per `host::STOP_POLL`. Once true, stays true.
 pub struct Watch<'a> {
     repo: &'a Git,
     stop_ref: String,
@@ -86,14 +84,4 @@ impl<'a> Watch<'a> {
         self.seen.set(state::stops(stop.as_deref(), tip.as_deref()));
         Ok(self.seen.get())
     }
-}
-
-/// Stopped row's undelivered work must not merge later. `true`: land ref stood.
-pub fn drop_land(repo: &Git, key: &Key) -> Result<bool> {
-    let land = key.land_ref();
-    let stood = repo.commit_of(&land)?.is_some();
-    if stood {
-        repo.ref_delete(&land)?;
-    }
-    Ok(stood)
 }

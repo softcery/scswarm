@@ -11,6 +11,7 @@ pub enum Error {
 }
 
 /// Exit codes, also read back from workers.
+pub const OK: i32 = 0;
 pub const INVALID: i32 = 1;
 pub const FAILED: i32 = 2;
 pub const STOPPED: i32 = 3;

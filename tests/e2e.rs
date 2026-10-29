@@ -58,6 +58,8 @@ fn slot_set_follows_host_file_live() {
     switches_project(&swarm);
     rests_dead_project(&swarm);
     stops_row(&swarm);
+    resumes_after_rollback(&swarm);
+    refuses_pushed_row(&swarm);
     let restarted = outlives_serve(&mut swarm);
     pushes_every_track(&swarm, restarted);
     let creates = swarm
@@ -319,6 +321,52 @@ fn stops_row(swarm: &Swarm) {
     );
     swarm.commit_on("track/a", "resume.txt", "resume\n", "e2e: move track");
     swarm.wait(&format!("push row={} ", label(row)), stopped);
+}
+
+/// `stop` at a new track tip, then a force-push back to the old tip: the row
+/// reads queued, and its worker must run it to the end, not stop each cycle.
+fn resumes_after_rollback(swarm: &Swarm) {
+    let row = ROWS[0];
+    let old = swarm.remote_tip("track/a");
+    let moved = swarm.mark();
+    swarm.commit_on("track/a", "rollback.txt", "rollback\n", "e2e: tip to undo");
+    swarm.wait(&format!("tip project={PROJECT} track=a "), moved);
+    let from = swarm.mark();
+    swarm.rerun(&[row], from);
+    swarm.wait(&format!("step row={} step=1", label(row)), from);
+    swarm.tool(&["stop", PROJECT, row]);
+    swarm.wait(&format!("stop row={}", label(row)), from);
+    let back = swarm.mark();
+    swarm.git(&[
+        "push",
+        "--quiet",
+        "--force",
+        "origin",
+        &format!("{old}:refs/heads/track/a"),
+    ]);
+    swarm.wait(&format!("push row={} ", label(row)), back);
+}
+
+/// `stop` on a pushed row exits 1 and keeps its land ref: its work sits on `to`.
+fn refuses_pushed_row(swarm: &Swarm) {
+    let row = ROWS[0];
+    let out = command()
+        .args(["stop", PROJECT, row])
+        .output()
+        .expect("`scswarm stop` must start");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stop of a pushed row must exit 1"
+    );
+    assert!(
+        swarm.kept(&format!("refs/swarm/land/{row}")).is_some(),
+        "stop of a pushed row must keep its land ref"
+    );
+    assert!(
+        swarm.kept(&format!("refs/swarm/stop/{row}")).is_none(),
+        "stop of a pushed row must write no stop ref"
+    );
 }
 
 /// SIGKILL on `serve` mid-row: the worker runs on, a new `serve` waits on its
@@ -685,6 +733,32 @@ impl Swarm {
         let tip = format!("origin/{branch}");
         self.git(&["checkout", "--quiet", "--force", "-B", branch, &tip]);
         self.commit_here(file, text, message, branch);
+    }
+
+    /// Tip of `branch` on the remote, fetched now.
+    fn remote_tip(&self, branch: &str) -> String {
+        self.git(&["fetch", "--quiet", "origin"]);
+        let tip = format!("origin/{branch}");
+        succeed(
+            git().arg("-C").arg(&self.work).args(["rev-parse", &tip]),
+            "git",
+        )
+        .trim()
+        .to_string()
+    }
+
+    /// Commit of ref `name` in the bare repo of the first project. `None`: absent.
+    fn kept(&self, name: &str) -> Option<String> {
+        let bare = home().join("swarm").join(format!("{PROJECT}.git"));
+        let out = git()
+            .arg("-C")
+            .arg(bare)
+            .args(["rev-parse", "--verify", "--quiet", name])
+            .output()
+            .expect("git must start");
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
     /// Commit the scratch clone holds checked out.

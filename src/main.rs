@@ -24,6 +24,7 @@ mod slot;
 mod state;
 mod status;
 mod step;
+mod stop;
 mod transcript;
 mod work;
 mod yaml;
@@ -40,6 +41,7 @@ use crate::host::Host;
 use crate::paths::Project;
 use crate::state::{Address, Key};
 use crate::status::Source;
+use crate::step::Outcome;
 use crate::work::Job;
 
 #[derive(Parser)]
@@ -98,6 +100,16 @@ enum Command {
         /// Row as `<track>/<id>`, for example `laser/retriever`.
         row: String,
     },
+    #[command(
+        about = "Stop one row: end its worker, hold it until its track moves",
+        long_about = help::STOP_ABOUT
+    )]
+    Stop {
+        /// Key of `projects` in the host file.
+        project: Project,
+        /// Row as `<track>/<id>`, for example `laser/retriever`.
+        row: String,
+    },
     #[command(about = "Print the shell completion script for SHELL")]
     Completions { shell: Shell },
     #[command(about = "Write one man page per command into DIR")]
@@ -141,7 +153,10 @@ fn cli() -> clap::Command {
 fn dispatch(command: Command) -> Result<()> {
     match command {
         Command::Serve => serve::serve(),
-        Command::Work { job } => work::work(&repo::open(&job.project)?, &job),
+        Command::Work { job } => match work::work(&repo::open(&job.project)?, &job)? {
+            Outcome::Stopped => std::process::exit(error::STOPPED),
+            Outcome::Done(()) | Outcome::Spent(_) => Ok(()),
+        },
         Command::Status {
             tracks: Some(prefix),
             ..
@@ -185,6 +200,11 @@ fn dispatch(command: Command) -> Result<()> {
                 &Key::try_from(row.as_str())?,
             )
         }
+        Command::Stop { project, row } => {
+            let tracks = Host::load()?.entry(&project)?.tracks.clone();
+            let key = Key::try_from(row.as_str())?;
+            stop::stop(&repo::open(&project)?, &tracks, &Address { project, key })
+        }
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut cli(), help::ROOT_NAME, &mut io::stdout());
             Ok(())
@@ -204,6 +224,7 @@ mod tests {
         let job = Job {
             project: "alpha".parse().expect("project name must pass"),
             slot: 2,
+            tracks: "track/".to_string(),
             track: "laser".to_string(),
             id: "rag-04-review".to_string(),
             track_tip: "89abcdef0123456789abcdef0123456789abcdef".to_string(),

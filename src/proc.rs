@@ -7,8 +7,11 @@ use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
 
-/// Interval between deadline checks of a capped child.
+/// Interval between exit, deadline and stop checks of a captured child.
 const TICK: Duration = Duration::from_millis(100);
+
+/// Asks whether the caller wants the child gone. Called each tick.
+pub type Stop<'a> = dyn Fn() -> Result<bool> + 'a;
 
 /// How a captured child ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +21,8 @@ pub enum Exit {
     Signal,
     /// Host kill at deadline.
     Timeout,
+    /// Host kill on `Stop`.
+    Stopped,
 }
 
 pub struct Captured {
@@ -55,9 +60,9 @@ pub fn lookup<S: AsRef<OsStr>>(bin: &str, dir: &Path, args: &[S]) -> Result<Opti
     }
 }
 
-/// Run `command` to its end, or kill it at `timeout`. Output captured, stdin closed.
-/// Pipes drain on their own threads, so a chatty child never blocks on a full pipe.
-pub fn capture(mut command: Command, timeout: Option<Duration>) -> Result<Captured> {
+/// Run `command` to its end, or kill it at `timeout` or on `stop`. Output captured,
+/// stdin closed. Pipes drain on their own threads, so a chatty child never blocks.
+pub fn capture(mut command: Command, timeout: Option<Duration>, stop: &Stop) -> Result<Captured> {
     let program = command.get_program().to_string_lossy().into_owned();
     let broke = |why: io::Error| unspawned(&program, &program, &why);
     let mut child = command
@@ -68,15 +73,32 @@ pub fn capture(mut command: Command, timeout: Option<Duration>) -> Result<Captur
         .map_err(broke)?;
     let stdout = drain(child.stdout.take());
     let stderr = drain(child.stderr.take());
-    let exit = wait(&mut child, timeout).map_err(|why| {
-        stop(&mut child);
-        broke(why)
+    let exit = wait(&mut child, timeout, stop).map_err(|fault| {
+        end(&mut child);
+        match fault {
+            Fault::Io(why) => broke(why),
+            Fault::Stop(why) => why,
+        }
     })?;
     Ok(Captured {
         exit,
         stdout: collect(stdout).map_err(broke)?,
         stderr: collect(stderr).map_err(broke)?,
     })
+}
+
+/// Sleep `span` in ticks. `true`: `stop` asked first.
+pub fn pause(span: Duration, stop: &Stop) -> Result<bool> {
+    let Some(deadline) = Instant::now().checked_add(span) else {
+        return Ok(false);
+    };
+    while Instant::now() < deadline {
+        if stop()? {
+            return Ok(true);
+        }
+        thread::sleep(TICK.min(deadline.saturating_duration_since(Instant::now())));
+    }
+    Ok(false)
 }
 
 /// Run to the end, output captured. The caller judges the exit.
@@ -89,9 +111,15 @@ pub fn refused<S: AsRef<OsStr>>(bin: &str, args: &[S], out: &Output) -> Error {
     failed(bin, args, &fault(out))
 }
 
-/// Last line a call printed on stderr, else on stdout: the line that names the fault.
-pub fn last_line(out: &Output) -> String {
-    fault(out).lines().last().unwrap_or_default().to_string()
+impl Captured {
+    /// Last line printed on stderr, else on stdout: the line that names the fault.
+    pub fn last_line(&self) -> String {
+        spoke(&self.stdout, &self.stderr)
+            .lines()
+            .last()
+            .unwrap_or_default()
+            .to_string()
+    }
 }
 
 fn output<S: AsRef<OsStr>>(bin: &str, dir: &Path, args: &[S]) -> Result<Output> {
@@ -106,24 +134,39 @@ fn command<S: AsRef<OsStr>>(bin: &str, dir: &Path, args: &[S]) -> Command {
     command
 }
 
-/// Deadline passed: kill, reap, report `Timeout`. Deadline past `Instant` range: none.
-fn wait(child: &mut Child, timeout: Option<Duration>) -> io::Result<Exit> {
-    let Some(deadline) = timeout.and_then(|timeout| Instant::now().checked_add(timeout)) else {
-        return child.wait().map(exit);
-    };
-    while Instant::now() < deadline {
-        if let Some(status) = child.try_wait()? {
+/// Why `wait` broke off: the child, or the stop check.
+enum Fault {
+    Io(io::Error),
+    Stop(Error),
+}
+
+/// Tick until exit, deadline or `stop`; kill and reap on the last two. Deadline
+/// past `Instant` range: none.
+fn wait(
+    child: &mut Child,
+    timeout: Option<Duration>,
+    stop: &Stop,
+) -> std::result::Result<Exit, Fault> {
+    let deadline = timeout.and_then(|timeout| Instant::now().checked_add(timeout));
+    let ended = loop {
+        if let Some(status) = child.try_wait().map_err(Fault::Io)? {
             return Ok(exit(status));
         }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            break Exit::Timeout;
+        }
+        if stop().map_err(Fault::Stop)? {
+            break Exit::Stopped;
+        }
         thread::sleep(TICK);
-    }
-    child.kill()?;
-    child.wait()?;
-    Ok(Exit::Timeout)
+    };
+    child.kill().map_err(Fault::Io)?;
+    child.wait().map_err(Fault::Io)?;
+    Ok(ended)
 }
 
 /// Error path: kill, reap, best effort.
-fn stop(child: &mut Child) {
+fn end(child: &mut Child) {
     if child.kill().is_ok() {
         let _ = child.wait();
     }
@@ -161,10 +204,13 @@ fn unspawned(bin: &str, context: &str, why: &io::Error) -> Error {
 
 /// git states a merge conflict on stdout, a fault on stderr. Take whichever spoke.
 fn fault(out: &Output) -> String {
-    let error = text(&out.stderr).trim().to_string();
-    match error.is_empty() {
-        true => text(&out.stdout).trim().to_string(),
-        false => error,
+    spoke(&text(&out.stdout), &text(&out.stderr))
+}
+
+fn spoke(stdout: &str, stderr: &str) -> String {
+    match stderr.trim() {
+        "" => stdout.trim().to_string(),
+        error => error.to_string(),
     }
 }
 

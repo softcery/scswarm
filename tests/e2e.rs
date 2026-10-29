@@ -31,6 +31,8 @@ const WAIT: Duration = Duration::from_secs(180);
 const TICK: Duration = Duration::from_millis(200);
 /// Host file `poll` is 1 s: two cycles and a reload fit.
 const CYCLES: Duration = Duration::from_secs(3);
+/// `stop` to worker exit: one 1 s check plus kill and restart.
+const STOPS: Duration = Duration::from_secs(5);
 const CONTAINERFILE: &str = "Containerfile.e2e";
 const BASE: &str = "registry.fedoraproject.org/fedora:44";
 /// Every row checks this value. The file ends in `\n`: the worker strips it.
@@ -55,6 +57,7 @@ fn slot_set_follows_host_file_live() {
     rolls_image(&swarm);
     switches_project(&swarm);
     rests_dead_project(&swarm);
+    stops_row(&swarm);
     let restarted = outlives_serve(&mut swarm);
     pushes_every_track(&swarm, restarted);
     let creates = swarm
@@ -274,6 +277,39 @@ fn rests_dead_project(swarm: &Swarm) {
     assert_eq!(skips, 1, "a dead remote must report once");
     swarm.with_second(3, &[EXTRA.0]);
     thread::sleep(CYCLES);
+}
+
+/// `stop` mid-step: the worker ends within `STOPS`, the row reads stopped, takes
+/// no slot again, and its project does not rest.
+fn stops_row(swarm: &Swarm) {
+    let row = ROWS[0];
+    let from = swarm.mark();
+    swarm.rerun(&[row], from);
+    swarm.wait(&format!("step row={} step=1", label(row)), from);
+    let asked = Instant::now();
+    swarm.tool(&["stop", PROJECT, row]);
+    let stopped = swarm.wait(&format!("stop row={}", label(row)), from);
+    assert!(asked.elapsed() < STOPS, "worker must stop within {STOPS:?}");
+    thread::sleep(CYCLES);
+    let after = &swarm.lines()[stopped..];
+    for needle in [
+        format!("assign row={} ", label(row)),
+        format!("land row={}", label(row)),
+        format!("skip project={PROJECT} "),
+    ] {
+        assert!(
+            !after.iter().any(|line| line.starts_with(&needle)),
+            "no `{needle}` after a stop:\n{}",
+            after.join("\n")
+        );
+    }
+    let table = succeed(command().args(["status", PROJECT]), "scswarm");
+    assert!(
+        table
+            .lines()
+            .any(|line| line.contains(&format!(" {row} ")) && line.contains(" stopped ")),
+        "status must list {row} as stopped:\n{table}"
+    );
 }
 
 /// SIGKILL on `serve` mid-row: the worker runs on, a new `serve` waits on its

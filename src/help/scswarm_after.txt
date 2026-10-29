@@ -12,6 +12,7 @@ Exit status:
   0  ok
   1  invalid input: usage, host file, track file, scswarm.yaml, row
   2  git, podman or file system failure
+  3  `work` alone: row ended by `scswarm stop`
 
 See also:
   scswarm help <command>, man scswarm-<command>

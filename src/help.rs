@@ -7,6 +7,7 @@ pub const SERVE_ABOUT: &str = include_str!("help/serve.txt");
 pub const STATUS_ABOUT: &str = include_str!("help/status.txt");
 pub const LOG_ABOUT: &str = include_str!("help/log.txt");
 pub const RESET_ABOUT: &str = include_str!("help/reset.txt");
+pub const STOP_ABOUT: &str = include_str!("help/stop.txt");
 
 /// Titled block after options: `Title:` in `--help`, uppercase man section.
 pub struct Section<'a> {
@@ -36,6 +37,7 @@ pub fn after(command: &str) -> &'static str {
         "status" => include_str!("help/status_after.txt"),
         "log" => include_str!("help/log_after.txt"),
         "reset" => include_str!("help/reset_after.txt"),
+        "stop" => include_str!("help/stop_after.txt"),
         "completions" => include_str!("help/completions_after.txt"),
         "man" => include_str!("help/man_after.txt"),
         _ => "",

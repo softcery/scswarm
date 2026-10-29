@@ -116,13 +116,14 @@ impl Slot {
         if !self.git.merging()? {
             return Err(conflict);
         }
-        let spent = match resolve()? {
-            Outcome::Spent(why) => format!("{conflict}; `merge` steps: {why}"),
-            Outcome::Done(()) if self.git.merging()? => conflict.to_string(),
+        let ended = match resolve()? {
+            Outcome::Spent(why) => Outcome::Spent(format!("{conflict}; `merge` steps: {why}")),
+            Outcome::Stopped => Outcome::Stopped,
+            Outcome::Done(()) if self.git.merging()? => Outcome::Spent(conflict.to_string()),
             Outcome::Done(()) => return Ok(Outcome::Done(())),
         };
         self.git.merge_abort()?;
-        Ok(Outcome::Spent(spent))
+        Ok(ended)
     }
 
     pub fn head(&self) -> Result<String> {

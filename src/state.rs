@@ -11,6 +11,7 @@ const BRANCHES: &str = "swarm/";
 /// Kinds of kept ref, under `git::KEPT`.
 const LAND: &str = "land/";
 const FAIL: &str = "fail/";
+const STOP: &str = "stop/";
 
 /// Row standing. Read from git and row locks, never stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +21,8 @@ pub enum State {
     /// Can start: no worker holds it.
     Queued,
     Running,
+    /// Stop ref equals the track tip.
+    Stopped,
     /// Fail refs equal the track tip and the `to` tip.
     Failed,
     /// Land commit is an ancestor of `to`.
@@ -114,6 +117,9 @@ impl Facts<'_> {
         if held(key)? {
             return Ok(Some(State::Running));
         }
+        if stops(kept(&key.stop_ref()), Some(self.tip)) {
+            return Ok(Some(State::Stopped));
+        }
         let [on_track, on_to] = key.fail_refs();
         let failed = self.to.is_some()
             && kept(&on_track) == Some(self.tip)
@@ -137,6 +143,11 @@ impl Key {
     /// Ref holding the last commit of the row's session. Sole record of finished work.
     pub fn land_ref(&self) -> String {
         format!("{}{LAND}{self}", git::KEPT)
+    }
+
+    /// Track tip `scswarm stop` held the row at.
+    pub fn stop_ref(&self) -> String {
+        format!("{}{STOP}{self}", git::KEPT)
     }
 
     /// Track tip and `to` tip of the last failed attempt, in that order.
@@ -179,11 +190,17 @@ impl fmt::Display for State {
             State::Waiting => "waiting",
             State::Queued => "queued",
             State::Running => "running",
+            State::Stopped => "stopped",
             State::Failed => "failed",
             State::Pushed => "pushed",
             State::Merged => "merged",
         })
     }
+}
+
+/// Row reads stopped: stop ref stands at the track tip. A new tip clears it.
+pub fn stops(stop: Option<&str>, tip: Option<&str>) -> bool {
+    stop.is_some() && stop == tip
 }
 
 /// Own state gated by parents: a row with no state of its own waits until every

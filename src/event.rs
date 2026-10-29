@@ -53,6 +53,10 @@ pub fn push(key: impl Display, to: &str, sha: &str) {
     println!("push row={key} to={to} sha={}", short(sha));
 }
 
+pub fn stop(key: impl Display) {
+    println!("stop row={key}");
+}
+
 pub fn fail(key: impl Display, why: &str) {
     eprintln!("fail row={key} cause={why}");
 }

@@ -1,5 +1,4 @@
 use std::fmt;
-use std::thread;
 
 use serde_json::Value;
 
@@ -7,7 +6,7 @@ use crate::config::{Agent, SESSION_SLOT};
 use crate::credential::Credential;
 use crate::error::Result;
 use crate::event;
-use crate::proc::{self, Captured, Exit};
+use crate::proc::{self, Captured, Exit, Stop};
 use crate::slot::Slot;
 use crate::step::{Outcome, Policy};
 use crate::transcript::{Entry, Transcript};
@@ -27,6 +26,8 @@ pub struct Call<'a> {
     /// Row the step belongs to: event context only.
     pub id: &'a str,
     pub step: usize,
+    /// Asked each tick of a try and of the pause between tries.
+    pub stop: &'a Stop<'a>,
 }
 
 /// What one exec'd step sends, and what a try that exits 0 gives back.
@@ -71,6 +72,7 @@ pub enum Fault {
     Exit(i32),
     Signal,
     Timeout,
+    Stopped,
     Blank,
     Sessionless,
 }
@@ -83,6 +85,7 @@ impl Call<'_> {
         loop {
             let fault = match self.once(ask)? {
                 Ok(reply) => return Ok(Outcome::Done(reply)),
+                Err(Fault::Stopped) => return Ok(Outcome::Stopped),
                 Err(fault) => fault,
             };
             event::attempt(self.id, self.step, attempt, &fault.to_string());
@@ -92,7 +95,9 @@ impl Call<'_> {
                     self.step
                 )));
             }
-            thread::sleep(wait);
+            if proc::pause(wait, self.stop)? {
+                return Ok(Outcome::Stopped);
+            }
             wait = wait.saturating_mul(2).min(self.policy.wait_max);
             attempt += 1;
         }
@@ -111,12 +116,12 @@ impl Call<'_> {
             self.slot
                 .container()
                 .exec(self.slot.path(), self.credentials, &ask.argv())?;
-        let captured = proc::capture(command, self.policy.timeout)?;
+        let captured = proc::capture(command, self.policy.timeout, self.stop)?;
         let judged = judge(ask, &captured);
         let entry = ask.sent(Entry {
             exit: match captured.exit {
                 Exit::Code(code) => Some(code),
-                Exit::Signal | Exit::Timeout => None,
+                Exit::Signal | Exit::Timeout | Exit::Stopped => None,
             },
             ..Entry::new(self.step)
         });
@@ -232,6 +237,7 @@ impl fmt::Display for Fault {
             Fault::Exit(code) => write!(f, "exit {code}"),
             Fault::Signal => f.write_str("killed by a signal"),
             Fault::Timeout => f.write_str("killed at `timeout`"),
+            Fault::Stopped => f.write_str("killed on scswarm stop"),
             Fault::Blank => f.write_str("reply must hold a commit message"),
             Fault::Sessionless => {
                 f.write_str("reply must hold `session_id`: the agent sets `resume`")
@@ -247,6 +253,7 @@ fn judge<A: Ask>(ask: &A, captured: &Captured) -> Judged<A::Reply> {
         Exit::Code(code) => Err(Fault::Exit(code)),
         Exit::Signal => Err(Fault::Signal),
         Exit::Timeout => Err(Fault::Timeout),
+        Exit::Stopped => Err(Fault::Stopped),
     }
 }
 

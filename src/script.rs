@@ -4,6 +4,7 @@ use crate::config::{self, Agent, Config, ID_SLOT, PARENT_SLOT};
 use crate::credential::Credential;
 use crate::error::{Error, Result};
 use crate::event;
+use crate::proc::Stop;
 use crate::slot::Slot;
 use crate::state::Address;
 use crate::step::{Outcome, Policy, Step, Steps};
@@ -24,6 +25,7 @@ pub struct Session<'a> {
     key: String,
     /// Session id of the agent, known from its first reply on. Spans every step.
     session: Option<String>,
+    stop: &'a Stop<'a>,
 }
 
 /// Where one pass of steps writes, and the branch it merges in. `None` off merge.
@@ -40,6 +42,7 @@ impl<'a> Session<'a> {
         config: &'a Config,
         row: &'a Row,
         address: &Address,
+        stop: &'a Stop<'a>,
     ) -> Result<Self> {
         Ok(Self {
             slot,
@@ -49,6 +52,7 @@ impl<'a> Session<'a> {
             agent: agent(config, &row.agent)?,
             key: address.to_string(),
             session: None,
+            stop,
         })
     }
 
@@ -77,13 +81,14 @@ impl<'a> Session<'a> {
         Ok(self.run(steps, pass)?.map(drop))
     }
 
-    /// Steps in order, up to the first spent one.
+    /// Steps in order, up to the first spent or stopped one.
     fn run(&mut self, steps: &Steps, pass: Pass) -> Result<Outcome<String>> {
         let mut last = None;
         for (index, step) in steps.iter().enumerate() {
             match self.step(index + 1, step, pass)? {
                 Outcome::Done(commit) => last = commit.or(last),
                 Outcome::Spent(why) => return Ok(Outcome::Spent(why)),
+                Outcome::Stopped => return Ok(Outcome::Stopped),
             }
         }
         Ok(Outcome::Done(
@@ -119,6 +124,7 @@ impl<'a> Session<'a> {
                         pass,
                     )?))),
                     Outcome::Spent(why) => Ok(Outcome::Spent(why)),
+                    Outcome::Stopped => Ok(Outcome::Stopped),
                 }
             }
             Step::Commit { message } => {
@@ -160,6 +166,7 @@ impl<'a> Session<'a> {
             transcript: pass.transcript,
             id: &self.key,
             step: number,
+            stop: self.stop,
         }
     }
 

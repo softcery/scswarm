@@ -11,6 +11,7 @@ const BRANCHES: &str = "swarm/";
 /// Kinds of kept ref, under `git::KEPT`.
 const LAND: &str = "land/";
 const FAIL: &str = "fail/";
+const STOP: &str = "stop/";
 
 /// Row standing. Read from git and row locks, never stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +21,8 @@ pub enum State {
     /// Can start: no worker holds it.
     Queued,
     Running,
+    /// Stop ref equals the track tip.
+    Stopped,
     /// Fail refs equal the track tip and the `to` tip.
     Failed,
     /// Land commit is an ancestor of `to`.
@@ -57,13 +60,7 @@ pub struct Snapshot {
 pub fn snapshot(git: &Git, track: Track, held: &dyn Fn(&Key) -> Result<bool>) -> Result<Snapshot> {
     let base = base(git, &track)?;
     let board = track.board(&Config::at(git, &base)?)?;
-    let facts = Facts {
-        git,
-        kept: git.refs(git::KEPT)?,
-        tip: &track.tip,
-        to: git.commit_of(&git::remote_branch(&track.to))?,
-        from: git.commit_of(&git::remote_branch(&track.from))?,
-    };
+    let facts = Facts::read(git, &track)?;
     let own = board
         .rows()
         .iter()
@@ -86,6 +83,11 @@ pub fn base(git: &Git, track: &Track) -> Result<String> {
     }
 }
 
+/// Merged or pushed, from the land ref and ancestry alone: no config read.
+pub fn landed(git: &Git, track: &Track, key: &Key) -> Result<Option<State>> {
+    Facts::read(git, track)?.landed(key)
+}
+
 /// One fetch on one track, read once for all its rows.
 struct Facts<'a> {
     git: &'a Git,
@@ -97,28 +99,52 @@ struct Facts<'a> {
     from: Option<String>,
 }
 
-impl Facts<'_> {
+impl<'a> Facts<'a> {
+    fn read(git: &'a Git, track: &'a Track) -> Result<Self> {
+        Ok(Self {
+            git,
+            kept: git.refs(git::KEPT)?,
+            tip: &track.tip,
+            to: git.commit_of(&git::remote_branch(&track.to))?,
+            from: git.commit_of(&git::remote_branch(&track.from))?,
+        })
+    }
+
     /// Standing from the row's own refs and lock. `None`: parents decide, also for
     /// a land ref outside `to`, which merges again.
     fn own(&self, key: &Key, held: &dyn Fn(&Key) -> Result<bool>) -> Result<Option<State>> {
-        let kept = |name: &str| self.kept.get(name).map(String::as_str);
-        if let Some(land) = kept(&key.land_ref()) {
-            for (tip, state) in [(&self.from, State::Merged), (&self.to, State::Pushed)] {
-                if let Some(tip) = tip {
-                    if self.git.is_ancestor(land, tip)? {
-                        return Ok(Some(state));
-                    }
-                }
-            }
+        if let Some(state) = self.landed(key)? {
+            return Ok(Some(state));
         }
         if held(key)? {
             return Ok(Some(State::Running));
         }
+        if stops(self.kept(&key.stop_ref()), Some(self.tip)) {
+            return Ok(Some(State::Stopped));
+        }
         let [on_track, on_to] = key.fail_refs();
         let failed = self.to.is_some()
-            && kept(&on_track) == Some(self.tip)
-            && kept(&on_to) == self.to.as_deref();
+            && self.kept(&on_track) == Some(self.tip)
+            && self.kept(&on_to) == self.to.as_deref();
         Ok(failed.then_some(State::Failed))
+    }
+
+    fn landed(&self, key: &Key) -> Result<Option<State>> {
+        let Some(land) = self.kept(&key.land_ref()) else {
+            return Ok(None);
+        };
+        for (tip, state) in [(&self.from, State::Merged), (&self.to, State::Pushed)] {
+            if let Some(tip) = tip {
+                if self.git.is_ancestor(land, tip)? {
+                    return Ok(Some(state));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn kept(&self, name: &str) -> Option<&str> {
+        self.kept.get(name).map(String::as_str)
     }
 }
 
@@ -137,6 +163,11 @@ impl Key {
     /// Ref holding the last commit of the row's session. Sole record of finished work.
     pub fn land_ref(&self) -> String {
         format!("{}{LAND}{self}", git::KEPT)
+    }
+
+    /// Track tip `scswarm stop` held the row at.
+    pub fn stop_ref(&self) -> String {
+        format!("{}{STOP}{self}", git::KEPT)
     }
 
     /// Track tip and `to` tip of the last failed attempt, in that order.
@@ -179,11 +210,18 @@ impl fmt::Display for State {
             State::Waiting => "waiting",
             State::Queued => "queued",
             State::Running => "running",
+            State::Stopped => "stopped",
             State::Failed => "failed",
             State::Pushed => "pushed",
             State::Merged => "merged",
         })
     }
+}
+
+/// Row reads stopped: stop ref stands at the current track tip. One check for
+/// `state` and the worker, so `serve` starts no worker the check ends.
+pub fn stops(stop: Option<&str>, tip: Option<&str>) -> bool {
+    stop.is_some() && stop == tip
 }
 
 /// Own state gated by parents: a row with no state of its own waits until every

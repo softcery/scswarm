@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::{env, fs};
 
-use crate::error::{Error, Result, INVALID};
+use crate::error::{Error, Result, INVALID, STOPPED};
 use crate::event;
 use crate::lock;
 use crate::paths::{self, Project};
@@ -130,8 +130,8 @@ impl Pool {
         Ok(idle)
     }
 
-    /// Free each slot whose worker ended. Exit 1 is input invalid, any other
-    /// failure a machine fault: no mark, the row replays.
+    /// Free each slot whose worker ended. Exit 1: input invalid. Exit 3: stop, not
+    /// reported. Other failure: machine fault, no mark, the row replays.
     pub fn reap(&mut self) -> Result<Vec<Ended>> {
         let mut done = Vec::new();
         for (&index, worker) in &mut self.workers {
@@ -146,6 +146,9 @@ impl Pool {
             let Some(worker) = self.workers.remove(&index) else {
                 continue;
             };
+            if status.code() == Some(STOPPED) {
+                continue;
+            }
             let why = format!("row {} on slot {index}: worker {status}", worker.row.key);
             let result = match status.code() {
                 _ if status.success() => Ok(()),

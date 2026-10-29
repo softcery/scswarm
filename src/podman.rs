@@ -8,7 +8,8 @@ use crate::credential::Credential;
 use crate::error::{Error, Result};
 use crate::host::Mount;
 use crate::paths;
-use crate::proc;
+use crate::proc::{self, Exit, Stop};
+use crate::step::Outcome;
 
 const BIN: &str = "podman";
 const NAME: &str = "scswarm";
@@ -29,9 +30,6 @@ const INIT: &str = "--init";
 const MOUNTS_LABEL: &str = "scswarm.mounts";
 const DEVICES_LABEL: &str = "scswarm.devices";
 const REPO_LABEL: &str = "scswarm.repo";
-
-/// What a build or pull gave: image ID, or the last line podman printed on failure.
-pub type Made = std::result::Result<String, String>;
 
 /// One long-lived container per slot. Sole owner of podman arguments.
 pub struct Container {
@@ -185,19 +183,25 @@ pub fn image_id(image: &str) -> Result<Option<String>> {
     Ok(Some(bare_id(id.trim())))
 }
 
-/// Fetch an image from its registry.
-pub fn pull(image: &str) -> Result<Made> {
-    made(&["pull".to_string(), "--quiet".to_string(), image.to_string()])
+/// Fetch an image from its registry. `Done`: image ID. `Spent`: last line podman printed.
+pub fn pull(image: &str, stop: &Stop) -> Result<Outcome<String>> {
+    made(
+        &["pull".to_string(), "--quiet".to_string(), image.to_string()],
+        stop,
+    )
 }
 
 /// Build a Containerfile. The image takes no tag: a slot runs it by ID.
-pub fn build(file: &Path, context: &Path) -> Result<Made> {
-    made(&[
-        "build".to_string(),
-        "--quiet".to_string(),
-        format!("--file={}", paths::arg(file)?),
-        paths::arg(context)?,
-    ])
+pub fn build(file: &Path, context: &Path, stop: &Stop) -> Result<Outcome<String>> {
+    made(
+        &[
+            "build".to_string(),
+            "--quiet".to_string(),
+            format!("--file={}", paths::arg(file)?),
+            paths::arg(context)?,
+        ],
+        stop,
+    )
 }
 
 /// Image name in the form podman reports: an untagged name reads as `:latest`.
@@ -249,15 +253,17 @@ impl Listed {
 }
 
 /// Build or pull: `--quiet` prints the image ID last on stdout.
-fn made(args: &[String]) -> Result<Made> {
-    let out = proc::answer(BIN, here(), args)?;
-    if !out.status.success() {
-        return Ok(Err(proc::last_line(&out)));
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    Ok(Ok(bare_id(
-        stdout.lines().last().unwrap_or_default().trim(),
-    )))
+fn made(args: &[String], stop: &Stop) -> Result<Outcome<String>> {
+    let mut command = Command::new(BIN);
+    command.current_dir(here()).args(args);
+    let captured = proc::capture(command, None, stop)?;
+    Ok(match captured.exit {
+        Exit::Code(0) => Outcome::Done(bare_id(
+            captured.stdout.lines().last().unwrap_or_default().trim(),
+        )),
+        Exit::Stopped => Outcome::Stopped,
+        Exit::Code(_) | Exit::Signal | Exit::Timeout => Outcome::Spent(captured.last_line()),
+    })
 }
 
 /// Image ID with no digest prefix. Both sides of a stamp pass here.

@@ -176,6 +176,15 @@ impl Git {
         run(&self.root, &["update-ref", "-d", name]).map(drop)
     }
 
+    /// Drop `name` only while it holds `commit`: a ref moved since stays.
+    pub fn ref_delete_at(&self, name: &str, commit: &str) -> Result<()> {
+        match run(&self.root, &["update-ref", "-d", name, commit]) {
+            Ok(_) => Ok(()),
+            Err(_) if self.commit_of(name)?.as_deref() != Some(commit) => Ok(()),
+            Err(why) => Err(why),
+        }
+    }
+
     pub fn is_ancestor(&self, commit: &str, rev: &str) -> Result<bool> {
         probe(&self.root, &["merge-base", "--is-ancestor", commit, rev])
     }

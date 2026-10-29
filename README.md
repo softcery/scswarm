@@ -95,7 +95,7 @@ Each project has its own feed thread for the network. Every `poll` seconds, 5 by
 Every `poll` seconds the loop reads each project from local refs, in its own thread:
 
 1. Reads each track branch under `tracks`.
-2. Parses `scswarm.yaml` at each `to` tip, derives the state of every row: waiting, queued, running, failed, pushed, merged.
+2. Parses `scswarm.yaml` at each `to` tip, derives the state of every row: waiting, queued, running, stopped, failed, pushed, merged.
 
 Then it starts one worker process, `scswarm work`, per queued row and free slot: the project with fewest rows running first, then the project served longest ago, then highest `priority` inside it, then the track with fewest rows running. Then it sleeps. A project whose remote fails rests; the others run.
 
@@ -120,6 +120,7 @@ Git only. No database, no state file. `serve` pushes land and fail refs to the r
 | row pushed | that commit is an ancestor of `to` |
 | row merged | that commit is an ancestor of `from` |
 | row failed | refs `refs/swarm/fail/<track>/<id>/track` and `/to` hold the track tip and `to` tip it failed against |
+| row stopped | ref `refs/swarm/stop/<track>/<id>` holds the current track tip |
 
 Kill the process at any point, restart, every row rebuilds from the repo.
 
@@ -308,13 +309,14 @@ scswarm status --tracks PREFIX  same, from the clone in the working directory
 scswarm log PROJECT ROW         transcripts, one block per try or commit: row session, then merge
 scswarm reset PROJECT ROW       delete swarm/<track>/<id>, every dependant branch, their land and
                                   fail refs, here, then on the remote
+scswarm stop PROJECT ROW        end the row's worker, hold the row until its track moves or reset
 scswarm completions SHELL       print the completion script: bash, zsh, fish, elvish, powershell
 scswarm man DIR                 write one man page per command into DIR
 ```
 
 `scswarm --help` prints the full guide: queue steps, `SWARM.yaml`, `scswarm.yaml`, files. `scswarm help <command>` prints one command.
 
-Exit codes: 0 ok, 1 input invalid, usage errors included, 2 git, podman or file system failure. A git or podman failure inside a slot marks no row: `serve` rests that project and runs on.
+Exit codes: 0 ok, 1 input invalid, usage errors included, 2 git, podman or file system failure. A worker that `stop` ends exits 3. A git or podman failure inside a slot marks no row: `serve` rests that project and runs on.
 
 ## Run under systemd
 
@@ -355,9 +357,11 @@ macOS runs containers in a podman machine VM. Start it with `podman machine init
 
 **`skip project=P` naming field `remote`.** `remote` names another URL than `origin` of `~/swarm/P.git`. If the repo moved and the old one is gone, delete `~/swarm/P.git`: the next cycle makes it again from the new remote.
 
-**Rerun a row.** Wait until `status` shows no worker for it, then run `scswarm reset PROJECT ROW`. Its old commits stay on `to`: revert them there if you want them gone. A worker running that row recreates the refs at its next commit. Stopping `serve` stops no worker.
+**Stop a row.** Run `scswarm stop PROJECT ROW`. Its worker ends within 1 s, its container restarts, its project runs on. The row reads `stopped` until you push its track or `reset` it. A pushed or merged row refuses: revert it on `to`.
 
-**Upgrade.** Unpack the new release into `~/.local/bin`, or rerun the source build, then run `systemctl --user restart scswarm`, or `launchctl kickstart -k gui/$(id -u)/com.softcery.scswarm` on macOS. Rows in flight finish on the old binary. New rows start on the new one.
+**Rerun a row.** If a worker runs it, `stop` it first. Once `status` shows no worker, run `scswarm reset PROJECT ROW`. Its old commits stay on `to`: revert them there if you want them gone. Stopping `serve` stops no worker.
+
+**Upgrade.** Unpack the new release into `~/.local/bin`, or rerun the source build, then run `systemctl --user restart scswarm`, or `launchctl kickstart -k gui/$(id -u)/com.softcery.scswarm` on macOS. Rows in flight finish on the old binary. New rows start on the new one. Restart right after the unpack: until then the old `serve` spawns the new binary, and a release that changes `work` flags rests each project.
 
 `serve` makes the remote's `refs/swarm/*` match the bare repo's, so its first cycle deletes every remote land or fail ref the bare repo lacks. Before the first `serve` against a remote other hosts or clones wrote to, compare the two:
 
@@ -366,7 +370,7 @@ git ls-remote origin 'refs/swarm/*'
 git -C ~/swarm/PROJECT.git for-each-ref refs/swarm/
 ```
 
-**Stop.** `systemctl --user stop scswarm` ends `serve` alone: rows in flight finish, no new row starts. To end every worker too, run `systemctl --user kill --kill-whom=all scswarm`. On macOS, `launchctl bootout gui/$(id -u)/com.softcery.scswarm` ends `serve` alone; then `pkill -f 'scswarm work '` ends the workers. Their rows replay from the `to` tip on the next start.
+**Stop the swarm.** `systemctl --user stop scswarm` ends `serve` alone: rows in flight finish, no new row starts. On macOS, `launchctl bootout gui/$(id -u)/com.softcery.scswarm` does the same. To end a row in flight, `scswarm stop` it.
 
 **Change workers, projects, mounts, devices or env.** If `workers` grows past `ARG WORKERS` of the Containerfile, raise that value and push it on each `to` first. Then edit the host file. `serve` applies it on the next cycle, slot by slot as each goes idle.
 

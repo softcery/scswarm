@@ -279,12 +279,14 @@ fn rests_dead_project(swarm: &Swarm) {
     thread::sleep(CYCLES);
 }
 
-/// `stop` mid-step: the worker ends within `STOPS`, the row reads stopped, takes
-/// no slot again, and its project does not rest.
+/// `stop` mid-step: the worker ends within `STOPS`, its step dies in the
+/// container, the row reads stopped, takes no slot, its project does not rest.
+/// A track push runs it again.
 fn stops_row(swarm: &Swarm) {
     let row = ROWS[0];
     let from = swarm.mark();
     swarm.rerun(&[row], from);
+    let slot = swarm.slot_of(row, from);
     swarm.wait(&format!("step row={} step=1", label(row)), from);
     let asked = Instant::now();
     swarm.tool(&["stop", PROJECT, row]);
@@ -310,6 +312,13 @@ fn stops_row(swarm: &Swarm) {
             .any(|line| line.contains(&format!(" {row} ")) && line.contains(" stopped ")),
         "status must list {row} as stopped:\n{table}"
     );
+    let left = swarm.processes(slot);
+    assert!(
+        !left.contains(&format!("sleep {ROW_SECONDS}")),
+        "step must die with its worker:\n{left}"
+    );
+    swarm.commit_on("track/a", "resume.txt", "resume\n", "e2e: move track");
+    swarm.wait(&format!("push row={} ", label(row)), stopped);
 }
 
 /// SIGKILL on `serve` mid-row: the worker runs on, a new `serve` waits on its
@@ -622,6 +631,23 @@ impl Swarm {
             .cloned()
             .collect();
         assert!(changed.is_empty(), "slot set must stand still: {changed:?}");
+    }
+
+    /// Slot of the first `assign` of `row` at or after `from`.
+    fn slot_of(&self, row: &str, from: usize) -> usize {
+        let line = &self.lines()[self.wait(&format!("assign row={} ", label(row)), from)];
+        line.rsplit("slot=")
+            .next()
+            .and_then(|slot| slot.parse().ok())
+            .unwrap_or_else(|| panic!("assign line must end in `slot=<n>`: {line}"))
+    }
+
+    /// Command lines of every process in the container of `slot`.
+    fn processes(&self, slot: usize) -> String {
+        succeed(
+            Command::new("podman").args(["top", &format!("scswarm-{slot}"), "args"]),
+            "podman",
+        )
     }
 
     /// `name id image-id` per slot container, sorted.

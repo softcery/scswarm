@@ -189,7 +189,7 @@ merge:
 | `refs/swarm/fail/<track>/<id>/to` | `to` tip of the failed attempt | bare repo, mirrored to remote |
 | `refs/swarm/stop/<track>/<id>` | track tip `stop` held the row at | bare repo, mirrored to remote |
 
-- Worker, per row: build the image at the `to` tip, make `swarm/<track>/<id>` at that tip, run the steps, write the land ref. Then merge the row into the `to` tip on no branch, always with a merge commit, so `to` stays first parent and each row is one merge on `to`. Push that commit to `to` with no force. A push the remote refuses as behind fetches, merges onto the new tip, pushes again. A push the remote turns down, for example branch protection, fails the row. Then drop the fail refs.
+- Worker, per row: build the image at the `to` tip, make `swarm/<track>/<id>` at that tip, run the steps, write the land ref. Then merge the row into the `to` tip on no branch, always with a merge commit, so `to` stays first parent and each row is one merge on `to`. Push that commit to `to` with no force. A push the remote refuses as behind fetches, merges onto the new tip, pushes again. A push the remote turns down, for example branch protection, fails the row. Then drop the fail refs and the stop ref.
 - A land ref outside `to`, for example after a force-push dropped it, reads as queued: the next worker merges it into `to` again with no new session.
 - Merge conflict: `merge` steps get one try in the conflicted worktree, in the row session. The first commit step closes the merge. Merge commits get no ref. Transcript: `merge`.
 - No `merge` block, a failed merge session, or a conflict left after it: the tool aborts the merge and reports the files. The row fails.
@@ -213,7 +213,7 @@ merge:
 - A stopped row runs again once the track tip moves, for any row, or `reset` clears it. A `to` move leaves it stopped. Its dependants wait.
 - A failed row retries when the track tip or the `to` tip moves, so a broken row costs one attempt per tip pair, not one per cycle. Fail refs sit outside `refs/heads/`, so they list as no branch.
 - A branch with no land ref holds a session cut short, unless a worker holds the row lock. `serve` reads it as queued and the worker replays the row from the `to` tip.
-- A pushed row clears its own fail refs. `reset <track>/<id>` clears branch, land ref, fail refs and stop ref of the row and of every dependant in its track, here, then on the remote.
+- A pushed row clears its own fail refs and stop ref. `reset <track>/<id>` clears branch, land ref, fail refs and stop ref of the row and of every dependant in its track, here, then on the remote.
 - A try fails on non-zero exit, a signal, `timeout`, a blank agent commit reply, or no `session_id` from an agent with `resume`. A step whose tries are spent fails the row and marks it, except a `run` step with `continue_on_error`.
 - A git or podman failure in a slot is no row failure. It writes no mark: the worker exits 2, `serve` reports `skip` for the project once per cause, and the project rests: no row of it until the rest ends, then the row replays. The rest starts at 60 s and doubles per fault in a row, up to 15 min. Only a worker of the project that exits 0 ends the doubling and clears the reported causes. Workers on other slots run on. A failed image build or pull is a row failure: the worker reaches podman before it builds, so a podman that answers nothing stays a machine fault.
 - `stop` writes the stop ref, then drops the land ref when no worker holds the row lock, then mirrors. A running worker checks the stop predicate once per second: each tick of a try, of the pause between tries, of an image build or pull, and before each push of `to`. On a hit it kills the try, restarts the container as after any try, aborts a merge in flight, drops the land ref, writes no fail ref, logs `stop row=`, exits 3. The transcript line of the killed try names the fault `killed on scswarm stop`.
@@ -322,6 +322,8 @@ Image: `image` names a Containerfile at the base, built with no tag and run by I
 - A worker waiting on the slot lock or the build lock sees a stop once it holds the lock.
 - `stop` runs on the swarm host. The feed fetches `refs/heads/*` alone, so a stop ref pushed from a clone never reaches the bare repo, and the next mirror prunes it on the remote.
 - Each running worker reads 2 refs per second for its stop check.
+- A worker started before an upgrade to a binary with `stop` never checks: its row runs to its end.
+- A stop ref stays after its track moves, until the row pushes or `reset` runs.
 - macOS: `devices` must stay empty. Device nodes live in the podman machine VM, so the host check fails each entry.
 - macOS: `mounts` host sides must sit under a podman machine share: `/Users`, `/private`, `/var/folders` by default.
 - macOS: a Mac asleep pauses the VM. Steps in flight can hit `timeout` and spend tries.

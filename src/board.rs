@@ -62,11 +62,7 @@ pub fn scan(git: &Git, prefix: &str) -> Result<Scan> {
         let Some(name) = branch.strip_prefix(prefix) else {
             continue;
         };
-        let read = Track::at(git, name, tip).and_then(|track| {
-            track.check_prefix(prefix)?;
-            Ok(track)
-        });
-        match read {
+        match read(git, prefix, name, tip) {
             Ok(track) => scan.tracks.push(track),
             Err(why @ Error::Invalid(_)) => scan.faults.push(why),
             Err(why) => return Err(why),
@@ -74,6 +70,25 @@ pub fn scan(git: &Git, prefix: &str) -> Result<Scan> {
     }
     scan.part_shared_to();
     Ok(scan)
+}
+
+/// One track by name, checked alone. `None`: no such branch.
+pub fn track(git: &Git, prefix: &str, name: &str) -> Result<Option<Track>> {
+    match git.commit_of(&git::remote_branch(&branch(prefix, name)))? {
+        Some(tip) => read(git, prefix, name, &tip).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Branch of track `name` under `prefix`.
+pub fn branch(prefix: &str, name: &str) -> String {
+    format!("{prefix}{name}")
+}
+
+fn read(git: &Git, prefix: &str, name: &str, tip: &str) -> Result<Track> {
+    let track = Track::at(git, name, tip)?;
+    track.check_prefix(prefix)?;
+    Ok(track)
 }
 
 impl Scan {

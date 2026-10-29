@@ -83,7 +83,7 @@ pub fn work(repo: &Git, job: &Job) -> Result<Outcome<()>> {
             board::FILE
         ))
     })?;
-    let watch = Watch::new(repo, &address.key, &format!("{}{}", job.tracks, job.track));
+    let watch = Watch::new(repo, &address.key, &board::branch(&job.tracks, &job.track));
     Attempt {
         slot: &Slot::open(job.slot)?,
         stop: &|| watch.stopped(),
@@ -213,8 +213,8 @@ impl Attempt<'_> {
     }
 
     /// Merge the row into the `to` tip, push to `to` with no force, again onto the
-    /// new tip after a fetch when behind. Stop check before each push. `serve`
-    /// pushes the refs after.
+    /// new tip after a fetch when behind. Stop check before each push. Landed:
+    /// fail and stop refs go, `serve` mirrors after.
     fn deliver(&mut self, session: &mut Session, land: &str) -> Result<Outcome<()>> {
         let (slot, repo, address, to) = (self.slot, self.repo, self.address, &self.track.to);
         let key = &address.key;
@@ -246,8 +246,9 @@ impl Attempt<'_> {
                 )));
             }
         };
-        for name in &key.fail_refs() {
-            repo.ref_delete(name)?;
+        let [on_track, on_to] = key.fail_refs();
+        for name in [on_track, on_to, key.stop_ref()] {
+            repo.ref_delete(&name)?;
         }
         event::push(address, to, &head);
         Ok(Outcome::Done(()))

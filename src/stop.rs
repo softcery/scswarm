@@ -19,18 +19,25 @@ pub fn stop(repo: &Git, tracks: &str, address: &Address) -> Result<()> {
             key: key.clone(),
         })?)
     };
-    let track = board::scan(repo, tracks)?
-        .tracks
-        .into_iter()
-        .find(|track| track.name == key.track)
-        .ok_or_else(|| missing(key))?;
+    let track = board::track(repo, tracks, &key.track)?.ok_or_else(|| {
+        Error::Invalid(format!(
+            "row `{key}` must name a track branch: no branch `{}`",
+            board::branch(tracks, &key.track)
+        ))
+    })?;
     let snapshot = state::snapshot(repo, track, &held)?;
     let index = snapshot
         .board
         .rows()
         .iter()
         .position(|row| row.id == key.id)
-        .ok_or_else(|| missing(key))?;
+        .ok_or_else(|| {
+            Error::Invalid(format!(
+                "row `{key}` must name a row of its track: {} holds no id `{}`",
+                board::FILE,
+                key.id
+            ))
+        })?;
     if let state @ (State::Pushed | State::Merged) = snapshot.states[index] {
         return Err(Error::Invalid(format!(
             "row `{key}` must not be pushed or merged to stop: it reads {state}; \
@@ -89,11 +96,4 @@ pub fn drop_land(repo: &Git, key: &Key) -> Result<bool> {
         repo.ref_delete(&land)?;
     }
     Ok(stood)
-}
-
-fn missing(key: &Key) -> Error {
-    Error::Invalid(format!(
-        "row `{key}` must name a row of a track branch: no track `{}` holds id `{}`",
-        key.track, key.id
-    ))
 }

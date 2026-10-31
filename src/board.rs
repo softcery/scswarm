@@ -33,6 +33,8 @@ pub struct Track {
     pub to: String,
     pub priority: i32,
     drafts: Vec<Draft>,
+    /// What errors call the file this came from.
+    label: String,
 }
 
 /// Rows of one track, settled against `scswarm.yaml` at the `to` tip.
@@ -158,7 +160,11 @@ impl Track {
                 git::REF_RULE
             )));
         }
-        let written: Written = yaml::parse(&label(name), text)?;
+        Self::read(name, tip, text, label(name))
+    }
+
+    fn read(name: &str, tip: &str, text: &str, label: String) -> Result<Self> {
+        let written: Written = yaml::parse(&label, text)?;
         let track = Self {
             name: name.to_string(),
             tip: tip.to_string(),
@@ -167,6 +173,7 @@ impl Track {
             to: written.to,
             priority: written.priority,
             drafts: written.rows,
+            label,
         };
         track.check_file()?;
         Ok(track)
@@ -184,26 +191,35 @@ impl Track {
         Ok(Board { rows })
     }
 
-    /// Check `text` as the next file of this track: same `from` and `to`, row `id`
-    /// kept with no `after`, every row settled against `config`.
-    pub fn check_next(&self, text: String, id: &str, config: &Config) -> Result<NextFile> {
-        let next = Self::parse(&self.name, &self.tip, &text)?;
+    /// Check `text` of worktree file `file` as the next file of this track: same `from`
+    /// and `to`, row `id` kept with no `after`, every row settled against each config.
+    pub fn check_next(
+        &self,
+        file: &str,
+        text: String,
+        id: &str,
+        configs: &[&Config],
+    ) -> Result<NextFile> {
+        let label = format!("track `{}` next file `{file}`", self.name);
+        let next = Self::read(&self.name, &self.tip, &text, label)?;
         for (field, running, written) in
             [("from", &self.from, &next.from), ("to", &self.to, &next.to)]
         {
             if running != written {
-                return Err(self.invalid(&format!(
+                return Err(next.invalid(&format!(
                     "field `{field}` must name `{running}`, the branch of the running track"
                 )));
             }
         }
         let carried = next.drafts.iter().find(|draft| draft.id == id);
         if !carried.is_some_and(|draft| draft.after.is_empty()) {
-            return Err(self.invalid(&format!(
+            return Err(next.invalid(&format!(
                 "field `rows` must hold row `{id}` with no `after`: a retry of this row reads this file"
             )));
         }
-        next.board(config)?;
+        for config in configs {
+            next.board(config)?;
+        }
         Ok(NextFile(text))
     }
 
@@ -379,12 +395,12 @@ impl Track {
             true => format!("row `{}`", draft.id),
             false => format!("row {}", at + 1),
         };
-        Error::Invalid(format!("{} {row}: {what}", label(&self.name)))
+        Error::Invalid(format!("{} {row}: {what}", self.label))
     }
 
     /// Fault of this track, named by track and file.
     pub fn invalid(&self, what: &str) -> Error {
-        Error::Invalid(format!("{}: {what}", label(&self.name)))
+        Error::Invalid(format!("{}: {what}", self.label))
     }
 }
 
@@ -596,7 +612,8 @@ rows:
     fn next_file_keeps_the_branches_and_the_running_row() {
         let config = Config::parse(CONFIG).expect("test config must parse");
         let running = track(EXAMPLE).expect("example must parse");
-        let check = |text: &str, id| running.check_next(text.to_string(), id, &config);
+        let check =
+            |text: &str, id| running.check_next("next.yaml", text.to_string(), id, &[&config]);
         check(EXAMPLE, "rag-04-retriever").expect("same file must pass");
         for (text, id, field) in [
             (
@@ -609,8 +626,20 @@ rows:
         ] {
             let why = check(&text, id).err().expect("next file must fail");
             let why = why.to_string();
+            assert!(why.contains("next file `next.yaml`"), "{why}");
             assert!(why.contains(&format!("field {field}")), "{why}");
         }
+        let other = Config::parse(&CONFIG.replace("  codex:\n    exec: codex exec\n", ""))
+            .expect("other config must parse");
+        running
+            .check_next(
+                "next.yaml",
+                EXAMPLE.to_string(),
+                "rag-04-retriever",
+                &[&config, &other],
+            )
+            .err()
+            .expect("an agent one config lacks must fail");
     }
 
     #[test]

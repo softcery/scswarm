@@ -81,10 +81,19 @@ impl<'a> Session<'a> {
         if let Outcome::Spent(why) = self.run(first, pass)? {
             return Ok(Outcome::Spent(why));
         }
-        let next = match row.publish.as_deref().map(|file| self.next_file(file)) {
+        let next = match row.publish.as_deref() {
             None => None,
-            Some(Ok(next)) => Some(next),
-            Some(Err(why)) => return Ok(Outcome::Spent(format!("step {number}: {why}"))),
+            Some(file) => match self.next_file(file)? {
+                Ok(next) => Some(next),
+                Err(why) => {
+                    let why = format!("step {number}: {why}");
+                    transcript.append(&Entry {
+                        fault: Some(why.clone()),
+                        ..Entry::new(number)
+                    })?;
+                    return Ok(Outcome::Spent(why));
+                }
+            },
         };
         let published = row.publish.as_deref();
         let outcome = self.step(number, last, Pass { published, ..pass })?;
@@ -150,21 +159,33 @@ impl<'a> Session<'a> {
         }
     }
 
-    /// Text of `file`, checked as the next track file against the project file in the
-    /// worktree. `Err` names what the row got wrong. No git or podman call runs here.
-    fn next_file(&self, file: &str) -> std::result::Result<NextFile, String> {
-        let text = self.slot.regular_text(file).ok_or_else(|| {
-            "field `publish` must name a regular text file at the worktree root".to_string()
-        })?;
-        let config = self.slot.regular_text(config::FILE).ok_or_else(|| {
-            format!(
-                "{} must stand as a regular text file at the worktree root",
-                config::FILE
-            )
-        })?;
-        Config::parse(&config)
-            .and_then(|config| self.track.check_next(text, &self.row.id, &config))
-            .map_err(|why| why.to_string())
+    /// Text of `file`, checked as the next track file against the project file at the
+    /// row base, which `serve` reads until the row merges, and the one in the worktree,
+    /// which it reads after. Inner `Err`: what the row got wrong.
+    fn next_file(&self, file: &str) -> Result<std::result::Result<NextFile, String>> {
+        let text = match self.slot.regular_text(file)? {
+            Ok(text) => text,
+            Err(got) => {
+                return Ok(Err(format!(
+                    "field `publish` must name a regular text file at the worktree root: `{file}` holds {got}"
+                )));
+            }
+        };
+        let worktree = match self.slot.regular_text(config::FILE)? {
+            Ok(text) => text,
+            Err(got) => {
+                return Ok(Err(format!(
+                    "{0} must stand as a regular text file at the worktree root: it holds {got}",
+                    config::FILE
+                )));
+            }
+        };
+        Ok(Config::parse(&worktree)
+            .and_then(|worktree| {
+                let configs = [self.config, &worktree];
+                self.track.check_next(file, text, &self.row.id, &configs)
+            })
+            .map_err(|why| why.to_string()))
     }
 
     /// Row steps go as typed. Merge prompts take the two names the tool knows.

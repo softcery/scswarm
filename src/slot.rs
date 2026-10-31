@@ -140,14 +140,30 @@ impl Slot {
         self.git.commit(message)
     }
 
-    /// Text of `name` at the worktree root. `None` unless a regular text file: the
-    /// agent wrote the tree and the host reads the file, so a symlink reads as none.
-    pub fn regular_text(&self, name: &str) -> Option<String> {
+    /// Text of `name` at the worktree root. The agent wrote the tree and the host reads
+    /// the file, so a symlink counts as no file. Inner `Err`: what stands there instead.
+    pub fn regular_text(&self, name: &str) -> Result<std::result::Result<String, &'static str>> {
         let path = self.path.join(name);
-        fs::symlink_metadata(&path)
-            .is_ok_and(|meta| meta.is_file())
-            .then(|| fs::read_to_string(&path).ok())
-            .flatten()
+        let broke = |why: io::Error| Error::Failed(format!("worktree {}: {why}", path.display()));
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(why) if why.kind() == io::ErrorKind::NotFound => return Ok(Err("nothing")),
+            Err(why) => return Err(broke(why)),
+        };
+        if meta.is_symlink() {
+            return Ok(Err("a symlink"));
+        }
+        if !meta.is_file() {
+            return Ok(Err("a directory or special file"));
+        }
+        match fs::read_to_string(&path) {
+            Ok(text) => Ok(Ok(text)),
+            Err(why) if why.kind() == io::ErrorKind::InvalidData => Ok(Err("no UTF-8 text")),
+            Err(why) if why.kind() == io::ErrorKind::PermissionDenied => {
+                Ok(Err("a file the host cannot read"))
+            }
+            Err(why) => Err(broke(why)),
+        }
     }
 
     /// Drop what stands at `name` in the worktree, of any kind. Absent: nothing to drop.

@@ -4,15 +4,21 @@ use crate::error::{Error, Result};
 use crate::git::{self, Git};
 use crate::state::{self, Key};
 
-/// Delete branch, land ref, publish ref and fail refs of `key` and of each dependant in its
-/// track: here, then on the remote by mirror.
+/// Delete branch, land ref, publish ref, fail refs and stop ref of `key` and of each
+/// dependant in its track: here, then on the remote by mirror.
 pub fn reset(repo: &Git, tracks: &str, key: &Key) -> Result<()> {
     let checkouts = repo.checkouts()?;
     let kept = repo.refs(git::KEPT)?;
     let mut dropped = 0;
     for row in targets(repo, tracks, key)? {
         let [on_track, on_to] = row.fail_refs();
-        for name in [row.land_ref(), row.publish_ref(), on_track, on_to] {
+        for name in [
+            row.land_ref(),
+            row.publish_ref(),
+            on_track,
+            on_to,
+            row.stop_ref(),
+        ] {
             if kept.contains_key(&name) {
                 repo.ref_delete(&name)?;
                 println!("deleted {name}");
@@ -32,7 +38,7 @@ pub fn reset(repo: &Git, tracks: &str, key: &Key) -> Result<()> {
     }
     if dropped == 0 {
         return Err(Error::Invalid(format!(
-            "row `{key}` must name a row with a branch, land ref or fail ref: none of `{}` or its dependants has one",
+            "row `{key}` must name a row with a branch, land, fail or stop ref: none of `{}` or its dependants has one",
             key.branch()
         )));
     }

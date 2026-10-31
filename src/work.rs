@@ -13,11 +13,13 @@ use crate::git::{self, Git, Push};
 use crate::host::Mount;
 use crate::lock;
 use crate::paths::{self, Project};
-use crate::podman::{self, Made, Stamp};
+use crate::podman::{self, Stamp};
+use crate::proc::Stop;
 use crate::script::{Played, Session};
 use crate::slot::Slot;
 use crate::state::{Address, Key};
 use crate::step::Outcome;
+use crate::stop::{self, Watch};
 use crate::transcript::{Entry, Transcript};
 
 pub const COMMAND: &str = "work";
@@ -40,7 +42,7 @@ pub struct Job {
     pub slot: usize,
     #[arg(long = TRACK, value_name = "NAME")]
     pub track: String,
-    /// Branch of the track on the remote: where a published file lands.
+    /// Branch of the track on the remote: stop check reads it, a published file lands on it.
     #[arg(long = TRACK_BRANCH, value_name = "BRANCH")]
     pub track_branch: String,
     #[arg(long = ROW, value_name = "ID")]
@@ -62,9 +64,10 @@ pub struct Job {
     pub devices: Vec<String>,
 }
 
-/// Row lock from stdin, slot lock once its last holder ends. `Ok`: row pushed or
-/// fail refs written. `Err`: machine fault, no mark.
-pub fn work(repo: &Git, job: &Job) -> Result<()> {
+/// Row lock from stdin, slot lock once its last holder ends. `Done`: row pushed.
+/// `Spent`: fail refs written. `Stopped`: on `scswarm stop`, no mark. `Err`:
+/// machine fault, no mark.
+pub fn work(repo: &Git, job: &Job) -> Result<Outcome<()>> {
     let address = job.address();
     let _row = lock::adopt(io::stdin().as_fd(), &paths::transcripts(&address)?)?;
     let dir = paths::slot(job.slot)?;
@@ -80,8 +83,12 @@ pub fn work(repo: &Git, job: &Job) -> Result<()> {
             board::FILE
         ))
     })?;
+    stop::settle(repo, &address.key, &job.track_branch)?;
+    let watch = Watch::new(repo, &address.key, &job.track_branch);
     Attempt {
         slot: &Slot::open(job.slot)?,
+        stop: &|| watch.stopped(),
+        watch: &watch,
         repo,
         track: &track,
         config: &config,
@@ -126,6 +133,8 @@ impl Job {
 /// Everything one attempt reads, plus the `to` tip it last ran against.
 struct Attempt<'a> {
     slot: &'a Slot,
+    stop: &'a Stop<'a>,
+    watch: &'a Watch<'a>,
     repo: &'a Git,
     track: &'a Track,
     config: &'a Config,
@@ -138,15 +147,22 @@ struct Attempt<'a> {
 impl Attempt<'_> {
     /// Release before the outcome: no fault leaves the branch held. A fault of the
     /// attempt outranks one of the release. Then the fail refs of a spent attempt.
-    fn run(mut self) -> Result<()> {
+    fn run(mut self) -> Result<Outcome<()>> {
         let outcome = self.attempt();
         let released = self.slot.release();
         let outcome =
             outcome.map_err(|why| Error::Failed(format!("row {}: {why}", self.address.key)))?;
         released?;
         match outcome {
-            Outcome::Done(()) => Ok(()),
-            Outcome::Spent(why) => self.fail(&why),
+            Outcome::Done(()) => Ok(Outcome::Done(())),
+            Outcome::Spent(why) => {
+                self.fail(&why)?;
+                Ok(Outcome::Spent(why))
+            }
+            Outcome::Stopped => {
+                event::stop(self.address);
+                Ok(Outcome::Stopped)
+            }
         }
     }
 
@@ -158,8 +174,9 @@ impl Attempt<'_> {
         let credentials = credential::load(&job.env)?;
         let standing = slot.stamp()?;
         let image = match self.image()? {
-            Ok(image) => image,
-            Err(why) => return Ok(Outcome::Spent(format!("image must build: {why}"))),
+            Outcome::Done(image) => image,
+            Outcome::Spent(why) => return Ok(Outcome::Spent(format!("image must build: {why}"))),
+            Outcome::Stopped => return Ok(Outcome::Stopped),
         };
         let stamp = Stamp::new(&image, &job.mounts, &job.devices, self.repo.root())?;
         slot.prepare(
@@ -177,6 +194,7 @@ impl Attempt<'_> {
             self.track,
             self.row,
             address,
+            self.stop,
         )?;
         let land = match self.repo.commit_of(&key.land_ref())? {
             Some(land) => land,
@@ -185,11 +203,14 @@ impl Attempt<'_> {
                 match session.play(&self.transcript(paths::RUN_LOG)?)? {
                     Outcome::Done(played) => self.land(played)?,
                     Outcome::Spent(why) => return Ok(Outcome::Spent(why)),
+                    Outcome::Stopped => return Ok(Outcome::Stopped),
                 }
             }
         };
-        if let Outcome::Spent(why) = self.publish()? {
-            return Ok(Outcome::Spent(why));
+        match self.publish()? {
+            Outcome::Done(()) => {}
+            Outcome::Spent(why) => return Ok(Outcome::Spent(why)),
+            Outcome::Stopped => return Ok(Outcome::Stopped),
         }
         self.deliver(&mut session, &land)
     }
@@ -211,13 +232,17 @@ impl Attempt<'_> {
     }
 
     /// Push the track commit of the row, if one waits, over the tip it grew on. A
-    /// track moved since then keeps its content, and the row still lands.
+    /// track moved since then keeps its content, and the row still lands. Stop check
+    /// first: this push moves the tip a stop ref holds.
     fn publish(&self) -> Result<Outcome<()>> {
         let (repo, address, branch) = (self.repo, self.address, &self.job.track_branch);
         let name = address.key.publish_ref();
         let Some(commit) = repo.commit_of(&name)? else {
             return Ok(Outcome::Done(()));
         };
+        if self.watch.read()? {
+            return Ok(Outcome::Stopped);
+        }
         let parent = repo.tip(&format!("{commit}^"))?;
         let mut entry = Entry::new(self.row.steps.len());
         let spent = match repo.push_if(&commit, branch, &parent)? {
@@ -254,7 +279,8 @@ impl Attempt<'_> {
     }
 
     /// Merge the row into the `to` tip, push to `to` with no force, again onto the
-    /// new tip after a fetch when behind. `serve` pushes the refs after.
+    /// new tip after a fetch when behind. Stop check before each push. Landed:
+    /// fail and stop refs go, `serve` mirrors after.
     fn deliver(&mut self, session: &mut Session, land: &str) -> Result<Outcome<()>> {
         let (slot, repo, address, to) = (self.slot, self.repo, self.address, &self.track.to);
         let key = &address.key;
@@ -264,10 +290,13 @@ impl Attempt<'_> {
         let mut resolve = || session.resolve(to, &transcript);
         let head = loop {
             self.against = repo.tip(&tracking)?;
-            if let Outcome::Spent(why) =
-                slot.merge_onto(&self.against, land, &branch, &mut resolve)?
-            {
-                return Ok(Outcome::Spent(why));
+            match slot.merge_onto(&self.against, land, &branch, &mut resolve)? {
+                Outcome::Done(()) => {}
+                Outcome::Spent(why) => return Ok(Outcome::Spent(why)),
+                Outcome::Stopped => return Ok(Outcome::Stopped),
+            }
+            if self.watch.read()? {
+                return Ok(Outcome::Stopped);
             }
             let head = slot.head()?;
             match repo.push(&head, to)? {
@@ -283,8 +312,9 @@ impl Attempt<'_> {
                 )));
             }
         };
-        for name in &key.fail_refs() {
-            repo.ref_delete(name)?;
+        let [on_track, on_to] = key.fail_refs();
+        for name in [on_track, on_to, key.stop_ref()] {
+            repo.ref_delete(&name)?;
         }
         event::push(address, to, &head);
         Ok(Outcome::Done(()))
@@ -300,13 +330,13 @@ impl Attempt<'_> {
 
     /// Containerfile at the base builds from a throwaway worktree of it, free of
     /// untracked files, under the build lock. Anything else names an image.
-    fn image(&self) -> Result<Made> {
+    fn image(&self) -> Result<Outcome<String>> {
         let (repo, job, image) = (self.repo, self.job, &self.config.image);
         if !repo.has_path(&job.base, image)? {
             let name = podman::image_ref(image);
             return match podman::image_id(&name)? {
-                Some(id) => Ok(Ok(id)),
-                None => podman::pull(&name),
+                Some(id) => Ok(Outcome::Done(id)),
+                None => podman::pull(&name, self.stop),
             };
         }
         let locked = paths::builds(&self.address.project)?;
@@ -316,7 +346,7 @@ impl Attempt<'_> {
         let tree = paths::build(&self.address.project)?;
         repo.worktree_remove(&tree)?;
         repo.worktree_add(&tree, &job.base)?;
-        let built = podman::build(&tree.join(image), &tree);
+        let built = podman::build(&tree.join(image), &tree, self.stop);
         repo.worktree_remove(&tree)?;
         built
     }

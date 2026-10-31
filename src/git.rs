@@ -219,6 +219,15 @@ impl Git {
         run(&self.root, &["update-ref", "-d", name]).map(drop)
     }
 
+    /// Drop `name` only while it holds `commit`: a ref moved since stays.
+    pub fn ref_delete_at(&self, name: &str, commit: &str) -> Result<()> {
+        match run(&self.root, &["update-ref", "-d", name, commit]) {
+            Ok(_) => Ok(()),
+            Err(_) if self.commit_of(name)?.as_deref() != Some(commit) => Ok(()),
+            Err(why) => Err(why),
+        }
+    }
+
     pub fn is_ancestor(&self, commit: &str, rev: &str) -> Result<bool> {
         probe(&self.root, &["merge-base", "--is-ancestor", commit, rev])
     }
@@ -436,6 +445,41 @@ mod tests {
             ))
         );
         assert_eq!(judge(&refused("[remote failure] (hung up)")), None);
+    }
+
+    #[test]
+    fn deletes_a_ref_only_at_the_commit_read() {
+        let root = std::env::temp_dir().join(format!("scswarm-git-{}", std::process::id()));
+        let repo = Git::init_bare(&root).expect("bare repo must start");
+        let tree = proc::run_with_input(BIN, &root, &["mktree"], "").expect("tree must write");
+        let commit = |message: &str| {
+            let args = [
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit-tree",
+                tree.trim(),
+                "-m",
+                message,
+            ];
+            run(&root, &args)
+                .expect("commit must write")
+                .trim()
+                .to_string()
+        };
+        let (read, moved) = (commit("read"), commit("moved"));
+        let name = "refs/swarm/stop/a/b";
+        repo.ref_set(name, &moved).expect("ref must set");
+        repo.ref_delete_at(name, &read)
+            .expect("a moved ref is no fault");
+        assert_eq!(
+            repo.commit_of(name).expect("ref must read"),
+            Some(moved.clone())
+        );
+        repo.ref_delete_at(name, &moved).expect("ref must delete");
+        assert_eq!(repo.commit_of(name).expect("ref must read"), None);
+        std::fs::remove_dir_all(&root).expect("scratch repo must delete");
     }
 
     /// Each name checked against `git check-ref-format --branch` before it landed here.

@@ -4,6 +4,7 @@ use crate::config::{self, Agent, Config, ID_SLOT, PARENT_SLOT};
 use crate::credential::Credential;
 use crate::error::{Error, Result};
 use crate::event;
+use crate::proc::Stop;
 use crate::slot::Slot;
 use crate::state::Address;
 use crate::step::{Outcome, Policy, Step};
@@ -25,6 +26,7 @@ pub struct Session<'a> {
     key: String,
     /// Session id of the agent, known from its first reply on. Spans every step.
     session: Option<String>,
+    stop: &'a Stop<'a>,
 }
 
 /// What a row session leaves: its last commit, and any checked next track file.
@@ -51,6 +53,7 @@ impl<'a> Session<'a> {
         track: &'a Track,
         row: &'a Row,
         address: &'a Address,
+        stop: &'a Stop<'a>,
     ) -> Result<Self> {
         Ok(Self {
             slot,
@@ -61,6 +64,7 @@ impl<'a> Session<'a> {
             agent: agent(config, &row.agent)?,
             key: address.to_string(),
             session: None,
+            stop,
         })
     }
 
@@ -78,8 +82,10 @@ impl<'a> Session<'a> {
             parent: None,
             published: None,
         };
-        if let Outcome::Spent(why) = self.run(first, pass)? {
-            return Ok(Outcome::Spent(why));
+        match self.run(first, pass)? {
+            Outcome::Done(()) => {}
+            Outcome::Spent(why) => return Ok(Outcome::Spent(why)),
+            Outcome::Stopped => return Ok(Outcome::Stopped),
         }
         let next = match row.publish.as_deref() {
             None => None,
@@ -119,11 +125,13 @@ impl<'a> Session<'a> {
         self.run(steps, pass)
     }
 
-    /// Steps in order, up to the first spent one.
+    /// Steps in order, up to the first spent or stopped one.
     fn run(&mut self, steps: &[Step], pass: Pass) -> Result<Outcome<()>> {
         for (index, step) in steps.iter().enumerate() {
-            if let Outcome::Spent(why) = self.step(index + 1, step, pass)? {
-                return Ok(Outcome::Spent(why));
+            match self.step(index + 1, step, pass)? {
+                Outcome::Done(_) => {}
+                Outcome::Spent(why) => return Ok(Outcome::Spent(why)),
+                Outcome::Stopped => return Ok(Outcome::Stopped),
             }
         }
         Ok(Outcome::Done(()))
@@ -153,6 +161,7 @@ impl<'a> Session<'a> {
                 match self.reply(outcome) {
                     Outcome::Done(message) => self.commit(number, message.trim(), pass),
                     Outcome::Spent(why) => Ok(Outcome::Spent(why)),
+                    Outcome::Stopped => Ok(Outcome::Stopped),
                 }
             }
             Step::Commit { message } => self.commit(number, message, pass),
@@ -221,6 +230,7 @@ impl<'a> Session<'a> {
             transcript: pass.transcript,
             id: &self.key,
             step: number,
+            stop: self.stop,
         }
     }
 

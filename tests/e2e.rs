@@ -31,6 +31,8 @@ const WAIT: Duration = Duration::from_secs(180);
 const TICK: Duration = Duration::from_millis(200);
 /// Host file `poll` is 1 s: two cycles and a reload fit.
 const CYCLES: Duration = Duration::from_secs(3);
+/// `stop` to worker exit: one 1 s check plus kill and restart.
+const STOPS: Duration = Duration::from_secs(5);
 /// Hook line that ends the worker above its git with no cleanup. No `pkill`: on macOS it
 /// skips the caller's ancestors.
 const KILL_WORKER: &str = "kill -9 $(ps -o ppid= -p $PPID)";
@@ -58,12 +60,18 @@ fn slot_set_follows_host_file_live() {
     rolls_image(&swarm);
     switches_project(&swarm);
     rests_dead_project(&swarm);
+    stops_row(&swarm);
+    resumes_after_rollback(&swarm);
+    runs_past_a_stale_stop(&swarm);
+    refuses_pushed_row(&swarm);
     let restarted = outlives_serve(&mut swarm);
     pushes_every_track(&swarm, restarted);
     publishes_next_file(&swarm);
     replays_after_a_kill_before_the_land_ref(&swarm);
     resumes_after_a_kill_past_the_land_ref(&swarm);
     drops_the_file_when_the_track_moves(&swarm);
+    stops_before_the_publish_push(&swarm);
+    stops_before_the_to_push(&swarm);
     let creates = swarm
         .lines()
         .iter()
@@ -283,6 +291,115 @@ fn rests_dead_project(swarm: &Swarm) {
     thread::sleep(CYCLES);
 }
 
+/// `stop` mid-step: the worker ends within `STOPS`, its step dies in the
+/// container, the row reads stopped, takes no slot, its project does not rest.
+/// A track push runs it again.
+fn stops_row(swarm: &Swarm) {
+    let row = ROWS[0];
+    let from = swarm.mark();
+    swarm.rerun(&[row], from);
+    let slot = swarm.slot_of(row, from);
+    swarm.wait(&format!("step row={} step=1", label(row)), from);
+    let asked = Instant::now();
+    swarm.tool(&["stop", PROJECT, row]);
+    let stopped = swarm.wait(&format!("stop row={}", label(row)), from);
+    assert!(asked.elapsed() < STOPS, "worker must stop within {STOPS:?}");
+    thread::sleep(CYCLES);
+    assert_eq!(swarm.count(from, &format!("land row={}", label(row))), 0);
+    let after = &swarm.lines()[stopped..];
+    for needle in [
+        format!("assign row={} ", label(row)),
+        format!("skip project={PROJECT} "),
+    ] {
+        assert!(
+            !after.iter().any(|line| line.starts_with(&needle)),
+            "no `{needle}` after a stop:\n{}",
+            after.join("\n")
+        );
+    }
+    let table = succeed(command().args(["status", PROJECT]), "scswarm");
+    assert!(
+        table
+            .lines()
+            .any(|line| line.contains(&format!(" {row} ")) && line.contains(" stopped ")),
+        "status must list {row} as stopped:\n{table}"
+    );
+    let left = swarm.processes(slot);
+    assert!(
+        !left.contains(&format!("sleep {ROW_SECONDS}")),
+        "step must die with its worker:\n{left}"
+    );
+    swarm.commit_on("track/a", "resume.txt", "resume\n", "e2e: move track");
+    swarm.wait(&format!("push row={} ", label(row)), stopped);
+}
+
+/// `stop` at a new track tip, then a force-push back to the old tip: the row
+/// reads queued, and its worker must run it to the end, not stop each cycle.
+fn resumes_after_rollback(swarm: &Swarm) {
+    let row = ROWS[0];
+    let old = swarm.remote_tip("track/a");
+    let moved = swarm.mark();
+    swarm.commit_on("track/a", "rollback.txt", "rollback\n", "e2e: tip to undo");
+    swarm.wait(&format!("tip project={PROJECT} track=a "), moved);
+    let from = swarm.mark();
+    swarm.rerun(&[row], from);
+    swarm.wait(&format!("step row={} step=1", label(row)), from);
+    swarm.tool(&["stop", PROJECT, row]);
+    swarm.wait(&format!("stop row={}", label(row)), from);
+    let back = swarm.mark();
+    swarm.git(&[
+        "push",
+        "--quiet",
+        "--force",
+        "origin",
+        &format!("{old}:refs/heads/track/a"),
+    ]);
+    swarm.wait(&format!("push row={} ", label(row)), back);
+}
+
+/// Stop ref at an older track tip, written mid-row: the running worker reads it as no
+/// stop, the check `state` reads.
+fn runs_past_a_stale_stop(swarm: &Swarm) {
+    let row = ROWS[0];
+    let from = swarm.mark();
+    swarm.rerun(&[row], from);
+    swarm.wait(&format!("step row={} step=1", label(row)), from);
+    let bare = home().join("swarm").join(format!("{PROJECT}.git"));
+    let old = succeed(
+        git()
+            .current_dir(&bare)
+            .args(["rev-parse", "refs/remotes/origin/track/a^"]),
+        "git",
+    );
+    let stop_ref = format!("refs/swarm/stop/{row}");
+    let args = ["update-ref", stop_ref.as_str(), old.trim()];
+    succeed(git().current_dir(&bare).args(args), "git");
+    swarm.wait(&format!("push row={} ", label(row)), from);
+    assert_eq!(swarm.count(from, &format!("stop row={}", label(row))), 0);
+}
+
+/// `stop` on a pushed row exits 1 and keeps its land ref: its work sits on `to`.
+fn refuses_pushed_row(swarm: &Swarm) {
+    let row = ROWS[0];
+    let out = command()
+        .args(["stop", PROJECT, row])
+        .output()
+        .expect("`scswarm stop` must start");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stop of a pushed row must exit 1"
+    );
+    assert!(
+        swarm.kept(&format!("refs/swarm/land/{row}")).is_some(),
+        "stop of a pushed row must keep its land ref"
+    );
+    assert!(
+        swarm.kept(&format!("refs/swarm/stop/{row}")).is_none(),
+        "stop of a pushed row must write no stop ref"
+    );
+}
+
 /// SIGKILL on `serve` mid-row: the worker runs on, a new `serve` waits on its
 /// locks. The row lands once, one try per step. Returns the restart line.
 fn outlives_serve(swarm: &mut Swarm) -> usize {
@@ -453,6 +570,56 @@ fn drops_the_file_when_the_track_moves(swarm: &Swarm) {
         swarm.count(from, &format!("assign row={} ", label("r/b"))),
         0
     );
+}
+
+/// Hook writes the stop ref once the land and publish refs stand: the track stays, nothing
+/// lands. A track push with no `publish` replays the row: no old ref survives.
+fn stops_before_the_publish_push(swarm: &Swarm) {
+    let from = swarm.mark();
+    let hook = swarm.bare_hook("reference-transaction");
+    write_hook(
+        &hook,
+        &format!(
+            "test \"$1\" = committed || exit 0\ngrep -q refs/swarm/publish/ || exit 0\nrm -f '{}'\ngit update-ref refs/swarm/stop/u/a \"$(git rev-parse refs/remotes/origin/track/u)\"\nsleep 2\n",
+            hook.display()
+        ),
+    );
+    swarm.track("track/u", &seed("feat/u", "feat/u", ":", "commit: a"));
+    let tip = swarm.head();
+    let row = label("u/a");
+    let stopped = swarm.wait(&format!("stop row={row}"), from);
+    assert_eq!(swarm.on_remote(&["rev-parse", "track/u"]).trim(), tip);
+    assert_eq!(swarm.count(from, &format!("publish row={row} ")), 0);
+    swarm.wait_state("u/a", "stopped");
+    swarm.commit_on(
+        "track/u",
+        "SWARM.yaml",
+        &next_text("feat/u"),
+        "e2e: drop publish",
+    );
+    swarm.wait(&format!("push row={} ", label("u/b")), stopped);
+    assert_eq!(swarm.count(from, &format!("land row={row}")), 2);
+    assert_eq!(swarm.count(from, &format!("publish-dropped row={row} ")), 0);
+    assert_eq!(swarm.count(from, &format!("publish row={row} ")), 0);
+}
+
+/// Hook writes the stop ref once the land ref stands: `to` gets no push.
+fn stops_before_the_to_push(swarm: &Swarm) {
+    let from = swarm.mark();
+    let hook = swarm.bare_hook("reference-transaction");
+    write_hook(
+        &hook,
+        &format!(
+            "test \"$1\" = committed || exit 0\ngrep -q refs/swarm/land/v/ || exit 0\nrm -f '{}'\ngit update-ref refs/swarm/stop/v/a \"$(git rev-parse refs/remotes/origin/track/v)\"\nsleep 2\n",
+            hook.display()
+        ),
+    );
+    swarm.track("track/v", &track("feat/a", "feat/v", 0, &["v/a"]));
+    let row = label("v/a");
+    let stopped = swarm.wait(&format!("stop row={row}"), from);
+    thread::sleep(CYCLES);
+    assert_eq!(swarm.count(stopped, &format!("push row={row} ")), 0);
+    assert_eq!(swarm.count(from, &format!("push row={row} ")), 0);
 }
 
 /// Scratch project: bare remote, a clone that pushes to it, host file, `serve`
@@ -750,6 +917,23 @@ impl Swarm {
         assert!(changed.is_empty(), "slot set must stand still: {changed:?}");
     }
 
+    /// Slot of the first `assign` of `row` at or after `from`.
+    fn slot_of(&self, row: &str, from: usize) -> usize {
+        let line = &self.lines()[self.wait(&format!("assign row={} ", label(row)), from)];
+        line.rsplit("slot=")
+            .next()
+            .and_then(|slot| slot.parse().ok())
+            .unwrap_or_else(|| panic!("assign line must end in `slot=<n>`: {line}"))
+    }
+
+    /// Command lines of every process in the container of `slot`.
+    fn processes(&self, slot: usize) -> String {
+        succeed(
+            Command::new("podman").args(["top", &format!("scswarm-{slot}"), "args"]),
+            "podman",
+        )
+    }
+
     /// `name id image-id` per slot container, sorted.
     fn containers(&self) -> Vec<String> {
         let filter = format!("--filter=name={SLOT_NAMES}");
@@ -785,6 +969,32 @@ impl Swarm {
         let tip = format!("origin/{branch}");
         self.git(&["checkout", "--quiet", "--force", "-B", branch, &tip]);
         self.commit_here(file, text, message, branch);
+    }
+
+    /// Tip of `branch` on the remote, fetched now.
+    fn remote_tip(&self, branch: &str) -> String {
+        self.git(&["fetch", "--quiet", "origin"]);
+        let tip = format!("origin/{branch}");
+        succeed(
+            git().arg("-C").arg(&self.work).args(["rev-parse", &tip]),
+            "git",
+        )
+        .trim()
+        .to_string()
+    }
+
+    /// Commit of ref `name` in the bare repo of the first project. `None`: absent.
+    fn kept(&self, name: &str) -> Option<String> {
+        let bare = home().join("swarm").join(format!("{PROJECT}.git"));
+        let out = git()
+            .arg("-C")
+            .arg(bare)
+            .args(["rev-parse", "--verify", "--quiet", name])
+            .output()
+            .expect("git must start");
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
     /// Commit the scratch clone holds checked out.

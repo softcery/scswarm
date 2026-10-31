@@ -53,6 +53,8 @@ pub enum Outcome<T> {
     Done(T),
     /// Tries spent or conflict left. Text names step and last fault.
     Spent(String),
+    /// `scswarm stop` asked: no mark, no rest.
+    Stopped,
 }
 
 /// Field `defaults` of `scswarm.yaml`: one policy per exec'd step kind.
@@ -134,6 +136,7 @@ impl<T> Outcome<T> {
         match self {
             Outcome::Done(value) => Outcome::Done(f(value)),
             Outcome::Spent(why) => Outcome::Spent(why),
+            Outcome::Stopped => Outcome::Stopped,
         }
     }
 }

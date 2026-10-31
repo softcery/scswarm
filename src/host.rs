@@ -20,6 +20,8 @@ const FETCH: u64 = 60;
 pub const REST_FIRST: Duration = Duration::from_secs(60);
 /// Longest rest of a project: each rest doubles up to this.
 pub const REST_MAX: Duration = Duration::from_secs(900);
+/// Interval between stop checks of a running worker.
+pub const STOP_POLL: Duration = Duration::from_secs(1);
 /// Bounds of each git call to a remote, in seconds and bytes per second: a dead
 /// or stalled remote fails the call, so git drops its own locks.
 pub const SSH_CONNECT: u64 = 30;

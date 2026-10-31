@@ -6,6 +6,10 @@ States:
   pushed   its last commit is in `to`
   merged   its last commit is in `from`
 
+Color:
+  A terminal shows each state in its own color. Output is plain when
+  stdout is no terminal, TERM is dumb, or NO_COLOR is set and not empty.
+
 Read state from a clone:
   The clone's `origin` must be the project's `remote`.
   git config --add remote.origin.fetch '+refs/swarm/*:refs/swarm/*'

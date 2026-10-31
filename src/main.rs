@@ -89,7 +89,7 @@ enum Command {
         row: String,
     },
     #[command(
-        about = "Delete one row and its dependants so they run again",
+        about = "Run one row and its dependants again",
         long_about = help::RESET_ABOUT
     )]
     Reset {

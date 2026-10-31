@@ -49,6 +49,10 @@ pub fn publish(key: impl Display, sha: &str) {
     println!("publish row={key} sha={}", short(sha));
 }
 
+pub fn publish_dropped(key: impl Display, sha: &str) {
+    println!("publish-dropped row={key} sha={}", short(sha));
+}
+
 pub fn land(key: impl Display) {
     println!("land row={key}");
 }

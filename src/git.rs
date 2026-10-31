@@ -100,9 +100,23 @@ impl Git {
 
     /// Bare repo alone: push `commit` to remote `branch`, no force.
     pub fn push(&self, commit: &str, branch: &str) -> Result<Push> {
+        self.push_with(commit, branch, &[])
+    }
+
+    /// Bare repo alone: push `commit`, a child of `expected`, to remote `branch` while
+    /// the remote holds `expected`. Moved or gone: `Behind`, and the remote stays.
+    pub fn push_if(&self, commit: &str, branch: &str, expected: &str) -> Result<Push> {
+        let lease = format!("--force-with-lease={}:{expected}", branch_ref(branch));
+        self.push_with(commit, branch, &[&lease])
+    }
+
+    fn push_with(&self, commit: &str, branch: &str, flags: &[&str]) -> Result<Push> {
         let _store = lock::hold(&self.root.join(REF_STORE))?;
         let spec = format!("{commit}:{}", branch_ref(branch));
-        let args = bounded(&["push", "--porcelain", ORIGIN, &spec]);
+        let mut args = vec!["push", "--porcelain"];
+        args.extend_from_slice(flags);
+        args.extend_from_slice(&[ORIGIN, &spec]);
+        let args = bounded(&args);
         let out = proc::answer(BIN, &self.root, &args)?;
         if out.status.success() {
             return Ok(Push::Done);
@@ -189,6 +203,15 @@ impl Git {
 
     pub fn ref_set(&self, name: &str, commit: &str) -> Result<()> {
         run(&self.root, &["update-ref", name, commit]).map(drop)
+    }
+
+    /// Set each `(name, commit)` in one transaction: all or none.
+    pub fn refs_set(&self, refs: &[(String, String)]) -> Result<()> {
+        let input: String = refs
+            .iter()
+            .map(|(name, commit)| format!("update {name} {commit}\n"))
+            .collect();
+        proc::run_with_input(BIN, &self.root, &["update-ref", "--stdin"], &input).map(drop)
     }
 
     /// Drop `name`. Does nothing when no such ref.

@@ -1,12 +1,9 @@
-use crate::board::{self, NextFile, Row, Track};
+use crate::board::{NextFile, Row, Track};
 use crate::call::{Call, Message, Reply, Shell, Turn};
 use crate::config::{self, Agent, Config, ID_SLOT, PARENT_SLOT};
 use crate::credential::Credential;
 use crate::error::{Error, Result};
 use crate::event;
-use crate::git::{self, Git, Push};
-use crate::host::Host;
-use crate::paths::Project;
 use crate::slot::Slot;
 use crate::state::Address;
 use crate::step::{Outcome, Policy, Step};
@@ -19,34 +16,36 @@ const SLOT_OPEN: char = '{';
 /// resumes the session the row ran.
 pub struct Session<'a> {
     slot: &'a Slot,
-    /// Bare repo of the project: writes and pushes a published track file.
-    repo: &'a Git,
     credentials: &'a [Credential],
     config: &'a Config,
     track: &'a Track,
     row: &'a Row,
     agent: &'a Agent,
-    project: &'a Project,
     /// Row label: event context.
     key: String,
     /// Session id of the agent, known from its first reply on. Spans every step.
     session: Option<String>,
 }
 
-/// Where one pass of steps writes, the branch it merges in, the file a commit publishes.
+/// What a row session leaves: its last commit, and any checked next track file.
+pub struct Played {
+    pub commit: String,
+    pub next: Option<NextFile>,
+}
+
+/// Where one pass of steps writes, the branch it merges in, the file a commit drops.
 #[derive(Clone, Copy)]
 struct Pass<'p> {
     transcript: &'p Transcript,
     /// `None` off merge.
     parent: Option<&'p str>,
-    /// Worktree name and checked text. Last row step alone.
-    publish: Option<(&'p str, &'p NextFile)>,
+    /// Worktree name of a checked next file. Last row step alone.
+    published: Option<&'p str>,
 }
 
 impl<'a> Session<'a> {
     pub fn open(
         slot: &'a Slot,
-        repo: &'a Git,
         credentials: &'a [Credential],
         config: &'a Config,
         track: &'a Track,
@@ -55,21 +54,19 @@ impl<'a> Session<'a> {
     ) -> Result<Self> {
         Ok(Self {
             slot,
-            repo,
             credentials,
             config,
             track,
             row,
             agent: agent(config, &row.agent)?,
-            project: &address.project,
             key: address.to_string(),
             session: None,
         })
     }
 
-    /// Every step of the row. `Done` holds the last commit. A published file is
-    /// checked before the last step, so a refused file costs no commit turn.
-    pub fn play(&mut self, transcript: &Transcript) -> Result<Outcome<String>> {
+    /// Every step of the row. A published file is checked before the last step, so a
+    /// refused file costs no commit turn.
+    pub fn play(&mut self, transcript: &Transcript) -> Result<Outcome<Played>> {
         let row = self.row;
         let number = row.steps.len();
         let (last, first) = row
@@ -79,7 +76,7 @@ impl<'a> Session<'a> {
         let pass = Pass {
             transcript,
             parent: None,
-            publish: None,
+            published: None,
         };
         if let Outcome::Spent(why) = self.run(first, pass)? {
             return Ok(Outcome::Spent(why));
@@ -89,9 +86,12 @@ impl<'a> Session<'a> {
             Some(Ok(next)) => Some(next),
             Some(Err(why)) => return Ok(Outcome::Spent(format!("step {number}: {why}"))),
         };
-        let publish = row.publish.as_deref().zip(next.as_ref());
-        let outcome = self.step(number, last, Pass { publish, ..pass })?;
-        Ok(outcome.map(|commit| commit.expect("`Steps` must end with a commit step")))
+        let published = row.publish.as_deref();
+        let outcome = self.step(number, last, Pass { published, ..pass })?;
+        Ok(outcome.map(|commit| Played {
+            commit: commit.expect("`Steps` must end with a commit step"),
+            next,
+        }))
     }
 
     /// Hand the conflicted worktree to the project `merge` steps. No `merge` steps:
@@ -105,7 +105,7 @@ impl<'a> Session<'a> {
         let pass = Pass {
             transcript,
             parent: Some(parent),
-            publish: None,
+            published: None,
         };
         self.run(steps, pass)
     }
@@ -167,39 +167,6 @@ impl<'a> Session<'a> {
             .map_err(|why| why.to_string())
     }
 
-    /// Commit `next` as the sole file on the track tip, push it with no force, again
-    /// onto the new tip after a fetch when behind.
-    fn publish(&self, number: usize, next: &NextFile, pass: Pass) -> Result<Outcome<()>> {
-        let repo = self.repo;
-        let host = Host::load()?;
-        let branch = format!("{}{}", host.entry(self.project)?.tracks, self.track.name);
-        let tracking = git::remote_branch(&branch);
-        let message = format!("publish {}", self.key);
-        let commit = loop {
-            let tip = repo.commit_of(&tracking)?.ok_or_else(|| {
-                Error::Failed(format!("track branch `{branch}` must stand on the remote"))
-            })?;
-            let commit = repo.commit_file(&tip, board::FILE, next.text(), &message)?;
-            match repo.push(&commit, &branch)? {
-                Push::Done => break commit,
-                Push::Declined(why) => {
-                    return Ok(Outcome::Spent(format!(
-                        "step {number}: push to `{branch}` must land: {why}"
-                    )));
-                }
-                Push::Behind => repo.fetch()?,
-            }
-            if repo.commit_of(&tracking)?.as_deref() == Some(tip.as_str()) {
-                return Err(Error::Failed(format!(
-                    "push to `{branch}` must land: the remote refused it, a fetch brought no new commit"
-                )));
-            }
-        };
-        event::publish(&self.key, &commit);
-        record(number, commit, &message, pass)?;
-        Ok(Outcome::Done(()))
-    }
-
     /// Row steps go as typed. Merge prompts take the two names the tool knows.
     fn fill(&self, text: &str, pass: Pass) -> String {
         match pass.parent {
@@ -236,28 +203,20 @@ impl<'a> Session<'a> {
         }
     }
 
-    /// Drop and push any published file, then commit the row.
+    /// Drop any published file, then commit the row.
     fn commit(&self, number: usize, message: &str, pass: Pass) -> Result<Outcome<Option<String>>> {
-        if let Some((file, next)) = pass.publish {
+        if let Some(file) = pass.published {
             self.slot.drop_path(file)?;
-            if let Outcome::Spent(why) = self.publish(number, next, pass)? {
-                return Ok(Outcome::Spent(why));
-            }
         }
         let commit = self.slot.commit(message)?;
         event::commit(&self.key, &commit);
-        record(number, commit.clone(), message, pass)?;
+        pass.transcript.append(&Entry {
+            commit: Some(commit.clone()),
+            message: Some(message.to_string()),
+            ..Entry::new(number)
+        })?;
         Ok(Outcome::Done(Some(commit)))
     }
-}
-
-/// Transcript line of one commit.
-fn record(number: usize, commit: String, message: &str, pass: Pass) -> Result<()> {
-    pass.transcript.append(&Entry {
-        commit: Some(commit),
-        message: Some(message.to_string()),
-        ..Entry::new(number)
-    })
 }
 
 /// Substitute in one pass: filled text never reads as template again.

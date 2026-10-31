@@ -4,7 +4,7 @@ use crate::error::{Error, Result};
 use crate::git::{self, Git};
 use crate::state::{self, Key};
 
-/// Delete branch, land ref and fail refs of `key` and of each dependant in its
+/// Delete branch, land ref, publish ref and fail refs of `key` and of each dependant in its
 /// track: here, then on the remote by mirror.
 pub fn reset(repo: &Git, tracks: &str, key: &Key) -> Result<()> {
     let checkouts = repo.checkouts()?;
@@ -12,7 +12,7 @@ pub fn reset(repo: &Git, tracks: &str, key: &Key) -> Result<()> {
     let mut dropped = 0;
     for row in targets(repo, tracks, key)? {
         let [on_track, on_to] = row.fail_refs();
-        for name in [row.land_ref(), on_track, on_to] {
+        for name in [row.land_ref(), row.publish_ref(), on_track, on_to] {
             if kept.contains_key(&name) {
                 repo.ref_delete(&name)?;
                 println!("deleted {name}");

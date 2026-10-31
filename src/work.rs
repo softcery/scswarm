@@ -14,15 +14,16 @@ use crate::host::Mount;
 use crate::lock;
 use crate::paths::{self, Project};
 use crate::podman::{self, Made, Stamp};
-use crate::script::Session;
+use crate::script::{Played, Session};
 use crate::slot::Slot;
 use crate::state::{Address, Key};
 use crate::step::Outcome;
-use crate::transcript::Transcript;
+use crate::transcript::{Entry, Transcript};
 
 pub const COMMAND: &str = "work";
 const SLOT: &str = "slot";
 const TRACK: &str = "track";
+const TRACK_BRANCH: &str = "track-branch";
 const ROW: &str = "row";
 const TRACK_TIP: &str = "track-tip";
 const BASE: &str = "base";
@@ -39,6 +40,9 @@ pub struct Job {
     pub slot: usize,
     #[arg(long = TRACK, value_name = "NAME")]
     pub track: String,
+    /// Branch of the track on the remote: where a published file lands.
+    #[arg(long = TRACK_BRANCH, value_name = "BRANCH")]
+    pub track_branch: String,
     #[arg(long = ROW, value_name = "ID")]
     pub id: String,
     /// Track branch commit: the track file, and the tip a failure marks.
@@ -102,6 +106,7 @@ impl Job {
         let mut flag = |name: &str, value: String| argv.extend([format!("--{name}"), value]);
         flag(SLOT, self.slot.to_string());
         flag(TRACK, self.track.clone());
+        flag(TRACK_BRANCH, self.track_branch.clone());
         flag(ROW, self.id.clone());
         flag(TRACK_TIP, self.track_tip.clone());
         flag(BASE, self.base.clone());
@@ -167,7 +172,6 @@ impl Attempt<'_> {
         )?;
         let mut session = Session::open(
             slot,
-            self.repo,
             &credentials,
             self.config,
             self.track,
@@ -179,16 +183,74 @@ impl Attempt<'_> {
             None => {
                 slot.checkout(&key.branch(), &job.base)?;
                 match session.play(&self.transcript(paths::RUN_LOG)?)? {
-                    Outcome::Done(land) => {
-                        event::land(address);
-                        self.repo.ref_set(&key.land_ref(), &land)?;
-                        land
-                    }
+                    Outcome::Done(played) => self.land(played)?,
                     Outcome::Spent(why) => return Ok(Outcome::Spent(why)),
                 }
             }
         };
+        if let Outcome::Spent(why) = self.publish()? {
+            return Ok(Outcome::Spent(why));
+        }
         self.deliver(&mut session, &land)
+    }
+
+    /// Land ref and any track commit in one transaction: a kill leaves both or neither,
+    /// so the track moves for a landed row alone, and a landed row never replays.
+    fn land(&self, played: Played) -> Result<String> {
+        let (repo, address) = (self.repo, self.address);
+        let key = &address.key;
+        let mut refs = vec![(key.land_ref(), played.commit.clone())];
+        if let Some(next) = played.next {
+            let parent = &self.job.track_tip;
+            let commit = repo.commit_file(parent, board::FILE, next.text(), &self.message())?;
+            refs.push((key.publish_ref(), commit));
+        }
+        repo.refs_set(&refs)?;
+        event::land(address);
+        Ok(played.commit)
+    }
+
+    /// Push the track commit of the row, if one waits, over the tip it grew on. A
+    /// track moved since then keeps its content, and the row still lands.
+    fn publish(&self) -> Result<Outcome<()>> {
+        let (repo, address, branch) = (self.repo, self.address, &self.job.track_branch);
+        let name = address.key.publish_ref();
+        let Some(commit) = repo.commit_of(&name)? else {
+            return Ok(Outcome::Done(()));
+        };
+        let parent = repo.tip(&format!("{commit}^"))?;
+        let mut entry = Entry::new(self.row.steps.len());
+        let spent = match repo.push_if(&commit, branch, &parent)? {
+            Push::Done => {
+                event::publish(address, &commit);
+                entry.commit = Some(commit);
+                entry.message = Some(self.message());
+                None
+            }
+            Push::Behind => {
+                event::publish_dropped(address, &commit);
+                entry.fault = Some(format!(
+                    "track branch `{branch}` moved during the row: its content stays, this file drops"
+                ));
+                None
+            }
+            Push::Declined(why) => {
+                let why = format!("push to `{branch}` must land: {why}");
+                entry.fault = Some(why.clone());
+                Some(why)
+            }
+        };
+        self.transcript(paths::RUN_LOG)?.append(&entry)?;
+        if let Some(why) = spent {
+            return Ok(Outcome::Spent(why));
+        }
+        repo.ref_delete(&name)?;
+        Ok(Outcome::Done(()))
+    }
+
+    /// Message of the track commit.
+    fn message(&self) -> String {
+        format!("publish {}", self.address)
     }
 
     /// Merge the row into the `to` tip, push to `to` with no force, again onto the

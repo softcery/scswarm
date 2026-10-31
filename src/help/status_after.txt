@@ -8,7 +8,7 @@ States:
 
 Color:
   A terminal shows each state in its own color. Output is plain when
-  stdout is no terminal or NO_COLOR is set and not empty.
+  stdout is no terminal, TERM is dumb, or NO_COLOR is set and not empty.
 
 Read state from a clone:
   The clone's `origin` must be the project's `remote`.

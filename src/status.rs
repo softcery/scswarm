@@ -113,9 +113,11 @@ fn slots(repo: &Git) -> Result<BTreeMap<String, usize>> {
     Ok(slots)
 }
 
-/// Color only on a terminal, unless `NO_COLOR` holds a value.
+/// Color only on a terminal that takes escape codes, unless `NO_COLOR` holds a value.
 fn color_enabled() -> bool {
-    io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none_or(|value| value.is_empty())
+    io::stdout().is_terminal()
+        && env::var_os("TERM").is_none_or(|term| term != "dumb")
+        && env::var_os("NO_COLOR").is_none_or(|value| value.is_empty())
 }
 
 fn render(rows: &[Row], color: bool) -> String {
@@ -139,7 +141,7 @@ fn column_widths(header: &Line, rows: &[Row]) -> [usize; COLUMNS] {
 }
 
 /// Color wraps the padded state cell, so escape codes never count toward width.
-fn line(row: &Line, widths: &[usize; COLUMNS], color: Option<State>) -> String {
+fn line(row: &Line, widths: &[usize; COLUMNS], state: Option<State>) -> String {
     let last = row.len() - 1;
     let cells: Vec<String> = row
         .iter()
@@ -151,7 +153,7 @@ fn line(row: &Line, widths: &[usize; COLUMNS], color: Option<State>) -> String {
             } else {
                 format!("{cell:<width$}")
             };
-            match color {
+            match state {
                 Some(state) if index == STATE_COLUMN => {
                     format!("{}{padded}{RESET}", escape(state))
                 }
@@ -170,5 +172,31 @@ fn escape(state: State) -> &'static str {
         State::Failed => "\x1b[31m",
         State::Pushed => "\x1b[32m",
         State::Merged => "\x1b[35m",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn color_keeps_columns() {
+        let rows = [
+            State::Waiting,
+            State::Queued,
+            State::Running,
+            State::Failed,
+            State::Pushed,
+            State::Merged,
+        ]
+        .map(|state| Row {
+            cells: ["-", "t/a", &state.to_string(), "-", "-"].map(str::to_string),
+            state,
+        });
+        let mut stripped = render(&rows, true);
+        for state in rows.iter().map(|row| row.state) {
+            stripped = stripped.replace(escape(state), "");
+        }
+        assert_eq!(stripped.replace(RESET, ""), render(&rows, false));
     }
 }

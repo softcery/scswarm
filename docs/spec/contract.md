@@ -235,8 +235,8 @@ scswarm status [PROJECT]        one line per row of every track: project, row, s
                                   with no bare repo yet exits 1 after the others print
                                   state: waiting, queued, running, failed, pushed, merged
                                   State cell colors: dim, yellow, bright blue, red, green,
-                                  magenta, in that order. Plain when stdout is no terminal
-                                  or NO_COLOR is set and not empty
+                                  magenta, in that order. Plain when stdout is no terminal,
+                                  TERM is dumb, or NO_COLOR is set and not empty
 scswarm status --tracks PREFIX  same, read from the clone in the working directory; that
                                   clone fetches +refs/swarm/*:refs/swarm/*. Running reads as
                                   queued, project reads `-`

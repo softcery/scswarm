@@ -87,6 +87,7 @@ Step kinds:
   - `tries` or `timeout` of 0, or a resolved `wait` above the resolved `wait_max`
 - Step errors name the step number and field: ``track `laser` SWARM.yaml row `rag-04-retriever`: field `steps` step 4: field `timeout` must be seconds, 1 or more, or stay absent``.
 - Row removed = row gone from swarm. Its commits stay on `to`; branch and land ref stay until `reset`.
+- Track branch deleted on the remote = each of its rows removed, at the next fetch. `to` stays.
 
 ## `host.yaml`
 

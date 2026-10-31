@@ -88,6 +88,7 @@ pub fn work(repo: &Git, job: &Job) -> Result<Outcome<()>> {
     Attempt {
         slot: &Slot::open(job.slot)?,
         stop: &|| watch.stopped(),
+        watch: &watch,
         repo,
         track: &track,
         config: &config,
@@ -133,6 +134,7 @@ impl Job {
 struct Attempt<'a> {
     slot: &'a Slot,
     stop: &'a Stop<'a>,
+    watch: &'a Watch<'a>,
     repo: &'a Git,
     track: &'a Track,
     config: &'a Config,
@@ -238,7 +240,7 @@ impl Attempt<'_> {
         let Some(commit) = repo.commit_of(&name)? else {
             return Ok(Outcome::Done(()));
         };
-        if (self.stop)()? {
+        if self.watch.read()? {
             return Ok(Outcome::Stopped);
         }
         let parent = repo.tip(&format!("{commit}^"))?;
@@ -293,7 +295,7 @@ impl Attempt<'_> {
                 Outcome::Spent(why) => return Ok(Outcome::Spent(why)),
                 Outcome::Stopped => return Ok(Outcome::Stopped),
             }
-            if (self.stop)()? {
+            if self.watch.read()? {
                 return Ok(Outcome::Stopped);
             }
             let head = slot.head()?;

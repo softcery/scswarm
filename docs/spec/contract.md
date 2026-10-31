@@ -373,9 +373,14 @@ Image: `image` names a Containerfile at the base, built with no tag and run by I
 - A kill between the failure and the fail ref write loses the mark. The row runs once more.
 - A kill between the commit and the land ref write leaves a branch the next cycle replays. A kill after the land ref write leaves a row the next cycle merges into `to`.
 - `reset` a row only while no worker runs it. A running worker recreates the refs at its next commit, and stopping `serve` stops no worker. `stop` it first, then `reset` once `status` reads `stopped`.
-- `systemctl stop` and `launchctl bootout` leave rows in flight running. `stop` ends one row.
-- A `stop` that loses the race to the push of `to` leaves the row `pushed`. Revert its merge commit, `git revert -m 1`.
+- `systemctl stop` leaves rows in flight running. `stop` ends one row. Hard stop: `systemctl --user kill --kill-whom=all scswarm`.
+- `launchctl bootout` leaves rows in flight running. `stop` ends one row. Hard stop: `pkill -f 'scswarm work '`. launchd has no command that kills an abandoned process group.
+- A `stop` that loses the race to the push of `to` leaves the row `pushed`, and can leave its stop ref until `reset`. Revert its merge commit, `git revert -m 1`.
 - A track push or `publish` push within 1 s of a `stop` moves the tip before the worker checks: the row runs on.
+- `stop` reads the track file at the current tracking tip. A tip that drops the row or holds an invalid file makes `stop` exit 1, and a running worker runs on. End it with the hard stop.
+- `stop` does not fetch. A track push the feed has not fetched, up to `fetch` seconds old, moves the tip after `stop` prints `stopped`: the worker ends, then the next fetch clears the stop and the row runs again.
+- A worker reads its step output until the pipes close, after the kill and before the restart. A process holding them delays both. Measured on one macOS podman machine: `stop` to worker exit under 5 s. Linux is unmeasured.
+- A failed git read in the stop check is a machine fault: the worker exits 2, its try dies, its project rests.
 - A `stop` mid-build kills the `podman build` client. Measured 2026-10-31 on one macOS podman machine: the `RUN` step ran on in the VM to its end, and one build container stayed in `podman ps --all --external` with no image tagged. A later build passed. `podman rm --force <id>` removes the container. Linux is unmeasured.
 - A worker waiting on the slot lock or the build lock sees a stop once it holds the lock.
 - `stop` runs on the swarm host. The feed fetches `refs/heads/*` alone, so a stop ref pushed from a clone never reaches the bare repo, and the next mirror prunes it on the remote.

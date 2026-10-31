@@ -80,6 +80,14 @@ impl<'a> Watch<'a> {
             return Ok(self.seen.get());
         }
         self.next.set(now + host::STOP_POLL);
+        self.read()
+    }
+
+    /// Read the refs now, past the poll: the last check before a push.
+    pub fn read(&self) -> Result<bool> {
+        if self.seen.get() {
+            return Ok(true);
+        }
         let stop = self.repo.commit_of(&self.stop_ref)?;
         let tip = self.repo.commit_of(&self.track)?;
         self.seen.set(state::stops(stop.as_deref(), tip.as_deref()));

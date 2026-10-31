@@ -138,7 +138,7 @@ impl Pool {
             let status = worker
                 .child
                 .try_wait()
-                .map_err(|why| stopped(index, &why.to_string()))?;
+                .map_err(|why| slot_fault(index, &why.to_string()))?;
             done.extend(status.map(|status| (index, status)));
         }
         let mut ended = Vec::new();
@@ -185,7 +185,7 @@ impl Pool {
             .args(job.argv())
             .stdin(lock.into_stdio())
             .spawn()
-            .map_err(|why| stopped(job.slot, &format!("worker must start: {why}")))?;
+            .map_err(|why| slot_fault(job.slot, &format!("worker must start: {why}")))?;
         self.workers.insert(job.slot, Worker { child, row });
         Ok(())
     }
@@ -213,7 +213,7 @@ impl Pool {
     }
 }
 
-fn stopped(index: usize, why: &str) -> Error {
+fn slot_fault(index: usize, why: &str) -> Error {
     Error::Failed(format!(
         "slot {index} stopped: {why}: restart `scswarm serve`"
     ))

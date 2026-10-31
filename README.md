@@ -371,7 +371,7 @@ git ls-remote origin 'refs/swarm/*'
 git -C ~/swarm/PROJECT.git for-each-ref refs/swarm/
 ```
 
-**Stop the swarm.** `systemctl --user stop scswarm` ends `serve` alone: rows in flight finish, no new row starts. On macOS, `launchctl bootout gui/$(id -u)/com.softcery.scswarm` does the same. To end a row in flight, `scswarm stop` it.
+**Stop the swarm.** `systemctl --user stop scswarm` ends `serve` alone: rows in flight finish, no new row starts. On macOS, `launchctl bootout gui/$(id -u)/com.softcery.scswarm` does the same. To end a row in flight, `scswarm stop` it. To end every worker, run `systemctl --user kill --kill-whom=all scswarm`, or `pkill -f 'scswarm work '` on macOS.
 
 **Change workers, projects, mounts, devices or env.** If `workers` grows past `ARG WORKERS` of the Containerfile, raise that value and push it on each `to` first. Then edit the host file. `serve` applies it on the next cycle, slot by slot as each goes idle.
 

@@ -1,5 +1,5 @@
 use std::ffi::OsStr;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::thread::{self, JoinHandle};
@@ -32,6 +32,28 @@ pub fn run<S: AsRef<OsStr>>(bin: &str, dir: &Path, args: &[S]) -> Result<String>
     if !out.status.success() {
         return Err(failed(bin, args, &fault(&out)));
     }
+    Ok(text(&out.stdout))
+}
+
+/// `run` with `input` on stdin. The child must read stdin to its end before it
+/// prints: one thread writes and then reads.
+pub fn feed<S: AsRef<OsStr>>(bin: &str, dir: &Path, args: &[S], input: &str) -> Result<String> {
+    let broke = |why: io::Error| unspawned(bin, &call(bin, args), &why);
+    let mut child = command(bin, dir, args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(broke)?;
+    let written = child
+        .stdin
+        .take()
+        .map_or(Ok(()), |mut pipe| pipe.write_all(input.as_bytes()));
+    let out = child.wait_with_output().map_err(broke)?;
+    if !out.status.success() {
+        return Err(failed(bin, args, &fault(&out)));
+    }
+    written.map_err(broke)?;
     Ok(text(&out.stdout))
 }
 

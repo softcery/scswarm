@@ -124,6 +124,11 @@ impl Written {
             .map(|written| step::settle("merge", written, &self.defaults))
             .transpose()
             .map_err(|what| invalid(&what))?;
+        if let Some(number) = merge.as_ref().and_then(Steps::publisher) {
+            return Err(invalid(&format!(
+                "field `merge` step {number}: field `publish` belongs to row steps alone"
+            )));
+        }
         Ok(Config {
             image: self.image,
             default_agent: self.default_agent,
@@ -174,6 +179,15 @@ merge:
             config.agents["claude"].resume.as_deref(),
             Some("--resume {session}")
         );
+    }
+
+    #[test]
+    fn refuses_publish_in_merge() {
+        let text = EXAMPLE.replace("  - commit:", "  - commit:\n    publish: next.yaml");
+        let why = Config::parse(&text)
+            .expect_err("`publish` in `merge` must fail")
+            .to_string();
+        assert!(why.contains("field `merge` step 3"), "{why}");
     }
 
     #[test]

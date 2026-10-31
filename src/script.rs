@@ -1,9 +1,12 @@
-use crate::board::Row;
+use crate::board::{self, Row, Track};
 use crate::call::{Call, Message, Reply, Shell, Turn};
 use crate::config::{self, Agent, Config, ID_SLOT, PARENT_SLOT};
 use crate::credential::Credential;
 use crate::error::{Error, Result};
 use crate::event;
+use crate::git::{self, Git, Push};
+use crate::host::Host;
+use crate::paths::Project;
 use crate::slot::Slot;
 use crate::state::Address;
 use crate::step::{Outcome, Policy, Step, Steps};
@@ -16,10 +19,14 @@ const SLOT_OPEN: char = '{';
 /// resumes the session the row ran.
 pub struct Session<'a> {
     slot: &'a Slot,
+    /// Bare repo of the project: writes and pushes a published track file.
+    repo: &'a Git,
     credentials: &'a [Credential],
     config: &'a Config,
+    track: &'a Track,
     row: &'a Row,
     agent: &'a Agent,
+    project: &'a Project,
     /// Row label: event context.
     key: String,
     /// Session id of the agent, known from its first reply on. Spans every step.
@@ -36,17 +43,22 @@ struct Pass<'p> {
 impl<'a> Session<'a> {
     pub fn open(
         slot: &'a Slot,
+        repo: &'a Git,
         credentials: &'a [Credential],
         config: &'a Config,
+        track: &'a Track,
         row: &'a Row,
-        address: &Address,
+        address: &'a Address,
     ) -> Result<Self> {
         Ok(Self {
             slot,
+            repo,
             credentials,
             config,
+            track,
             row,
             agent: agent(config, &row.agent)?,
+            project: &address.project,
             key: address.to_string(),
             session: None,
         })
@@ -109,22 +121,98 @@ impl<'a> Session<'a> {
                     outcome => outcome.map(|()| None),
                 },
             ),
-            Step::AgentCommit { policy } => {
-                let ask = Message(self.turn(&self.config.commit));
-                let outcome = self.call(policy, number, pass).ask(&ask)?;
-                match self.reply(outcome) {
-                    Outcome::Done(message) => Ok(Outcome::Done(Some(self.commit(
-                        number,
-                        message.trim(),
-                        pass,
-                    )?))),
-                    Outcome::Spent(why) => Ok(Outcome::Spent(why)),
-                }
+            Step::AgentCommit { policy, publish } => {
+                self.commit_step(number, publish.as_deref(), pass, |session| {
+                    let ask = Message(session.turn(&session.config.commit));
+                    let outcome = session.call(policy, number, pass).ask(&ask)?;
+                    Ok(session
+                        .reply(outcome)
+                        .map(|message| message.trim().to_string()))
+                })
             }
-            Step::Commit { message } => {
-                Ok(Outcome::Done(Some(self.commit(number, message, pass)?)))
+            Step::Commit { message, publish } => {
+                self.commit_step(number, publish.as_deref(), pass, |_| {
+                    Ok(Outcome::Done(message.clone()))
+                })
             }
         }
+    }
+
+    /// Check published file, get message, drop file, move track, commit row. Nothing
+    /// spends after the move: a fail ref on the old tip replays the row with no bound.
+    fn commit_step(
+        &mut self,
+        number: usize,
+        publish: Option<&str>,
+        pass: Pass,
+        message: impl FnOnce(&mut Self) -> Result<Outcome<String>>,
+    ) -> Result<Outcome<Option<String>>> {
+        let board = match publish.map(|file| self.next_board(file)).transpose() {
+            Ok(board) => board,
+            Err(why) => return Ok(Outcome::Spent(format!("step {number}: {why}"))),
+        };
+        let message = match message(self)? {
+            Outcome::Done(message) => message,
+            Outcome::Spent(why) => return Ok(Outcome::Spent(why)),
+        };
+        if let Some((file, board)) = publish.zip(board) {
+            self.slot.drop_path(file)?;
+            if let Outcome::Spent(why) = self.publish(number, &board, pass)? {
+                return Ok(Outcome::Spent(why));
+            }
+        }
+        Ok(Outcome::Done(Some(self.commit(number, &message, pass)?)))
+    }
+
+    /// Text of `file`, checked as the next track file against the project file in the
+    /// worktree. `Err` names what the row got wrong. No git or podman call runs here.
+    fn next_board(&self, file: &str) -> std::result::Result<String, String> {
+        let board = self.slot.regular_text(file).ok_or_else(|| {
+            "field `publish` must name a regular text file at the worktree root".to_string()
+        })?;
+        let config = self.slot.regular_text(config::FILE).ok_or_else(|| {
+            format!(
+                "{} must stand as a regular text file at the worktree root",
+                config::FILE
+            )
+        })?;
+        Config::parse(&config)
+            .and_then(|config| self.track.check_next(&board, &self.row.id, &config))
+            .map_err(|why| why.to_string())?;
+        Ok(board)
+    }
+
+    /// Commit `board` as the sole file on the track tip, push it with no force, again
+    /// onto the new tip after a fetch when behind.
+    fn publish(&self, number: usize, board: &str, pass: Pass) -> Result<Outcome<()>> {
+        let repo = self.repo;
+        let host = Host::load()?;
+        let branch = format!("{}{}", host.entry(self.project)?.tracks, self.track.name);
+        let tracking = git::remote_branch(&branch);
+        let message = format!("publish {}", self.key);
+        let commit = loop {
+            let tip = repo.commit_of(&tracking)?.ok_or_else(|| {
+                Error::Failed(format!("track branch `{branch}` must stand on the remote"))
+            })?;
+            let commit = repo.commit_file(&tip, board::FILE, board, &message)?;
+            match repo.push(&commit, &branch)? {
+                Push::Done => break commit,
+                Push::Declined(why) => {
+                    return Ok(Outcome::Spent(format!(
+                        "step {number}: push to `{branch}` must land: {why}"
+                    )));
+                }
+                Push::Behind => repo.fetch()?,
+            }
+            if repo.commit_of(&tracking)?.as_deref() == Some(tip.as_str()) {
+                return Err(Error::Failed(format!(
+                    "push to `{branch}` must land: the remote refused it, a fetch brought no new commit"
+                )));
+            }
+        };
+        event::publish(&self.key, &commit);
+        record(number, commit, &message, pass)?;
+        Ok(Outcome::Done(()))
     }
 
     /// Row steps go as typed. Merge prompts take the two names the tool knows.
@@ -166,13 +254,18 @@ impl<'a> Session<'a> {
     fn commit(&self, number: usize, message: &str, pass: Pass) -> Result<String> {
         let commit = self.slot.commit(message)?;
         event::commit(&self.key, &commit);
-        pass.transcript.append(&Entry {
-            commit: Some(commit.clone()),
-            message: Some(message.to_string()),
-            ..Entry::new(number)
-        })?;
+        record(number, commit.clone(), message, pass)?;
         Ok(commit)
     }
+}
+
+/// Transcript line of one commit.
+fn record(number: usize, commit: String, message: &str, pass: Pass) -> Result<()> {
+    pass.transcript.append(&Entry {
+        commit: Some(commit),
+        message: Some(message.to_string()),
+        ..Entry::new(number)
+    })
 }
 
 /// Substitute in one pass: filled text never reads as template again.

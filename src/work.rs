@@ -165,7 +165,15 @@ impl Attempt<'_> {
             &job.mounts,
             &job.devices,
         )?;
-        let mut session = Session::open(slot, &credentials, self.config, self.row, address)?;
+        let mut session = Session::open(
+            slot,
+            self.repo,
+            &credentials,
+            self.config,
+            self.track,
+            self.row,
+            address,
+        )?;
         let land = match self.repo.commit_of(&key.land_ref())? {
             Some(land) => land,
             None => {

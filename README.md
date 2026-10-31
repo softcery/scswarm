@@ -236,7 +236,7 @@ RUN mkdir -p /home/dev/.claude \
 
 ### `SWARM.yaml` on a track branch
 
-The track file. Root of an orphan branch named `<tracks><name>`, for example `track/laser`. Read and never written by the tool.
+The track file. Root of an orphan branch named `<tracks><name>`, for example `track/laser`. The tool reads it, and writes it only through `publish`.
 
 ```yaml
 from: main
@@ -273,6 +273,7 @@ rows:
 - `after` is a list of ids of the same track. Absent = queued at once. A row that needs another track's output names that track's `to` as `from`.
 - `agent` is a key of `agents`. Absent = `default_agent`. One row per model is how a second model audits the first.
 - `steps` run in order in one session. The last step must be a commit.
+- `publish: <file>`, on a last commit step, lets a row plan the rows after it. The host checks that file at the worktree root, commits it alone as `SWARM.yaml` on the track branch, pushes it, then commits the row. The file stays off `to`. Its `from` and `to` must equal the running track. Total spend then has no bound: see [the publish rules in the contract](docs/spec/contract.md#publish).
 - An anchor (`&check`) carries a repeated step, an alias (`*check`) points back at it.
 - A prompt that starts with `{`, or one YAML reads as a bool or number (`yes`, `42`), must be quoted.
 

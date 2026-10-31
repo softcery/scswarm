@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
@@ -10,7 +11,7 @@ use crate::paths;
 use crate::podman::{self, Container, Spec, Stamp};
 use crate::step::Outcome;
 
-const WORKTREE_LINK: &str = ".git";
+pub const WORKTREE_LINK: &str = ".git";
 
 /// One try at a conflicted merge.
 pub type Resolve<'a> = dyn FnMut() -> Result<Outcome<()>> + 'a;
@@ -139,6 +140,28 @@ impl Slot {
 
     pub fn commit(&self, message: &str) -> Result<String> {
         self.git.commit(message)
+    }
+
+    /// Text of `name` at the worktree root. `None` unless a regular text file: the
+    /// agent wrote the tree and the host reads the file, so a symlink reads as none.
+    pub fn regular_text(&self, name: &str) -> Option<String> {
+        let path = self.path.join(name);
+        fs::symlink_metadata(&path)
+            .is_ok_and(|meta| meta.is_file())
+            .then(|| fs::read_to_string(&path).ok())
+            .flatten()
+    }
+
+    /// Drop what stands at `name` in the worktree, of any kind. Absent: nothing to drop.
+    pub fn drop_path(&self, name: &str) -> Result<()> {
+        let path = self.path.join(name);
+        let dropped = match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_dir() => fs::remove_dir_all(&path),
+            Ok(_) => fs::remove_file(&path),
+            Err(why) if why.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(why) => Err(why),
+        };
+        dropped.map_err(|why| Error::Failed(format!("worktree {}: {why}", path.display())))
     }
 
     /// Repo that owns the worktree. `None`: no worktree, or its repo is gone.

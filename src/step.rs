@@ -5,6 +5,8 @@ use std::time::Duration;
 use serde::de::{self, value::MapAccessDeserializer, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
+use crate::slot::WORKTREE_LINK;
+
 /// Tool defaults, last of three layers: step field, then `defaults`, then these.
 /// Every agent try spends budget; a script gives the same result twice.
 const PROMPT_TRIES: usize = 3;
@@ -28,9 +30,15 @@ pub enum Step {
         continue_on_error: bool,
     },
     /// Agent writes message in row session, host commits.
-    AgentCommit { policy: Policy },
+    AgentCommit {
+        policy: Policy,
+        publish: Option<String>,
+    },
     /// Host commits with message as written.
-    Commit { message: String },
+    Commit {
+        message: String,
+        publish: Option<String>,
+    },
 }
 
 /// Settled step list: one step or more, the last a commit. `settle` alone builds it.
@@ -98,6 +106,9 @@ struct Fields {
     /// No value: the agent writes the message.
     #[serde(default, deserialize_with = "present")]
     commit: Option<Option<String>>,
+    /// File at the worktree root that becomes the next track file.
+    #[serde(default, deserialize_with = "present")]
+    publish: Option<Option<String>>,
     #[serde(flatten)]
     tuning: Tuning,
 }
@@ -114,10 +125,33 @@ pub fn settle(field: &str, written: &[Written], defaults: &Defaults) -> Result<S
                 .map_err(|what| format!("field `{field}` step {}: {what}", at + 1))
         })
         .collect::<Result<Vec<Step>, String>>()?;
+    let before_last = &steps[..steps.len().saturating_sub(1)];
+    if let Some(at) = before_last.iter().position(Step::publishes) {
+        return Err(format!(
+            "field `{field}` step {}: field `publish` must sit on the last step: a later step can spend after the track moves",
+            at + 1
+        ));
+    }
     match steps.last() {
         None => Err(format!("field `{field}` must hold one step or more")),
         Some(Step::AgentCommit { .. } | Step::Commit { .. }) => Ok(Steps(steps)),
         Some(_) => Err(format!("field `{field}` must end with a `commit` step")),
+    }
+}
+
+impl Step {
+    fn publishes(&self) -> bool {
+        match self {
+            Step::AgentCommit { publish, .. } | Step::Commit { publish, .. } => publish.is_some(),
+            Step::Prompt { .. } | Step::Run { .. } => false,
+        }
+    }
+}
+
+impl Steps {
+    /// Number of the first step that holds `publish`.
+    pub fn publisher(&self) -> Option<usize> {
+        self.0.iter().position(Step::publishes).map(|at| at + 1)
     }
 }
 
@@ -159,6 +193,10 @@ impl Fields {
             self.tuning.check(kind, "")?;
             self.tuning.over(defaults.of(kind)).policy(kind)
         };
+        let publish = self.publish()?;
+        if publish.is_some() && self.commit.is_none() {
+            return Err("field `publish` belongs to `commit` steps alone".to_string());
+        }
         match (&self.prompt, &self.run, &self.commit) {
             (Some(text), None, None) => Ok(Step::Prompt {
                 text: filled("prompt", text)?,
@@ -175,6 +213,7 @@ impl Fields {
             }),
             (None, None, Some(None)) => Ok(Step::AgentCommit {
                 policy: policy(Kind::Prompt)?,
+                publish,
             }),
             (None, None, Some(Some(message))) if message.trim().is_empty() => Err(
                 "field `commit` must hold the message, or no value for the agent to write it"
@@ -183,14 +222,35 @@ impl Fields {
             (None, None, Some(Some(message))) if self.tuning == Tuning::default() => {
                 Ok(Step::Commit {
                     message: message.trim().to_string(),
+                    publish,
                 })
             }
             (None, None, Some(Some(_))) => {
-                Err("a `commit` step with a message must hold no other field".to_string())
+                Err("a `commit` step with a message must hold no policy field".to_string())
             }
             _ => Err(format!(
                 "must hold exactly one of the keys `prompt`, `run`, `commit`, holds {}",
                 self.keys()
+            )),
+        }
+    }
+
+    /// File name of `publish`: one part, so no symlink directory reaches a host file.
+    /// The worktree link stays: the host drops this file before the row commit.
+    fn publish(&self) -> Result<Option<String>, String> {
+        let Some(file) = &self.publish else {
+            return Ok(None);
+        };
+        let root_file = |file: &&str| {
+            !file.trim().is_empty()
+                && !file.contains('/')
+                && *file != ".."
+                && !file.eq_ignore_ascii_case(WORKTREE_LINK)
+        };
+        match file.as_deref().filter(root_file) {
+            Some(file) => Ok(Some(file.to_string())),
+            None => Err(format!(
+                "field `publish` must name a file at the worktree root: no `/`, not `..` or `{WORKTREE_LINK}`"
             )),
         }
     }
@@ -347,7 +407,8 @@ mod tests {
         assert_eq!(
             steps[3],
             Step::Commit {
-                message: "bench: hybrid retriever".to_string()
+                message: "bench: hybrid retriever".to_string(),
+                publish: None,
             }
         );
         let Step::Run {
@@ -383,6 +444,37 @@ mod tests {
     fn settles_the_wait_pair_across_layers() {
         let text = "- prompt: Work.\n  wait_max: 300\n- commit:\n  wait_max: 300\n";
         settled(text, &defaults("prompt: { wait: 120 }")).expect("resolved pair must settle");
+    }
+
+    #[test]
+    fn publish_sits_on_commit_steps_alone() {
+        for (text, number) in [
+            ("- commit: Plan.\n  publish: next.yaml\n", 1),
+            ("- Plan.\n- commit:\n  publish: next.yaml\n", 2),
+        ] {
+            let steps = settled(text, &Defaults::default()).expect(text);
+            assert_eq!(steps.publisher(), Some(number));
+        }
+        let refused = [
+            (
+                "- commit:\n  publish: next.yaml\n- commit:\n",
+                "must sit on the last step",
+            ),
+            (
+                "- run: make\n  publish: next.yaml\n- commit:\n",
+                "belongs to",
+            ),
+            ("- commit:\n  publish: a/next.yaml\n", "must name a file"),
+            ("- commit:\n  publish: ..\n", "must name a file"),
+            ("- commit:\n  publish: .GIT\n", "must name a file"),
+            ("- commit:\n  publish:\n", "must name a file"),
+        ];
+        for (text, why) in refused {
+            let got = settled(text, &Defaults::default()).expect_err(text);
+            assert!(got.contains(why), "{got}");
+        }
+        let unknown = settled("- commit:\n  publishes: next.yaml\n", &Defaults::default());
+        assert!(unknown.is_err(), "an unknown field must fail");
     }
 
     #[test]

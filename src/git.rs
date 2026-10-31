@@ -31,6 +31,8 @@ const BARRED: &str = " ~^:?*[\\";
 /// What a name must avoid, for the caller that has to say so.
 pub const REF_RULE: &str =
     "no space, `..`, `~^:?*[`, control character, leading `-`, or `.lock` end";
+/// Tree entry mode of a regular file.
+const REGULAR_FILE: &str = "100644";
 const WORKTREE_FIELD: &str = "worktree ";
 const BRANCH_FIELD: &str = "branch ";
 
@@ -165,6 +167,22 @@ impl Git {
     /// Commit sha `rev` points at. Errors when no such ref.
     pub fn tip(&self, rev: &str) -> Result<String> {
         run(&self.root, &["rev-parse", rev]).map(|sha| sha.trim().to_string())
+    }
+
+    /// Bare repo alone: commit on `parent` whose tree holds `file` alone, with `text`
+    /// as content. Moves no ref.
+    pub fn commit_file(
+        &self,
+        parent: &str,
+        file: &str,
+        text: &str,
+        message: &str,
+    ) -> Result<String> {
+        let blob = proc::feed(BIN, &self.root, &["hash-object", "-w", "--stdin"], text)?;
+        let entry = format!("{REGULAR_FILE} blob {}\t{file}\n", blob.trim());
+        let tree = proc::feed(BIN, &self.root, &["mktree"], &entry)?;
+        let args = ["commit-tree", tree.trim(), "-p", parent, "-m", message];
+        run(&self.root, &args).map(|sha| sha.trim().to_string())
     }
 
     pub fn ref_set(&self, name: &str, commit: &str) -> Result<()> {

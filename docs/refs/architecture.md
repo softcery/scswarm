@@ -4,7 +4,7 @@ Why the tool has this shape. Contract: [docs/spec/contract.md](../spec/contract.
 
 ## Purpose
 
-Fully autonomous execution of every planned task, at any time, on one workstation, with no client machine in the loop. One swarm per unix user runs many repos, one project each. Many teams share one repo: each owns its tracks. Humans write tracks and merge `to` branches. Nothing else.
+Fully autonomous execution of every planned task, at any time, on one workstation, with no client machine in the loop. One swarm per unix user runs many repos, one project each. Many teams share one repo: each owns its tracks. Humans write tracks and merge `to` branches. A row can publish the next board of its own track. Nothing else.
 
 ## Pattern
 
@@ -23,10 +23,10 @@ Push rights per branch give each team its own track file. No team edits another'
 
 ## Invariants
 
-- **Track is input only.** Tool reads each track file, writes no file in the project. Chokepoint: `board` module has no write path. Violation: three branches edit one file, merges conflict.
+- **Tool writes a track only through `publish`.** Tool reads each track file. A row's last commit step with `publish` checks one worktree file, commits it as `SWARM.yaml` alone on the track tip and pushes with no force, before the row commit, so no step can spend after the track moves. The file stays off `to`. Tool writes no other project file. Chokepoint: `script::Session`; `board` module has no write path. Violation: three branches edit one file, merges conflict, or a spent step after the move replays the row with no bound.
 - **State derives from git.** Waiting, queued, failed, pushed, merged come from branch existence, the land ref, the fail refs and ancestry against `to` and `from`; running from the row lock. Chokepoint: `state` module reads git and locks only. Violation: a crash leaves a database and a repo that disagree.
 - **Remote mirrors the kept refs.** Workers and `reset` write land refs and fail refs in the bare repo alone. Each project's feed, on change, and `reset` push `refs/swarm/*` with force and prune. A bare repo whose `origin` names another URL mirrors nothing: its refs belong to the old remote. Chokepoint: `git::Git::mirror_kept`. Violation: a fault between two pushes leaves a clone reading a row the host reads as pushed.
-- **Host owns git.** Agents see gitdir read-only. Every commit runs on the host with the agent's message, and nothing in `src/` reads a commit message back. Every push runs on the host. Chokepoint: `git` module, sole caller of `git commit` and `git push`. Violation: agent rewrites history, pushes, or its text steers the loop.
+- **Host owns git.** Agents see gitdir read-only. Every commit runs on the host with the agent's message, and nothing in `src/` reads a commit message back. Every push runs on the host. Chokepoint: `git` module, sole caller of `git commit` and `git push`. Agent text steers the loop through `publish` alone, past its checks. Violation: agent rewrites history, pushes, or its text steers the loop any other way.
 - **`to` only grows.** Each row lands as one merge commit with the `to` tip first parent, pushed with no force. A push refused as behind fetches and merges onto the new tip. Chokepoint: `work::Attempt::deliver`, sole pusher of `to` besides its first push in `feed`. Violation: a row erases a human commit or another row.
 - **Row is atomic.** One row is one session, one branch, one land ref at its last commit. A branch with no land ref holds a session cut short: the slot resets it and replays the row from the `to` tip. Chokepoint: `slot::Slot::checkout` resets the standing branch. Violation: half-edited worktree continues with lost context.
 - **Spend is bounded.** Every exec'd step caps its tries and, with `timeout`, the time per try. A failed attempt marks the track tip and `to` tip it ran against, so the row waits for new input. Chokepoint: `step::Policy`, enforced in `call`; fail refs written in `work`, read in `state`. Violation: one broken agent burns budget every cycle forever.
@@ -69,9 +69,11 @@ A failed step reports `skip` once per cause and rests the project: `fetch` secon
 
 Prompt and agent commit: `podman exec <slot> sh -c '<exec> "$@"' scswarm [<resume>] <prompt>`. Prompt, resume and session id ride as argv, so agent text never reaches the shell. Stdout parsed for `session_id` and `result`. The session id carries across every step of the row and into its `merge` steps.
 
-Run: `podman exec <slot> sh -c <text>`. Track text, trusted as the team's own; no substitution, since row ids take `;`, `$` and `|`.
+Run: `podman exec <slot> sh -c <text>`. Track text, trusted as the team's own; a published `run` step is agent text, bound by the container. No substitution, since row ids take `;`, `$` and `|`.
 
 Literal commit: host commit, no exec.
+
+Commit with `publish`: check, message, drop the file, push the track, then host commit. Order in [the contract](../spec/contract.md#publish).
 
 Each try: capture with deadline, judge, record, restart container. The restart runs when capture breaks too. Fails on non-zero exit, signal, `timeout`, blank commit reply, or no session id from an agent with `resume`. Next try after `wait`, doubling to `wait_max`. Each try and each commit appends one line to `~/swarm/log/<project>/<track>/<id>/run.jsonl`, or `merge.jsonl` for the merge into `to`. Chokepoint: `transcript::Transcript`.
 
@@ -107,6 +109,10 @@ Steps join through the worktree alone: no step output reaches a prompt, so promp
 - A merge session after a crash or a repair opens a new agent session.
 - Kept refs reach the remote on the next `serve` cycle. While `serve` is down, a clone reads a pushed row as queued.
 - `to` takes no `from` commit made after it starts. A human merges `from` into `to`.
+- "Spend is bounded" holds per row alone. A publisher that keeps publishing runs until usage ends.
+- A failed row stops a publishing run, by design. Nothing alerts on a stop or an end.
+- A usage limit, 429, fails rows ([issue 6 of softcery/scswarm](https://github.com/softcery/scswarm/issues/6)). An unattended run needs that fix first.
+- The planning quality of an agent that publishes boards is unmeasured.
 
 ## Smells
 
@@ -116,6 +122,7 @@ Steps join through the worktree alone: no step output reaches a prompt, so promp
 - A file written under a project checkout by the tool.
 - `git commit` or `git push` outside the `git` module.
 - A push of `to` with force.
+- A push of a track branch outside `script::Session`, or `publish` on a step before the last.
 - A push of `refs/swarm/*` outside `git::Git::mirror_kept`.
 - A merge into `to` that fast-forwards or leaves the row first parent.
 - A `podman` argument outside the `podman` module.

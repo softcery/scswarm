@@ -176,6 +176,28 @@ impl Track {
         Ok(Board { rows })
     }
 
+    /// Check `text` as the next file of this track: same `from` and `to`, row `id`
+    /// kept with no `after`, every row settled against `config`.
+    pub fn check_next(&self, text: &str, id: &str, config: &Config) -> Result<()> {
+        let next = Self::parse(&self.name, &self.tip, text)?;
+        for (field, running, written) in
+            [("from", &self.from, &next.from), ("to", &self.to, &next.to)]
+        {
+            if running != written {
+                return Err(self.invalid(&format!(
+                    "field `{field}` must name `{running}`, the branch of the running track"
+                )));
+            }
+        }
+        let carried = next.drafts.iter().find(|draft| draft.id == id);
+        if !carried.is_some_and(|draft| draft.after.is_empty()) {
+            return Err(self.invalid(&format!(
+                "field `rows` must hold row `{id}` with no `after`: a retry of this row reads this file"
+            )));
+        }
+        next.board(config).map(drop)
+    }
+
     /// Commit `to` starts at: `at` on `from`, else the `from` tip. Read until `to`
     /// stands; then `from` and `at` start nothing.
     pub fn start(&self, git: &Git) -> Result<String> {
@@ -531,6 +553,28 @@ rows:
             why.contains("rag-04-retriever -> rag-04-review -> rag-04-retriever"),
             "{why}"
         );
+    }
+
+    #[test]
+    fn next_file_keeps_the_branches_and_the_running_row() {
+        let config = Config::parse(CONFIG).expect("test config must parse");
+        let running = track(EXAMPLE).expect("example must parse");
+        let check = |text: &str, id| running.check_next(text, id, &config);
+        check(EXAMPLE, "rag-04-retriever").expect("same file must pass");
+        for (text, id, field) in [
+            (
+                EXAMPLE.replace("feat/laser", "feat/other"),
+                "rag-04-retriever",
+                "`to`",
+            ),
+            (EXAMPLE.to_string(), "gone", "`rows`"),
+            (EXAMPLE.to_string(), "rag-04-review", "`rows`"),
+        ] {
+            let why = check(&text, id)
+                .expect_err("next file must fail")
+                .to_string();
+            assert!(why.contains(&format!("field {field}")), "{why}");
+        }
     }
 
     #[test]

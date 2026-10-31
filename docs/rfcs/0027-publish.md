@@ -1,9 +1,9 @@
 # Publish: a row writes the next board
 
-**What.** Field `publish: <path>` on a commit step. The host checks that file from the row's worktree, commits it as `SWARM.yaml` on the track branch and pushes it, then commits the row. A row can then plan the rows after it.
+**What.** Field `publish: <file>` on a commit step. The host checks that file from the row's worktree, commits it as `SWARM.yaml` on the track branch and pushes it, then commits the row. A row can then plan the rows after it.
 
 **Why.**
-- A human writes every track today. Sercos has 8 tracks on fedora, read 2026-10-31. `token-issue-ultimate-review` takes `from: design/token-issue-ultimate`, so one track's `to` feeds the next by hand.
+- A human writes every track today. Sercos has 9 tracks on fedora, read 2026-10-31. `token-issue-ultimate-review` takes `from: design/token-issue-ultimate`, so one track's `to` feeds the next by hand.
 - The human cycle is mechanical in part: issues, RFC, tasks, rows, audits, new issues. Track `issue-triage`, 2026-10-31, asks an agent to mark open issues "fix directly, design or defer".
 - A row cannot reach a track today. Git is read-only in the container (`docs/spec/contract.md` line 268), and the tool never writes a track (line 7).
 - The board must stay off `to`. Mini-rts `2094821f` deleted `SWARM.yaml` from the code tree, and the named violation of "Track is input only" is 3 branches that edit one file (`docs/refs/architecture.md` line 26).
@@ -42,8 +42,9 @@ rows:
     steps: *direct
 ```
 
-- `publish`: path relative to the worktree root, on an agent commit or a literal commit. Absent = today's commit step.
-- Each path that is absolute, holds `..` or fails to name a regular file spends the step. A symlink counts as no regular file: the host reads this file, and the agent wrote it.
+- `publish`: file name at the worktree root, on an agent commit or a literal commit. Absent = today's commit step.
+- A value with `/` or equal to `..` skips the track, as other step checks. A deeper path can pass through a symlink directory to a host file.
+- A name that fails to resolve to a regular file spends the step. A symlink counts as no regular file: the host reads this file, and the agent wrote it.
 - `merge` steps refuse the field. The check sits in `Config` settling (`src/config.rs` line 124).
 - A board holds the current round. Rows that landed leave it: "Row removed = row gone from swarm" (`docs/spec/contract.md` line 89). Past rounds stay in the track log.
 
@@ -56,14 +57,20 @@ Runs in `Session::step` (`src/script.rs` line 95), on the host, in this order:
 3. Agent commit alone: get the message. A failure spends the step: no track moves.
 4. Delete the file from the worktree.
 5. Write a commit on the remote-tracking track tip with `hash-object`, `mktree` and `commit-tree`, in the bare repo. Its tree holds `SWARM.yaml` alone.
-6. Push with `Git::push` (`src/git.rs` line 98), no force. `Push::Behind`: fetch, write again on the new tip, push. `Push::Declined`: spend the step.
+6. Push with `Git::push` (`src/git.rs` line 98), no force. `Push::Behind`: fetch, write again on the new tip, push. If that fetch brings no new commit, return `Err`, as `deliver` does (`src/work.rs` line 210). `Push::Declined`: spend the step.
 7. Commit the row with `Slot::commit`.
 
 `publish` sits on the commit step to keep steps 5 and 6 away from any step that can spend. As a separate step, a spent agent commit after a moved track leaves a fail ref that names the old tip, so the row reads queued and replays with no bound.
 
 ### State
 
-`state`, `board::scan`, `serve` and `work::deliver` stay as they are. The next `serve` cycle reads the new track tip. The publisher reads `running` through its row lock, and new rows wait on `after`.
+`state`, `board::scan` and `work::deliver` stay as they are. The next `serve` cycle reads the new track tip. The publisher reads `running` through its row lock, and new rows wait on `after`.
+
+### Worker argv
+
+`work` argv holds the track name and tip, and no track branch (`src/work.rs` lines 36-59). The host file `tracks` prefix stays in `serve`. So `serve` passes a new flag `--track-branch BRANCH`, and the worker pushes to it. The worker takes it from `serve`, because a host file reload can change the prefix under a running row.
+
+`work` argv binds across versions (`docs/spec/contract.md` line 258), so the release needs a release note. A `serve` started before the upgrade spawns the new binary with no flag: the usage error exits 2 and rests the project until `serve` restarts.
 
 ### Crash and failure
 
@@ -79,9 +86,11 @@ Runs in `Session::step` (`src/script.rs` line 95), on the host, in this order:
 1. `step`: field `publish` on `Fields`, `Step::AgentCommit` and `Step::Commit`, with the path check.
 2. `config`: refuse `publish` in `merge`.
 3. `git`: commit one file on a tip, in the bare repo.
-4. `script`: `Session` gains `Git` and `Track`; the 7 steps above; event line `publish <project>/<track>/<id>`.
-5. `tests/e2e.rs`: the track from Done when.
-6. Docs: contract step table, git rights table, limits. Architecture: replace "Track is input only" with "Tool writes a track only through `publish`", chokepoint `script::Session`. `src/help/track.txt` and `src/help/track.yaml`.
+4. `work`, `pool`: flag `--track-branch`, set by `serve`, passed to `Session::open`.
+5. `script`: `Session` gains `Git`, `Track` and the branch; the 7 steps above; event line `publish <project>/<track>/<id>`.
+6. `tests/e2e.rs`: the track from Done when.
+7. Docs: contract step table, git rights table, `work` argv, limits. `src/help/track.txt` and `src/help/track.yaml`.
+8. Architecture: replace "Track is input only" with "Tool writes a track only through `publish`", chokepoint `script::Session`. Change the "Host owns git" violation (line 29): agent text steers the loop through `publish` alone, past its checks. Change the track text trust (line 72): a published `run` step is agent text, bound by the container.
 
 ## Notes
 
@@ -114,6 +123,10 @@ Open PR 24, `rfc/passes`, targets the same use case: a game built over hundreds 
 - Step 5 drops other files on the track branch. The contract already says the root holds `SWARM.yaml`.
 - A remote that protects track branches declines the push and fails the row.
 - A kill after step 6 costs one repeated director session.
+- A replay runs the carried row as the agent wrote it. A carried row with changed steps replays those steps.
+- The agent can change `priority`. It orders tracks inside one project alone.
+- The host reads the file with no size cap, so a big file costs host memory.
+- Land refs and row branches of past rounds stay. Each `serve` cycle reads every kept ref (`src/state.rs` line 62). Cost at hundreds of rows is unmeasured.
 
 ### Unverified
 

@@ -376,7 +376,7 @@ Image: `image` names a Containerfile at the base, built with no tag and run by I
 - `systemctl stop` and `launchctl bootout` leave rows in flight running. `stop` ends one row.
 - A `stop` that loses the race to the push of `to` leaves the row `pushed`. Revert its merge commit, `git revert -m 1`.
 - A track push or `publish` push within 1 s of a `stop` moves the tip before the worker checks: the row runs on.
-- A `stop` mid-build kills `podman build`. What a killed build leaves in podman storage is unmeasured.
+- A `stop` mid-build kills the `podman build` client. Measured 2026-10-31 on one macOS podman machine: the `RUN` step ran on in the VM to its end, and one build container stayed in `podman ps --all --external` with no image tagged. A later build passed. `podman rm --force <id>` removes the container. Linux is unmeasured.
 - A worker waiting on the slot lock or the build lock sees a stop once it holds the lock.
 - `stop` runs on the swarm host. The feed fetches `refs/heads/*` alone, so a stop ref pushed from a clone never reaches the bare repo, and the next mirror prunes it on the remote.
 - Each running worker reads 2 refs per second for its stop check.

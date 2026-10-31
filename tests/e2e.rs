@@ -62,6 +62,7 @@ fn slot_set_follows_host_file_live() {
     rests_dead_project(&swarm);
     stops_row(&swarm);
     resumes_after_rollback(&swarm);
+    runs_past_a_stale_stop(&swarm);
     refuses_pushed_row(&swarm);
     let restarted = outlives_serve(&mut swarm);
     pushes_every_track(&swarm, restarted);
@@ -69,6 +70,8 @@ fn slot_set_follows_host_file_live() {
     replays_after_a_kill_before_the_land_ref(&swarm);
     resumes_after_a_kill_past_the_land_ref(&swarm);
     drops_the_file_when_the_track_moves(&swarm);
+    stops_before_the_publish_push(&swarm);
+    stops_before_the_to_push(&swarm);
     let creates = swarm
         .lines()
         .iter()
@@ -302,10 +305,10 @@ fn stops_row(swarm: &Swarm) {
     let stopped = swarm.wait(&format!("stop row={}", label(row)), from);
     assert!(asked.elapsed() < STOPS, "worker must stop within {STOPS:?}");
     thread::sleep(CYCLES);
+    assert_eq!(swarm.count(from, &format!("land row={}", label(row))), 0);
     let after = &swarm.lines()[stopped..];
     for needle in [
         format!("assign row={} ", label(row)),
-        format!("land row={}", label(row)),
         format!("skip project={PROJECT} "),
     ] {
         assert!(
@@ -352,6 +355,27 @@ fn resumes_after_rollback(swarm: &Swarm) {
         &format!("{old}:refs/heads/track/a"),
     ]);
     swarm.wait(&format!("push row={} ", label(row)), back);
+}
+
+/// Stop ref at an older track tip, written mid-row: the running worker reads it as no
+/// stop, the check `state` reads.
+fn runs_past_a_stale_stop(swarm: &Swarm) {
+    let row = ROWS[0];
+    let from = swarm.mark();
+    swarm.rerun(&[row], from);
+    swarm.wait(&format!("step row={} step=1", label(row)), from);
+    let bare = home().join("swarm").join(format!("{PROJECT}.git"));
+    let old = succeed(
+        git()
+            .current_dir(&bare)
+            .args(["rev-parse", "refs/remotes/origin/track/a^"]),
+        "git",
+    );
+    let stop_ref = format!("refs/swarm/stop/{row}");
+    let args = ["update-ref", stop_ref.as_str(), old.trim()];
+    succeed(git().current_dir(&bare).args(args), "git");
+    swarm.wait(&format!("push row={} ", label(row)), from);
+    assert_eq!(swarm.count(from, &format!("stop row={}", label(row))), 0);
 }
 
 /// `stop` on a pushed row exits 1 and keeps its land ref: its work sits on `to`.
@@ -546,6 +570,56 @@ fn drops_the_file_when_the_track_moves(swarm: &Swarm) {
         swarm.count(from, &format!("assign row={} ", label("r/b"))),
         0
     );
+}
+
+/// Hook writes the stop ref once the land and publish refs stand: the track stays, nothing
+/// lands. A track push with no `publish` replays the row: no old ref survives.
+fn stops_before_the_publish_push(swarm: &Swarm) {
+    let from = swarm.mark();
+    let hook = swarm.bare_hook("reference-transaction");
+    write_hook(
+        &hook,
+        &format!(
+            "test \"$1\" = committed || exit 0\ngrep -q refs/swarm/publish/ || exit 0\nrm -f '{}'\ngit update-ref refs/swarm/stop/u/a \"$(git rev-parse refs/remotes/origin/track/u)\"\nsleep 2\n",
+            hook.display()
+        ),
+    );
+    swarm.track("track/u", &seed("feat/u", "feat/u", ":", "commit: a"));
+    let tip = swarm.head();
+    let row = label("u/a");
+    let stopped = swarm.wait(&format!("stop row={row}"), from);
+    assert_eq!(swarm.on_remote(&["rev-parse", "track/u"]).trim(), tip);
+    assert_eq!(swarm.count(from, &format!("publish row={row} ")), 0);
+    swarm.wait_state("u/a", "stopped");
+    swarm.commit_on(
+        "track/u",
+        "SWARM.yaml",
+        &next_text("feat/u"),
+        "e2e: drop publish",
+    );
+    swarm.wait(&format!("push row={} ", label("u/b")), stopped);
+    assert_eq!(swarm.count(from, &format!("land row={row}")), 2);
+    assert_eq!(swarm.count(from, &format!("publish-dropped row={row} ")), 0);
+    assert_eq!(swarm.count(from, &format!("publish row={row} ")), 0);
+}
+
+/// Hook writes the stop ref once the land ref stands: `to` gets no push.
+fn stops_before_the_to_push(swarm: &Swarm) {
+    let from = swarm.mark();
+    let hook = swarm.bare_hook("reference-transaction");
+    write_hook(
+        &hook,
+        &format!(
+            "test \"$1\" = committed || exit 0\ngrep -q refs/swarm/land/v/ || exit 0\nrm -f '{}'\ngit update-ref refs/swarm/stop/v/a \"$(git rev-parse refs/remotes/origin/track/v)\"\nsleep 2\n",
+            hook.display()
+        ),
+    );
+    swarm.track("track/v", &track("feat/a", "feat/v", 0, &["v/a"]));
+    let row = label("v/a");
+    let stopped = swarm.wait(&format!("stop row={row}"), from);
+    thread::sleep(CYCLES);
+    assert_eq!(swarm.count(stopped, &format!("push row={row} ")), 0);
+    assert_eq!(swarm.count(from, &format!("push row={row} ")), 0);
 }
 
 /// Scratch project: bare remote, a clone that pushes to it, host file, `serve`

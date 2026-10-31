@@ -33,6 +33,8 @@ pub const REF_RULE: &str =
     "no space, `..`, `~^:?*[`, control character, leading `-`, or `.lock` end";
 /// Tree entry mode of a regular file.
 const REGULAR_FILE: &str = "100644";
+/// Entry at a worktree root that ties it to its repo.
+pub const WORKTREE_LINK: &str = ".git";
 const WORKTREE_FIELD: &str = "worktree ";
 const BRANCH_FIELD: &str = "branch ";
 
@@ -178,9 +180,9 @@ impl Git {
         text: &str,
         message: &str,
     ) -> Result<String> {
-        let blob = proc::feed(BIN, &self.root, &["hash-object", "-w", "--stdin"], text)?;
+        let blob = proc::run_with_input(BIN, &self.root, &["hash-object", "-w", "--stdin"], text)?;
         let entry = format!("{REGULAR_FILE} blob {}\t{file}\n", blob.trim());
-        let tree = proc::feed(BIN, &self.root, &["mktree"], &entry)?;
+        let tree = proc::run_with_input(BIN, &self.root, &["mktree"], &entry)?;
         let args = ["commit-tree", tree.trim(), "-p", parent, "-m", message];
         run(&self.root, &args).map(|sha| sha.trim().to_string())
     }

@@ -5,13 +5,11 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::event;
-use crate::git::Git;
+use crate::git::{Git, WORKTREE_LINK};
 use crate::host::Mount;
 use crate::paths;
 use crate::podman::{self, Container, Spec, Stamp};
 use crate::step::Outcome;
-
-pub const WORKTREE_LINK: &str = ".git";
 
 /// One try at a conflicted merge.
 pub type Resolve<'a> = dyn FnMut() -> Result<Outcome<()>> + 'a;

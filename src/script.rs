@@ -1,4 +1,4 @@
-use crate::board::{self, Row, Track};
+use crate::board::{self, NextFile, Row, Track};
 use crate::call::{Call, Message, Reply, Shell, Turn};
 use crate::config::{self, Agent, Config, ID_SLOT, PARENT_SLOT};
 use crate::credential::Credential;
@@ -9,7 +9,7 @@ use crate::host::Host;
 use crate::paths::Project;
 use crate::slot::Slot;
 use crate::state::Address;
-use crate::step::{Outcome, Policy, Step, Steps};
+use crate::step::{Outcome, Policy, Step};
 use crate::transcript::{Entry, Transcript};
 
 /// First character of every slot name.
@@ -33,11 +33,14 @@ pub struct Session<'a> {
     session: Option<String>,
 }
 
-/// Where one pass of steps writes, and the branch it merges in. `None` off merge.
+/// Where one pass of steps writes, the branch it merges in, the file a commit publishes.
 #[derive(Clone, Copy)]
 struct Pass<'p> {
     transcript: &'p Transcript,
+    /// `None` off merge.
     parent: Option<&'p str>,
+    /// Worktree name and checked text. Last row step alone.
+    publish: Option<(&'p str, &'p NextFile)>,
 }
 
 impl<'a> Session<'a> {
@@ -64,14 +67,31 @@ impl<'a> Session<'a> {
         })
     }
 
-    /// Every step of the row. `Done` holds the last commit.
+    /// Every step of the row. `Done` holds the last commit. A published file is
+    /// checked before the last step, so a refused file costs no commit turn.
     pub fn play(&mut self, transcript: &Transcript) -> Result<Outcome<String>> {
         let row = self.row;
+        let number = row.steps.len();
+        let (last, first) = row
+            .steps
+            .split_last()
+            .expect("`Steps` must hold one step or more");
         let pass = Pass {
             transcript,
             parent: None,
+            publish: None,
         };
-        self.run(&row.steps, pass)
+        if let Outcome::Spent(why) = self.run(first, pass)? {
+            return Ok(Outcome::Spent(why));
+        }
+        let next = match row.publish.as_deref().map(|file| self.next_file(file)) {
+            None => None,
+            Some(Ok(next)) => Some(next),
+            Some(Err(why)) => return Ok(Outcome::Spent(format!("step {number}: {why}"))),
+        };
+        let publish = row.publish.as_deref().zip(next.as_ref());
+        let outcome = self.step(number, last, Pass { publish, ..pass })?;
+        Ok(outcome.map(|commit| commit.expect("`Steps` must end with a commit step")))
     }
 
     /// Hand the conflicted worktree to the project `merge` steps. No `merge` steps:
@@ -85,22 +105,19 @@ impl<'a> Session<'a> {
         let pass = Pass {
             transcript,
             parent: Some(parent),
+            publish: None,
         };
-        Ok(self.run(steps, pass)?.map(drop))
+        self.run(steps, pass)
     }
 
     /// Steps in order, up to the first spent one.
-    fn run(&mut self, steps: &Steps, pass: Pass) -> Result<Outcome<String>> {
-        let mut last = None;
+    fn run(&mut self, steps: &[Step], pass: Pass) -> Result<Outcome<()>> {
         for (index, step) in steps.iter().enumerate() {
-            match self.step(index + 1, step, pass)? {
-                Outcome::Done(commit) => last = commit.or(last),
-                Outcome::Spent(why) => return Ok(Outcome::Spent(why)),
+            if let Outcome::Spent(why) = self.step(index + 1, step, pass)? {
+                return Ok(Outcome::Spent(why));
             }
         }
-        Ok(Outcome::Done(
-            last.expect("`Steps` must end with a commit step"),
-        ))
+        Ok(Outcome::Done(()))
     }
 
     /// One step. `Done` holds sha of commit step.
@@ -121,53 +138,22 @@ impl<'a> Session<'a> {
                     outcome => outcome.map(|()| None),
                 },
             ),
-            Step::AgentCommit { policy, publish } => {
-                self.commit_step(number, publish.as_deref(), pass, |session| {
-                    let ask = Message(session.turn(&session.config.commit));
-                    let outcome = session.call(policy, number, pass).ask(&ask)?;
-                    Ok(session
-                        .reply(outcome)
-                        .map(|message| message.trim().to_string()))
-                })
+            Step::AgentCommit { policy } => {
+                let ask = Message(self.turn(&self.config.commit));
+                let outcome = self.call(policy, number, pass).ask(&ask)?;
+                match self.reply(outcome) {
+                    Outcome::Done(message) => self.commit(number, message.trim(), pass),
+                    Outcome::Spent(why) => Ok(Outcome::Spent(why)),
+                }
             }
-            Step::Commit { message, publish } => {
-                self.commit_step(number, publish.as_deref(), pass, |_| {
-                    Ok(Outcome::Done(message.clone()))
-                })
-            }
+            Step::Commit { message } => self.commit(number, message, pass),
         }
-    }
-
-    /// Check published file, get message, drop file, move track, commit row. Nothing
-    /// spends after the move: a fail ref on the old tip replays the row with no bound.
-    fn commit_step(
-        &mut self,
-        number: usize,
-        publish: Option<&str>,
-        pass: Pass,
-        message: impl FnOnce(&mut Self) -> Result<Outcome<String>>,
-    ) -> Result<Outcome<Option<String>>> {
-        let board = match publish.map(|file| self.next_board(file)).transpose() {
-            Ok(board) => board,
-            Err(why) => return Ok(Outcome::Spent(format!("step {number}: {why}"))),
-        };
-        let message = match message(self)? {
-            Outcome::Done(message) => message,
-            Outcome::Spent(why) => return Ok(Outcome::Spent(why)),
-        };
-        if let Some((file, board)) = publish.zip(board) {
-            self.slot.drop_path(file)?;
-            if let Outcome::Spent(why) = self.publish(number, &board, pass)? {
-                return Ok(Outcome::Spent(why));
-            }
-        }
-        Ok(Outcome::Done(Some(self.commit(number, &message, pass)?)))
     }
 
     /// Text of `file`, checked as the next track file against the project file in the
     /// worktree. `Err` names what the row got wrong. No git or podman call runs here.
-    fn next_board(&self, file: &str) -> std::result::Result<String, String> {
-        let board = self.slot.regular_text(file).ok_or_else(|| {
+    fn next_file(&self, file: &str) -> std::result::Result<NextFile, String> {
+        let text = self.slot.regular_text(file).ok_or_else(|| {
             "field `publish` must name a regular text file at the worktree root".to_string()
         })?;
         let config = self.slot.regular_text(config::FILE).ok_or_else(|| {
@@ -177,14 +163,13 @@ impl<'a> Session<'a> {
             )
         })?;
         Config::parse(&config)
-            .and_then(|config| self.track.check_next(&board, &self.row.id, &config))
-            .map_err(|why| why.to_string())?;
-        Ok(board)
+            .and_then(|config| self.track.check_next(text, &self.row.id, &config))
+            .map_err(|why| why.to_string())
     }
 
-    /// Commit `board` as the sole file on the track tip, push it with no force, again
+    /// Commit `next` as the sole file on the track tip, push it with no force, again
     /// onto the new tip after a fetch when behind.
-    fn publish(&self, number: usize, board: &str, pass: Pass) -> Result<Outcome<()>> {
+    fn publish(&self, number: usize, next: &NextFile, pass: Pass) -> Result<Outcome<()>> {
         let repo = self.repo;
         let host = Host::load()?;
         let branch = format!("{}{}", host.entry(self.project)?.tracks, self.track.name);
@@ -194,7 +179,7 @@ impl<'a> Session<'a> {
             let tip = repo.commit_of(&tracking)?.ok_or_else(|| {
                 Error::Failed(format!("track branch `{branch}` must stand on the remote"))
             })?;
-            let commit = repo.commit_file(&tip, board::FILE, board, &message)?;
+            let commit = repo.commit_file(&tip, board::FILE, next.text(), &message)?;
             match repo.push(&commit, &branch)? {
                 Push::Done => break commit,
                 Push::Declined(why) => {
@@ -251,11 +236,18 @@ impl<'a> Session<'a> {
         }
     }
 
-    fn commit(&self, number: usize, message: &str, pass: Pass) -> Result<String> {
+    /// Drop and push any published file, then commit the row.
+    fn commit(&self, number: usize, message: &str, pass: Pass) -> Result<Outcome<Option<String>>> {
+        if let Some((file, next)) = pass.publish {
+            self.slot.drop_path(file)?;
+            if let Outcome::Spent(why) = self.publish(number, next, pass)? {
+                return Ok(Outcome::Spent(why));
+            }
+        }
         let commit = self.slot.commit(message)?;
         event::commit(&self.key, &commit);
         record(number, commit.clone(), message, pass)?;
-        Ok(commit)
+        Ok(Outcome::Done(Some(commit)))
     }
 }
 

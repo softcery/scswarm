@@ -37,7 +37,12 @@ pub fn run<S: AsRef<OsStr>>(bin: &str, dir: &Path, args: &[S]) -> Result<String>
 
 /// `run` with `input` on stdin. The child must read stdin to its end before it
 /// prints: one thread writes and then reads.
-pub fn feed<S: AsRef<OsStr>>(bin: &str, dir: &Path, args: &[S], input: &str) -> Result<String> {
+pub fn run_with_input<S: AsRef<OsStr>>(
+    bin: &str,
+    dir: &Path,
+    args: &[S],
+    input: &str,
+) -> Result<String> {
     let broke = |why: io::Error| unspawned(bin, &call(bin, args), &why);
     let mut child = command(bin, dir, args)
         .stdin(Stdio::piped())

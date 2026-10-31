@@ -919,7 +919,7 @@ fn seed(to: &str, published_to: &str, then: &str, commit: &str) -> String {
         .map(|line| format!("          {line}\n"))
         .collect();
     format!(
-        "from: feat/a\nto: {to}\nrows:\n  - id: a\n    agent: stub\n    steps:\n      - run: |\n          set -e\n          cat > {next} <<'EOF'\n{script}          EOF\n          {then}\n      - {commit}\n        publish: {next}\n"
+        "from: feat/a\nto: {to}\nrows:\n  - id: a\n    agent: stub\n    publish: {next}\n    steps:\n      - run: |\n          set -e\n          cat > {next} <<'EOF'\n{script}          EOF\n          {then}\n      - {commit}\n"
     )
 }
 

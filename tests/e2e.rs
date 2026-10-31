@@ -1,13 +1,13 @@
-//! Live slot set, `serve` restart, two tracks and two projects against rootless podman and
-//! local remotes. Rows hold `run` and literal commit steps only: no agent call, no token spent.
+//! Live slot set, `serve` restart, two tracks, two projects and `publish` against rootless podman
+//! and local remotes. Rows hold `run` and commit steps, agents are stubs: no token spent.
 //! Slots, container names and the host file belong to the user: the test refuses a user whose
 //! host file it did not write.
 
 use std::collections::BTreeSet;
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::os::unix::fs::DirBuilderExt;
-use std::path::PathBuf;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -33,6 +33,9 @@ const TICK: Duration = Duration::from_millis(200);
 const CYCLES: Duration = Duration::from_secs(3);
 /// `stop` to worker exit: one 1 s check plus kill and restart.
 const STOPS: Duration = Duration::from_secs(5);
+/// Hook line that ends the worker above its git with no cleanup. No `pkill`: on macOS it
+/// skips the caller's ancestors.
+const KILL_WORKER: &str = "kill -9 $(ps -o ppid= -p $PPID)";
 const CONTAINERFILE: &str = "Containerfile.e2e";
 const BASE: &str = "registry.fedoraproject.org/fedora:44";
 /// Every row checks this value. The file ends in `\n`: the worker strips it.
@@ -62,6 +65,10 @@ fn slot_set_follows_host_file_live() {
     refuses_pushed_row(&swarm);
     let restarted = outlives_serve(&mut swarm);
     pushes_every_track(&swarm, restarted);
+    publishes_next_file(&swarm);
+    replays_after_a_kill_before_the_land_ref(&swarm);
+    resumes_after_a_kill_past_the_land_ref(&swarm);
+    drops_the_file_when_the_track_moves(&swarm);
     let creates = swarm
         .lines()
         .iter()
@@ -454,6 +461,93 @@ fn pushes_every_track(swarm: &Swarm, from: usize) {
     }
 }
 
+/// Seed row publishes rows `a` and `b`. Its agent turn rewrites the file after the
+/// check: the checked text lands. The track tip holds the file alone, `to` holds both
+/// merges in order and no published file. A file with another `to` fails its row and
+/// moves nothing.
+fn publishes_next_file(swarm: &Swarm) {
+    let from = swarm.mark();
+    swarm.track("track/p", &seed("feat/p", "feat/p", ":", "commit:"));
+    swarm.wait(&format!("publish row={} ", label("p/a")), from);
+    swarm.wait(&format!("push row={} ", label("p/b")), from);
+    assert_eq!(
+        swarm.on_remote(&["ls-tree", "--name-only", "track/p"]),
+        "SWARM.yaml\n"
+    );
+    assert_eq!(
+        swarm.on_remote(&["show", "track/p:SWARM.yaml"]),
+        next_text("feat/p")
+    );
+    let merges = swarm.on_remote(&["log", "--first-parent", "--format=%s", "-2", "feat/p"]);
+    assert_eq!(merges, "Merge swarm/p/b\nMerge swarm/p/a\n");
+    let subjects = swarm.on_remote(&["log", "--format=%s", "feat/p"]);
+    assert!(subjects.lines().any(|line| line == "plan"), "{subjects}");
+    swarm.lacks_next("feat/p");
+
+    swarm.track("track/q", &seed("feat/q", "feat/other", ":", "commit: a"));
+    swarm.refused("q", "feat/q", &swarm.head());
+}
+
+/// Hook kills the worker in the row commit, before the land ref: the track stays, and
+/// the row replays from its own track file and publishes once.
+fn replays_after_a_kill_before_the_land_ref(swarm: &Swarm) {
+    let from = swarm.mark();
+    let hook = swarm.bare_hook("pre-commit");
+    write_hook(
+        &hook,
+        &format!("rm -f '{}'\n{KILL_WORKER}\nexit 1\n", hook.display()),
+    );
+    let work = "sleep 2 && echo work > work-k.txt";
+    swarm.track("track/k", &seed("feat/k", "feat/k", work, "commit: a"));
+    swarm.wait(&format!("push row={} ", label("k/b")), from);
+    let row = label("k/a");
+    assert_eq!(swarm.count(from, &format!("assign row={row} ")), 2);
+    assert_eq!(swarm.count(from, &format!("step row={row} ")), 2);
+    assert_eq!(swarm.count(from, &format!("publish row={row} ")), 1);
+    swarm.holds_file("feat/k", "work-k.txt");
+}
+
+/// Hook kills the worker once the land ref and publish ref stand: the next attempt
+/// pushes both with no second session, and the row work reaches `to`.
+fn resumes_after_a_kill_past_the_land_ref(swarm: &Swarm) {
+    let from = swarm.mark();
+    let hook = swarm.bare_hook("reference-transaction");
+    write_hook(
+        &hook,
+        &format!(
+            "test \"$1\" = committed || exit 0\ngrep -q refs/swarm/publish/ || exit 0\nrm -f '{}'\n{KILL_WORKER}\n",
+            hook.display()
+        ),
+    );
+    let work = "echo work > work-l.txt";
+    swarm.track("track/l", &seed("feat/l", "feat/l", work, "commit: a"));
+    swarm.wait(&format!("push row={} ", label("l/b")), from);
+    let row = label("l/a");
+    assert_eq!(swarm.count(from, &format!("assign row={row} ")), 2);
+    assert_eq!(swarm.count(from, &format!("step row={row} ")), 1);
+    assert_eq!(swarm.count(from, &format!("publish row={row} ")), 1);
+    swarm.holds_file("feat/l", "work-l.txt");
+}
+
+/// Human push during the row: the track keeps it, the file drops, the row lands.
+fn drops_the_file_when_the_track_moves(swarm: &Swarm) {
+    let from = swarm.mark();
+    let track = seed("feat/r", "feat/r", "sleep 10", "commit: a");
+    swarm.track("track/r", &track);
+    swarm.wait(&format!("step row={} step=1", label("r/a")), from);
+    swarm.commit_on("track/r", "note.txt", "note\n", "e2e: human push");
+    let human = swarm.head();
+    let row = label("r/a");
+    swarm.wait(&format!("publish-dropped row={row} "), from);
+    swarm.wait(&format!("push row={row} "), from);
+    assert_eq!(swarm.on_remote(&["rev-parse", "track/r"]).trim(), human);
+    assert_eq!(swarm.on_remote(&["show", "track/r:SWARM.yaml"]), track);
+    assert_eq!(
+        swarm.count(from, &format!("assign row={} ", label("r/b"))),
+        0
+    );
+}
+
 /// Scratch project: bare remote, a clone that pushes to it, host file, `serve`
 /// log. Drop removes every trace, pass or fail.
 struct Swarm {
@@ -655,6 +749,74 @@ impl Swarm {
         }
     }
 
+    /// Row `a` of `track` reads failed, the track stays at `tip`, `to` gets no merge.
+    fn refused(&self, track: &str, to: &str, tip: &str) {
+        self.wait_state(&format!("{track}/a"), "failed");
+        let branch = format!("track/{track}");
+        assert_eq!(self.on_remote(&["rev-parse", &branch]).trim(), tip);
+        let subjects = self.on_remote(&["log", "--format=%s", to]);
+        let merge = format!("swarm/{track}/");
+        assert!(
+            !subjects.contains(&merge),
+            "{to} must get no merge:\n{subjects}"
+        );
+    }
+
+    /// `to` holds no published file.
+    fn lacks_next(&self, to: &str) {
+        let (next, files) = (
+            next_file(to),
+            self.on_remote(&["ls-tree", "-r", "--name-only", to]),
+        );
+        assert!(
+            !files.lines().any(|file| file == next),
+            "{next} must stay off `{to}`:\n{files}"
+        );
+    }
+
+    /// `to` holds `file`.
+    fn holds_file(&self, to: &str, file: &str) {
+        let files = self.on_remote(&["ls-tree", "-r", "--name-only", to]);
+        assert!(
+            files.lines().any(|line| line == file),
+            "{file} must stand on `{to}`:\n{files}"
+        );
+    }
+
+    /// Hook path in the bare repo of the project.
+    fn bare_hook(&self, name: &str) -> PathBuf {
+        home()
+            .join("swarm")
+            .join(format!("{PROJECT}.git"))
+            .join("hooks")
+            .join(name)
+    }
+
+    /// Lines since `from` that start with `prefix`.
+    fn count(&self, from: usize, prefix: &str) -> usize {
+        self.lines()[from..]
+            .iter()
+            .filter(|line| line.starts_with(prefix))
+            .count()
+    }
+
+    /// Poll `status` until `row` reads `state`.
+    fn wait_state(&self, row: &str, state: &str) {
+        let start = Instant::now();
+        loop {
+            let table = succeed(command().args(["status", PROJECT]), "scswarm");
+            let reads = |line: &&str| line.split_whitespace().skip(1).take(2).eq([row, state]);
+            if table.lines().any(|line| reads(&line)) {
+                return;
+            }
+            assert!(
+                start.elapsed() < WAIT,
+                "{row} must read {state} within {WAIT:?}:\n{table}"
+            );
+            thread::sleep(TICK);
+        }
+    }
+
     /// Line where the last row assigned to `slot` lands.
     fn landed_on(&self, slot: usize) -> usize {
         let lines = self.lines();
@@ -778,6 +940,11 @@ impl Swarm {
         self.git(&["push", "--quiet", "origin", branch]);
     }
 
+    /// Stdout of git in the bare remote.
+    fn on_remote(&self, args: &[&str]) -> String {
+        succeed(git().arg("-C").arg(self.remote()).args(args), "git")
+    }
+
     fn write(&self, file: &str, text: &str) {
         fs::write(self.work.join(file), text).expect("scratch file must be writable");
     }
@@ -803,7 +970,9 @@ default_agent: none
 agents:
   none:
     exec: \"false\"
-commit: \"unused: rows hold literal commits only\"
+  stub:
+    exec: sh -c 'for file in next-*.yaml; do echo broken > $file; done; echo plan' stub
+commit: Reply with the message.
 ";
 
 fn track_a() -> String {
@@ -827,6 +996,39 @@ fn track(from: &str, to: &str, priority: i32, rows: &[&str]) -> String {
         })
         .collect();
     format!("from: {from}\nto: {to}\npriority: {priority}\nrows:\n{rows}")
+}
+
+/// Track of one row `a` on the stub agent: writes `next_text(published_to)`, runs `then`,
+/// publishes at step `commit`. `from` is the rolled branch: slots hold its image.
+fn seed(to: &str, published_to: &str, then: &str, commit: &str) -> String {
+    let next = next_file(to);
+    let script: String = next_text(published_to)
+        .lines()
+        .map(|line| format!("          {line}\n"))
+        .collect();
+    format!(
+        "from: feat/a\nto: {to}\nrows:\n  - id: a\n    agent: stub\n    publish: {next}\n    steps:\n      - run: |\n          set -e\n          cat > {next} <<'EOF'\n{script}          EOF\n          {then}\n      - {commit}\n"
+    )
+}
+
+/// Published file of one track. A name per track: a podman machine share refuses, for
+/// about 1 s, a file the host just deleted, and `git clean` deletes the file of the last row.
+fn next_file(to: &str) -> String {
+    format!("next-{}.yaml", to.replace('/', "-"))
+}
+
+/// Next round: carried row `a` and new row `b` after it.
+fn next_text(to: &str) -> String {
+    format!(
+        "from: feat/a\nto: {to}\nrows:\n  - id: a\n    steps:\n      - commit: a\n  - id: b\n    after: [a]\n    steps:\n      - commit: b\n"
+    )
+}
+
+/// Executable hook script at `path`.
+fn write_hook(path: &Path, body: &str) {
+    fs::create_dir_all(path.parent().expect("hook has a dir")).expect("hook dir must be writable");
+    fs::write(path, format!("#!/bin/sh\n{body}")).expect("hook must be writable");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("hook must take a mode");
 }
 
 fn containerfile(revision: u32) -> String {

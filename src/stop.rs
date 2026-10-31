@@ -36,8 +36,8 @@ pub fn stop(repo: &Git, tracks: &str, key: &Key) -> Result<()> {
 }
 
 /// Worker start, under the row lock. A stop ref at an older track tip: the row
-/// stopped, then its track moved. Its old work must not merge: drop the land
-/// ref, then the stop ref, unless a new `stop` moved it meanwhile.
+/// stopped, then its track moved. Its old work must not merge or publish: drop the
+/// land and publish refs, then the stop ref, unless a new `stop` moved it meanwhile.
 pub fn settle(repo: &Git, key: &Key, branch: &str) -> Result<()> {
     let stop_ref = key.stop_ref();
     let Some(stop) = repo.commit_of(&stop_ref)? else {
@@ -48,6 +48,7 @@ pub fn settle(repo: &Git, key: &Key, branch: &str) -> Result<()> {
         return Ok(());
     }
     repo.ref_delete(&key.land_ref())?;
+    repo.ref_delete(&key.publish_ref())?;
     repo.ref_delete_at(&stop_ref, &stop)
 }
 

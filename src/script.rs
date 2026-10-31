@@ -1,4 +1,4 @@
-use crate::board::Row;
+use crate::board::{NextFile, Row, Track};
 use crate::call::{Call, Message, Reply, Shell, Turn};
 use crate::config::{self, Agent, Config, ID_SLOT, PARENT_SLOT};
 use crate::credential::Credential;
@@ -7,7 +7,7 @@ use crate::event;
 use crate::proc::Stop;
 use crate::slot::Slot;
 use crate::state::Address;
-use crate::step::{Outcome, Policy, Step, Steps};
+use crate::step::{Outcome, Policy, Step};
 use crate::transcript::{Entry, Transcript};
 
 /// First character of every slot name.
@@ -19,6 +19,7 @@ pub struct Session<'a> {
     slot: &'a Slot,
     credentials: &'a [Credential],
     config: &'a Config,
+    track: &'a Track,
     row: &'a Row,
     agent: &'a Agent,
     /// Row label: event context.
@@ -28,11 +29,20 @@ pub struct Session<'a> {
     stop: &'a Stop<'a>,
 }
 
-/// Where one pass of steps writes, and the branch it merges in. `None` off merge.
+/// What a row session leaves: its last commit, and any checked next track file.
+pub struct Played {
+    pub commit: String,
+    pub next: Option<NextFile>,
+}
+
+/// Where one pass of steps writes, the branch it merges in, the file a commit drops.
 #[derive(Clone, Copy)]
 struct Pass<'p> {
     transcript: &'p Transcript,
+    /// `None` off merge.
     parent: Option<&'p str>,
+    /// Worktree name of a checked next file. Last row step alone.
+    published: Option<&'p str>,
 }
 
 impl<'a> Session<'a> {
@@ -40,14 +50,16 @@ impl<'a> Session<'a> {
         slot: &'a Slot,
         credentials: &'a [Credential],
         config: &'a Config,
+        track: &'a Track,
         row: &'a Row,
-        address: &Address,
+        address: &'a Address,
         stop: &'a Stop<'a>,
     ) -> Result<Self> {
         Ok(Self {
             slot,
             credentials,
             config,
+            track,
             row,
             agent: agent(config, &row.agent)?,
             key: address.to_string(),
@@ -56,14 +68,45 @@ impl<'a> Session<'a> {
         })
     }
 
-    /// Every step of the row. `Done` holds the last commit.
-    pub fn play(&mut self, transcript: &Transcript) -> Result<Outcome<String>> {
+    /// Every step of the row. A published file is checked before the last step, so a
+    /// refused file costs no commit turn.
+    pub fn play(&mut self, transcript: &Transcript) -> Result<Outcome<Played>> {
         let row = self.row;
+        let number = row.steps.len();
+        let (last, first) = row
+            .steps
+            .split_last()
+            .expect("`Steps` must hold one step or more");
         let pass = Pass {
             transcript,
             parent: None,
+            published: None,
         };
-        self.run(&row.steps, pass)
+        match self.run(first, pass)? {
+            Outcome::Done(()) => {}
+            Outcome::Spent(why) => return Ok(Outcome::Spent(why)),
+            Outcome::Stopped => return Ok(Outcome::Stopped),
+        }
+        let next = match row.publish.as_deref() {
+            None => None,
+            Some(file) => match self.next_file(file)? {
+                Ok(next) => Some(next),
+                Err(why) => {
+                    let why = format!("step {number}: {why}");
+                    transcript.append(&Entry {
+                        fault: Some(why.clone()),
+                        ..Entry::new(number)
+                    })?;
+                    return Ok(Outcome::Spent(why));
+                }
+            },
+        };
+        let published = row.publish.as_deref();
+        let outcome = self.step(number, last, Pass { published, ..pass })?;
+        Ok(outcome.map(|commit| Played {
+            commit: commit.expect("`Steps` must end with a commit step"),
+            next,
+        }))
     }
 
     /// Hand the conflicted worktree to the project `merge` steps. No `merge` steps:
@@ -77,23 +120,21 @@ impl<'a> Session<'a> {
         let pass = Pass {
             transcript,
             parent: Some(parent),
+            published: None,
         };
-        Ok(self.run(steps, pass)?.map(drop))
+        self.run(steps, pass)
     }
 
     /// Steps in order, up to the first spent or stopped one.
-    fn run(&mut self, steps: &Steps, pass: Pass) -> Result<Outcome<String>> {
-        let mut last = None;
+    fn run(&mut self, steps: &[Step], pass: Pass) -> Result<Outcome<()>> {
         for (index, step) in steps.iter().enumerate() {
             match self.step(index + 1, step, pass)? {
-                Outcome::Done(commit) => last = commit.or(last),
+                Outcome::Done(_) => {}
                 Outcome::Spent(why) => return Ok(Outcome::Spent(why)),
                 Outcome::Stopped => return Ok(Outcome::Stopped),
             }
         }
-        Ok(Outcome::Done(
-            last.expect("`Steps` must end with a commit step"),
-        ))
+        Ok(Outcome::Done(()))
     }
 
     /// One step. `Done` holds sha of commit step.
@@ -118,19 +159,42 @@ impl<'a> Session<'a> {
                 let ask = Message(self.turn(&self.config.commit));
                 let outcome = self.call(policy, number, pass).ask(&ask)?;
                 match self.reply(outcome) {
-                    Outcome::Done(message) => Ok(Outcome::Done(Some(self.commit(
-                        number,
-                        message.trim(),
-                        pass,
-                    )?))),
+                    Outcome::Done(message) => self.commit(number, message.trim(), pass),
                     Outcome::Spent(why) => Ok(Outcome::Spent(why)),
                     Outcome::Stopped => Ok(Outcome::Stopped),
                 }
             }
-            Step::Commit { message } => {
-                Ok(Outcome::Done(Some(self.commit(number, message, pass)?)))
-            }
+            Step::Commit { message } => self.commit(number, message, pass),
         }
+    }
+
+    /// Text of `file`, checked as the next track file against the project file at the
+    /// row base, which `serve` reads until the row merges, and the one in the worktree,
+    /// which it reads after. Inner `Err`: what the row got wrong.
+    fn next_file(&self, file: &str) -> Result<std::result::Result<NextFile, String>> {
+        let text = match self.slot.regular_text(file)? {
+            Ok(text) => text,
+            Err(got) => {
+                return Ok(Err(format!(
+                    "field `publish` must name a regular text file at the worktree root: `{file}` holds {got}"
+                )));
+            }
+        };
+        let worktree = match self.slot.regular_text(config::FILE)? {
+            Ok(text) => text,
+            Err(got) => {
+                return Ok(Err(format!(
+                    "{0} must stand as a regular text file at the worktree root: it holds {got}",
+                    config::FILE
+                )));
+            }
+        };
+        Ok(Config::parse(&worktree)
+            .and_then(|worktree| {
+                let configs = [self.config, &worktree];
+                self.track.check_next(file, text, &self.row.id, &configs)
+            })
+            .map_err(|why| why.to_string()))
     }
 
     /// Row steps go as typed. Merge prompts take the two names the tool knows.
@@ -170,7 +234,11 @@ impl<'a> Session<'a> {
         }
     }
 
-    fn commit(&self, number: usize, message: &str, pass: Pass) -> Result<String> {
+    /// Drop any published file, then commit the row.
+    fn commit(&self, number: usize, message: &str, pass: Pass) -> Result<Outcome<Option<String>>> {
+        if let Some(file) = pass.published {
+            self.slot.drop_path(file)?;
+        }
         let commit = self.slot.commit(message)?;
         event::commit(&self.key, &commit);
         pass.transcript.append(&Entry {
@@ -178,7 +246,7 @@ impl<'a> Session<'a> {
             message: Some(message.to_string()),
             ..Entry::new(number)
         })?;
-        Ok(commit)
+        Ok(Outcome::Done(Some(commit)))
     }
 }
 

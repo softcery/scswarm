@@ -237,7 +237,7 @@ RUN mkdir -p /home/dev/.claude \
 
 ### `SWARM.yaml` on a track branch
 
-The track file. Root of an orphan branch named `<tracks><name>`, for example `track/laser`. Read and never written by the tool.
+The track file. Root of an orphan branch named `<tracks><name>`, for example `track/laser`. The tool reads it, and writes it only through `publish`.
 
 ```yaml
 from: main
@@ -274,6 +274,7 @@ rows:
 - `after` is a list of ids of the same track. Absent = queued at once. A row that needs another track's output names that track's `to` as `from`.
 - `agent` is a key of `agents`. Absent = `default_agent`. One row per model is how a second model audits the first.
 - `steps` run in order in one session. The last step must be a commit.
+- `publish: <file>` lets a row plan the rows after it. The host checks that file at the worktree root before the last step, commits the row, then commits the file alone as `SWARM.yaml` on the track branch and pushes it. A track pushed during the row keeps its content and the file drops. The file stays off `to`. Its `from` and `to` must equal the running track. Total spend then has no bound: see [the publish rules in the contract](docs/spec/contract.md#publish).
 - An anchor (`&check`) carries a repeated step, an alias (`*check`) points back at it.
 - A prompt that starts with `{`, or one YAML reads as a bool or number (`yes`, `42`), must be quoted.
 
@@ -381,6 +382,8 @@ git -C ~/swarm/PROJECT.git for-each-ref refs/swarm/
 **Remove a project.** Drain its rows, delete its entry, then delete `~/swarm/PROJECT.git`, `~/swarm/log/PROJECT`, `~/swarm/build/PROJECT`, its credential files and its `mounts` host dirs.
 
 **Track done.** Merge `to` into `from`. Each row reads `merged` once its last commit is an ancestor of `from`.
+
+**Clear a finished track.** Do not use `reset`: it runs the rows again. Merge or drop `to`, wait until `status` shows no row of the track `running`, then run `git push <remote> --delete track/NAME` against the project's `remote`. The rows leave `status` at the next fetch. `to` and its commits stay. Row branches, land refs and fail refs stay too, off the board, until `reset` of each row. To drop one row, delete it and its ids in `after` from `SWARM.yaml`, then push the track.
 
 ## Limits
 

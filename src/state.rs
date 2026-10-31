@@ -12,6 +12,7 @@ const BRANCHES: &str = "swarm/";
 const LAND: &str = "land/";
 const FAIL: &str = "fail/";
 const STOP: &str = "stop/";
+const PUBLISH: &str = "publish/";
 
 /// Row standing. Read from git and row locks, never stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,7 +93,6 @@ pub fn landed(git: &Git, track: &Track, key: &Key) -> Result<Option<State>> {
 struct Facts<'a> {
     git: &'a Git,
     kept: BTreeMap<String, String>,
-    /// Track tip.
     tip: &'a str,
     to: Option<String>,
     /// `None` once `from` leaves the remote: no row reads `merged`.
@@ -160,7 +160,7 @@ impl Key {
         format!("{BRANCHES}{self}")
     }
 
-    /// Ref holding the last commit of the row's session. Sole record of finished work.
+    /// Last commit of the row session. Sole record of finished work.
     pub fn land_ref(&self) -> String {
         format!("{}{LAND}{self}", git::KEPT)
     }
@@ -168,6 +168,11 @@ impl Key {
     /// Track tip `scswarm stop` held the row at.
     pub fn stop_ref(&self) -> String {
         format!("{}{STOP}{self}", git::KEPT)
+    }
+
+    /// Track commit of the row until its push ends.
+    pub fn publish_ref(&self) -> String {
+        format!("{}{PUBLISH}{self}", git::KEPT)
     }
 
     /// Track tip and `to` tip of the last failed attempt, in that order.

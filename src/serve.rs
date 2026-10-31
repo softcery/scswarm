@@ -115,8 +115,8 @@ impl Server {
             self.pool.assign(Job {
                 project: project.clone(),
                 slot,
-                tracks: entry.tracks.clone(),
                 track: track.name.clone(),
+                track_branch: format!("{}{}", entry.tracks, track.name),
                 id: snapshot.board.rows()[row].id.clone(),
                 track_tip: track.tip.clone(),
                 base: snapshot.base.clone(),

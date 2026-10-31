@@ -91,7 +91,7 @@ enum Command {
         row: String,
     },
     #[command(
-        about = "Delete one row and its dependants so they run again",
+        about = "Run one row and its dependants again",
         long_about = help::RESET_ABOUT
     )]
     Reset {
@@ -231,8 +231,8 @@ mod tests {
         let job = Job {
             project: "alpha".parse().expect("project name must pass"),
             slot: 2,
-            tracks: "track/".to_string(),
             track: "laser".to_string(),
+            track_branch: "track/laser".to_string(),
             id: "rag-04-review".to_string(),
             track_tip: "89abcdef0123456789abcdef0123456789abcdef".to_string(),
             base: "0123456789abcdef0123456789abcdef01234567".to_string(),

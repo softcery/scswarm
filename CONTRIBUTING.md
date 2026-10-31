@@ -19,7 +19,7 @@ The repo has no CI. Run these checks yourself before you open a pull request:
 
 1. Run `make lint`. It runs the comment budget script, `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`.
 2. Run `cargo test`.
-3. If you change slots, the pool or podman calls, run `make e2e`. It spends no agent tokens. It runs about 320 s on macOS. It writes `~/.config/scswarm/host.yaml` and `E2E_*` files in `~/.config/scswarm/credentials/`, and removes them. It refuses to run for a user whose host file it did not write: slots and container names belong to the user.
+3. If you change slots, the pool or podman calls, run `make e2e`. It spends no agent tokens. It runs about 340 s on macOS. It writes `~/.config/scswarm/host.yaml` and `E2E_*` files in `~/.config/scswarm/credentials/`, and removes them. It refuses to run for a user whose host file it did not write: slots and container names belong to the user.
 
 To run `make lint` on each commit, install a hook:
 

@@ -66,11 +66,16 @@ Runs in `Session::step` (`src/script.rs` line 95), on the host, in this order:
 
 `state`, `board::scan` and `work::deliver` stay as they are. The next `serve` cycle reads the new track tip. The publisher reads `running` through its row lock, and new rows wait on `after`.
 
-### Worker argv
+### Track branch
 
-`work` argv holds the track name and tip, and no track branch (`src/work.rs` lines 36-59). The host file `tracks` prefix stays in `serve`. So `serve` passes a new flag `--track-branch BRANCH`, and the worker pushes to it. The worker takes it from `serve`, because a host file reload can change the prefix under a running row.
+`work` argv holds the track name and tip, and no track branch (`src/work.rs` lines 36-59). A commit step with `publish` reads the `tracks` prefix of its project from the host file, as `reset` does (`src/main.rs` line 181). A commit step with no `publish` reads nothing new.
 
-`work` argv binds across versions (`docs/spec/contract.md` line 258), so the release needs a release note. A `serve` started before the upgrade spawns the new binary with no flag: the usage error exits 2 and rests the project until `serve` restarts.
+`work` argv and stdin stay as they are. A track with no `publish` keeps today's behavior, and an upgrade needs no release note and no `serve` restart.
+
+Each of these returns `Err` before any track moves: exit 2, no fail mark, the project rests, the row replays:
+- A host file that fails to load.
+- A project entry that is gone.
+- A branch of prefix plus track name that is absent, for example after a prefix change during the row.
 
 ### Crash and failure
 
@@ -86,11 +91,10 @@ Runs in `Session::step` (`src/script.rs` line 95), on the host, in this order:
 1. `step`: field `publish` on `Fields`, `Step::AgentCommit` and `Step::Commit`, with the path check.
 2. `config`: refuse `publish` in `merge`.
 3. `git`: commit one file on a tip, in the bare repo.
-4. `work`, `pool`: flag `--track-branch`, set by `serve`, passed to `Session::open`.
-5. `script`: `Session` gains `Git`, `Track` and the branch; the 7 steps above; event line `publish <project>/<track>/<id>`.
-6. `tests/e2e.rs`: the track from Done when.
-7. Docs: contract step table, git rights table, `work` argv, limits. `src/help/track.txt` and `src/help/track.yaml`.
-8. Architecture: replace "Track is input only" with "Tool writes a track only through `publish`", chokepoint `script::Session`. Change the "Host owns git" violation (line 29): agent text steers the loop through `publish` alone, past its checks. Change the track text trust (line 72): a published `run` step is agent text, bound by the container.
+4. `script`: `Session` gains `Git` and `Track`; the 7 steps above; the host file read on a `publish` step alone; event line `publish <project>/<track>/<id>`.
+5. `tests/e2e.rs`: the track from Done when.
+6. Docs: contract step table, git rights table, limits. `src/help/track.txt` and `src/help/track.yaml`.
+7. Architecture: replace "Track is input only" with "Tool writes a track only through `publish`", chokepoint `script::Session`. Change the "Host owns git" violation (line 29): agent text steers the loop through `publish` alone, past its checks. Change the track text trust (line 72): a published `run` step is agent text, bound by the container.
 
 ## Notes
 

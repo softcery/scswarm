@@ -1,12 +1,13 @@
 FROM fedora:44
 
 RUN dnf -y install git make python3 nodejs npm rust cargo rustfmt clippy \
-    gcc pkgconf-pkg-config openssl-devel ripgrep \
+    gcc pkgconf-pkg-config openssl-devel ripgrep jq \
  && dnf clean all
 
 # Pinned: the build cache keeps an unpinned install at its first version.
 ARG CLAUDE_CODE_VERSION=2.1.280
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} && npm cache clean --force
+COPY --chmod=755 scripts/claude-swarm /usr/local/bin/claude-swarm
 
 RUN useradd --uid 1001 --create-home dev
 USER dev

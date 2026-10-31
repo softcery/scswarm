@@ -73,7 +73,7 @@ Run: `podman exec <slot> sh -c <text>`. Track text, trusted as the team's own; n
 
 Literal commit: host commit, no exec.
 
-Each try: capture with deadline, judge, record, restart container. The restart runs when capture breaks too. Fails on non-zero exit, signal, `timeout`, blank commit reply, or no session id from an agent with `resume`. Next try after `wait`, doubling to `wait_max`. Each try and each commit appends one line to `~/swarm/log/<project>/<track>/<id>/run.jsonl`, or `merge.jsonl` for the merge into `to`. Chokepoint: `transcript::Transcript`.
+Each try: capture with deadline, judge, record, restart container. The restart runs when capture breaks too. Fails on non-zero exit, signal, `timeout`, blank commit reply, or no session id from an agent with `resume`. Next try after `wait`, doubling to `wait_max`. Each attempt start, try and commit appends one line, tagged by `kind`, to `~/swarm/log/<project>/<track>/<id>/run.jsonl`, or `merge.jsonl` for the merge into `to`. `start` opens `run.jsonl` before image and credentials. Chokepoint: `transcript::Transcript`, sole reader and writer; `log` and `status` read through it.
 
 Steps join through the worktree alone: no step output reaches a prompt, so prompts stay as typed.
 

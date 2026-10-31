@@ -2,7 +2,8 @@
   - scswarm.yaml sits at the root of the code. Each row reads it at the
     `to` tip.
   - `exec` runs in the container with the prompt as its last argument. It
-    prints JSON with `session_id` and `result`, or plain text. It returns
+    prints JSON with `session_id` and `result`, or plain text. Optional
+    `context: {used, window}` feeds `status`. It returns
     only once the turn's work ends.
   - The image holds every build tool and the agent CLI, set up to run
     with nobody at the keyboard.

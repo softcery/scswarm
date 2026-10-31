@@ -180,7 +180,7 @@ image: Containerfile.swarm
 default_agent: claude
 agents:
   claude:
-    exec: CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 claude --model opus --dangerously-skip-permissions --disallowedTools Agent Skill SendMessage ListAgents RemoteTrigger PushNotification -p --output-format json
+    exec: CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 claude-swarm --model opus --dangerously-skip-permissions --disallowedTools Agent Skill SendMessage ListAgents RemoteTrigger PushNotification -p --output-format json
     resume: --resume {session}
 commit: "Reply with the commit message for the work in this session. Message only."
 defaults:
@@ -193,6 +193,7 @@ merge:
 
 - `image` naming a path at the `to` tip builds for every row, cached by podman. Builds of one project run one at a time, so slots on one Containerfile share one image ID. Any other value names an image podman resolves.
 - `exec` runs in the container with the prompt appended as the last argument. It must print JSON holding `session_id` and `result`, or plain text taken as `result`. With `resume` set, a reply with no `session_id` fails the try.
+- `context: { used, window }` in the reply feeds the `context` column of `status`. `claude-swarm` is a wrapper in the image that adds it to the Claude Code reply: [scripts/claude-swarm](scripts/claude-swarm). A pipe in `exec` cannot do this: the prompt lands on the last command. Agents with no `context` show `-`.
 - `exec` must return only when the turn's work ends. The container restarts after every try, which kills anything left running. `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` stops Claude Code from sending a long command to the background and ending the turn with "the command is running in the background". Without it, the next step runs over half-done work. Measured on claude 2.1.280: switch off, turn ends at 13 s, output file never written; switch on, turn holds 209 s, file written. The switch leaves `nohup cmd &` from Bash open; the restart after the try kills it.
 - `--disallowedTools Agent Skill SendMessage ListAgents RemoteTrigger PushNotification` keeps the session flat: no subagent, no skill, no message to another session. A subagent burns the turn budget and writes files the transcript never sees.
 - `resume` is added from the second agent turn on, so one row is one session. Absent = every prompt opens a new session.
@@ -303,7 +304,8 @@ A track that fails a check skips; the others run. `status` prints the rest, then
 
 ```
 scswarm serve                   foreground loop over every project; run under systemd or launchd
-scswarm status [PROJECT]        one line per row of every track: project, row, state, branch, worker
+scswarm status [PROJECT]        one line per row of every track: project, row, state, branch,
+                                  worker, started (UTC), context (used/window, k tokens)
 scswarm status --tracks PREFIX  same, from the clone in the working directory
 scswarm log PROJECT ROW         transcripts, one block per try or commit: row session, then merge
 scswarm reset PROJECT ROW       delete swarm/<track>/<id>, every dependant branch, their land and

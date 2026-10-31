@@ -165,7 +165,7 @@ merge:
 ```
 
 - `image`: Containerfile path relative to root, or image name. Must hold every tool the agents and the project build need. The worker builds it for every row from a throwaway worktree of the base, so untracked and ignored files stay out of the build context. The image takes no tag: the slot container runs it by ID. An image name the worker pulls when the host lacks it. A failed build or pull fails the row. Agents and image travel together, so a track cannot name an agent its image lacks.
-- `agents.*.exec`: command run inside the container. Prompt appended as last argument. Must print JSON with `session_id` and `result` on stdout, or plain text as `result`. With `resume` set, a reply with no `session_id` fails the try. Must return only after the turn's work ends: a harness that sends work to the background and returns leaves the next step over half-done work, and the restart after the try kills that work.
+- `agents.*.exec`: command run inside the container. Prompt appended as last argument. Must print JSON with `session_id` and `result` on stdout, or plain text as `result`. With `resume` set, a reply with no `session_id` fails the try. Optional `context: { used, window }`, whole tokens: input of the last API call of the turn, and the model window. A `context` missing either number reads as absent. The tool reads no agent-native usage shape; a wrapper script in the image maps it. A pipe in `exec` cannot: the prompt lands on the last command. Must return only after the turn's work ends: a harness that sends work to the background and returns leaves the next step over half-done work, and the restart after the try kills that work.
 - `agents.*.resume`: arguments added from second turn on. `{session}` = id from first reply. Absent = every prompt opens a new session.
 - `commit`: prompt of every agent commit step. Asks for the commit message; the host commits with the reply. Required, non-empty.
 - `defaults`: policy per step kind, keys `prompt` and `run`, fields as on a step. `continue_on_error` sits under `run` alone. Checked at parse: an error names the field, for example `defaults.prompt.tries`.
@@ -231,14 +231,18 @@ merge:
 ```
 scswarm serve                   foreground loop over every project; run under systemd or launchd
 scswarm status [PROJECT]        one line per row of every track: project, row, state, branch,
-                                  worker; every project when none is named. A project
+                                  worker, started, context; every project when none is named.
+                                  started: last attempt start, UTC, YYYY-MM-DDTHH:MMZ. context:
+                                  used/window in thousands of tokens at the last passed agent
+                                  try of the row or its merge; `-` when no transcript holds it. A project
                                   with no bare repo yet exits 1 after the others print
                                   state: waiting, queued, running, failed, pushed, merged
 scswarm status --tracks PREFIX  same, read from the clone in the working directory; that
                                   clone fetches +refs/swarm/*:refs/swarm/*. Running reads as
-                                  queued, project reads `-`
-scswarm log PROJECT ROW         transcript, one block per try or commit: prompt, command or commit
-                                  message, then reply, stdout, stderr, faults
+                                  queued, project, started and context read `-`
+scswarm log PROJECT ROW         transcript, one block per attempt start, try or commit: base, or
+                                  prompt, command or commit message, then reply, stdout, stderr,
+                                  faults; a try header holds exit code and context
 scswarm reset PROJECT ROW       delete swarm/<track>/<id>, every dependant branch, their land refs
                                   and fail refs, here, then on the remote
 scswarm completions SHELL       completion script on stdout: bash, zsh, fish, elvish, powershell
@@ -275,7 +279,8 @@ Image: `image` names a Containerfile at the base, built with no tag and run by I
 - A prompt that starts with `{` must be quoted: bare `- {x}` reads as a flow mapping and fails. A brace later in the line is safe.
 - A prompt YAML reads as a bool or number, for example `- yes` or `- 42`, must be quoted.
 - A row's failure or crash costs its whole step list: the replay starts from the `to` tip, commits of earlier steps included.
-- A replay appends to the same transcript, so step numbers restart inside `run.jsonl`.
+- A replay appends to the same transcript, so step numbers restart inside `run.jsonl`. Each attempt opens with one `start` line.
+- `context` shows the last passed agent try. A turn in progress shows the fill of the turn before, or `-` on its first turn.
 - Output a later row needs must sit on a tracked path. The slot cleans with no `-x`: an ignored file misses the commit, and stays in the slot worktree for the next row on that slot.
 - The restart after each try kills every process in the container. A server a step needs starts and stops inside one `run`.
 - Slots share the host CPU. Timings from a `run` step carry noise from other slots: set `workers: 1`, or lock inside the script.

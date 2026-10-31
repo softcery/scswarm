@@ -98,20 +98,12 @@ Each of these returns `Err` before any track moves: exit 2, no fail mark, the pr
 
 ## Notes
 
-### Overlap with PR 24
+### Rejected: `passes`
 
-Open PR 24, `rfc/passes`, targets the same use case: a game built over hundreds of sessions. It keeps fixed rows and repeats them. The 2 RFCs answer one need, so one must be chosen before build.
-
-| | PR 24 `passes` | This RFC `publish` |
-|---|---|---|
-| Tool writes a track | No | Yes, 1 path |
-| Rows per round | Fixed by the track | Set by the agent |
-| Recipe per task | Fixed by the track | Copied by the agent, can drift |
-| Agent text steers the scheduler | No | Yes, inside the checks |
-| Total spend | Bound by `passes` | No bound |
-| New state | Pass refs, current-land rule, root rule, 3 worker paths | None |
-| Task files on `to` | Fixed names per pass | One name per task |
-| End of run | Failed `run` step such as `test ! -f docs/DONE` | All rows `pushed` |
+PR 24, closed 2026-10-31, repeated fixed rows up to `passes` times. A director must set the shape of each round, and fixed rows cannot change it. This RFC accepts 3 costs that `passes` avoided:
+- The tool writes a track, through 1 path.
+- The agent copies the recipe per task, and the copy can drift.
+- Total spend has no bound.
 
 ### Limits
 

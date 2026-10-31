@@ -11,7 +11,8 @@ Queue work:
 
 Finish a track:
   Do not use `reset` to clear rows: `reset` runs them again.
-  1. Wait until `scswarm status <project>` shows the track's rows merged.
+  1. Merge or drop `to`. Wait until `scswarm status <project>` shows no row
+     of the track running.
   2. git push <remote> --delete track/laser
   The rows leave `status` at the next fetch. `to` and its commits stay.
   To drop one row, delete it and its ids in `after`, then push the track.

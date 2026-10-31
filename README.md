@@ -378,7 +378,7 @@ git -C ~/swarm/PROJECT.git for-each-ref refs/swarm/
 
 **Track done.** Merge `to` into `from`. Each row reads `merged` once its last commit is an ancestor of `from`.
 
-**Clear a finished track.** Do not use `reset`: it runs the rows again. Wait until `status` shows the track's rows `merged`, then run `git push <remote> --delete track/NAME` against the project's `remote`. The rows leave `status` at the next fetch. `to` and its commits stay. Row branches, land refs and fail refs stay too, off the board, until `reset` of each row. To drop one row, delete it and its ids in `after` from `SWARM.yaml`, then push the track.
+**Clear a finished track.** Do not use `reset`: it runs the rows again. Merge or drop `to`, wait until `status` shows no row of the track `running`, then run `git push <remote> --delete track/NAME` against the project's `remote`. The rows leave `status` at the next fetch. `to` and its commits stay. Row branches, land refs and fail refs stay too, off the board, until `reset` of each row. To drop one row, delete it and its ids in `after` from `SWARM.yaml`, then push the track.
 
 ## Limits
 

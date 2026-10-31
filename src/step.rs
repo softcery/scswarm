@@ -186,7 +186,7 @@ impl Fields {
                 })
             }
             (None, None, Some(Some(_))) => {
-                Err("a `commit` step with a message must hold no other field".to_string())
+                Err("a `commit` step with a message must hold no policy field".to_string())
             }
             _ => Err(format!(
                 "must hold exactly one of the keys `prompt`, `run`, `commit`, holds {}",
@@ -292,7 +292,9 @@ impl<'de> Visitor<'de> for WrittenVisitor {
 }
 
 /// Key present counts even with no value: `commit:` reads as `Some(None)`.
-fn present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Option<String>>, D::Error> {
+pub fn present<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error> {
     Option::<String>::deserialize(deserializer).map(Some)
 }
 
@@ -347,7 +349,7 @@ mod tests {
         assert_eq!(
             steps[3],
             Step::Commit {
-                message: "bench: hybrid retriever".to_string()
+                message: "bench: hybrid retriever".to_string(),
             }
         );
         let Step::Run {

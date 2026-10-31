@@ -5,7 +5,14 @@
     timeout            seconds per try; no limit if absent
     continue_on_error  `run` alone: go on after the last failed try
 
+  Field on a row, optional:
+    publish            file at the worktree root; the host checks it before the
+                       last step, then commits it alone as SWARM.yaml on the
+                       track branch; its `from` and `to` must equal this track
+
   - SWARM.yaml sits at the root of the track branch, alone.
+  - The tool writes a track through `publish` alone. Total spend across rows
+    then has no bound.
   - The last step of a row is a commit.
   - Steps of a row share one worktree and one agent session.
   - `after` names rows of the same track. For another track's output, set

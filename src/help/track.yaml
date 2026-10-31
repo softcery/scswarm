@@ -13,6 +13,7 @@
         - commit: "bench: hybrid retriever"  # the host commits this text
     - id: review
       after: [retriever] # waits until these rows are pushed
+      publish: next.yaml # optional: this file becomes the next SWARM.yaml
       steps:
         - "Read bench/out.txt. Audit the retriever swap. Fix every gap."
         - commit:

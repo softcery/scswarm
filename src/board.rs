@@ -33,6 +33,8 @@ pub struct Track {
     pub to: String,
     pub priority: i32,
     drafts: Vec<Draft>,
+    /// What errors call the file this came from.
+    label: String,
 }
 
 /// Rows of one track, settled against `scswarm.yaml` at the `to` tip.
@@ -48,8 +50,13 @@ pub struct Row {
     /// Row indices this row waits for, resolved at parse time.
     pub after: Vec<usize>,
     pub agent: String,
+    /// File at the worktree root that becomes the next track file.
+    pub publish: Option<String>,
     pub steps: Steps,
 }
+
+/// Text that passed `Track::check_next`: all that may reach a track branch.
+pub struct NextFile(String);
 
 /// Read every track branch under `prefix`. A failed check skips that track alone.
 pub fn scan(git: &Git, prefix: &str) -> Result<Scan> {
@@ -125,6 +132,9 @@ struct Draft {
     after: Vec<String>,
     #[serde(default)]
     agent: Option<String>,
+    /// `Some(None)`: key present with no value.
+    #[serde(default, deserialize_with = "step::present")]
+    publish: Option<Option<String>>,
     #[serde(default)]
     steps: Vec<step::Written>,
 }
@@ -150,7 +160,11 @@ impl Track {
                 git::REF_RULE
             )));
         }
-        let written: Written = yaml::parse(&label(name), text)?;
+        Self::read(name, tip, text, label(name))
+    }
+
+    fn read(name: &str, tip: &str, text: &str, label: String) -> Result<Self> {
+        let written: Written = yaml::parse(&label, text)?;
         let track = Self {
             name: name.to_string(),
             tip: tip.to_string(),
@@ -159,6 +173,7 @@ impl Track {
             to: written.to,
             priority: written.priority,
             drafts: written.rows,
+            label,
         };
         track.check_file()?;
         Ok(track)
@@ -174,6 +189,38 @@ impl Track {
             .map(|(at, draft)| self.row(at, draft, &index, config))
             .collect::<Result<Vec<Row>>>()?;
         Ok(Board { rows })
+    }
+
+    /// Check `text` of worktree file `file` as the next file of this track: same `from`
+    /// and `to`, row `id` kept with no `after`, every row settled against each config.
+    pub fn check_next(
+        &self,
+        file: &str,
+        text: String,
+        id: &str,
+        configs: &[&Config],
+    ) -> Result<NextFile> {
+        let label = format!("track `{}` next file `{file}`", self.name);
+        let next = Self::read(&self.name, &self.tip, &text, label)?;
+        for (field, running, written) in
+            [("from", &self.from, &next.from), ("to", &self.to, &next.to)]
+        {
+            if running != written {
+                return Err(next.invalid(&format!(
+                    "field `{field}` must name `{running}`, the branch of the running track"
+                )));
+            }
+        }
+        let carried = next.drafts.iter().find(|draft| draft.id == id);
+        if !carried.is_some_and(|draft| draft.after.is_empty()) {
+            return Err(next.invalid(&format!(
+                "field `rows` must hold row `{id}` with no `after`: a retry of this row reads this file"
+            )));
+        }
+        for config in configs {
+            next.board(config)?;
+        }
+        Ok(NextFile(text))
     }
 
     /// Commit `to` starts at: `at` on `from`, else the `from` tip. Read until `to`
@@ -227,6 +274,16 @@ impl Track {
                     &format!(
                         "field `id` must hold no `/` and pass as a ref: {}",
                         git::REF_RULE
+                    ),
+                ));
+            }
+            if draft.publish.as_ref().is_some_and(|file| !root_file(file)) {
+                return Err(self.bad(
+                    at,
+                    draft,
+                    &format!(
+                        "field `publish` must name a file at the worktree root: no `/`, not `.`, `..` or `{}`",
+                        git::WORKTREE_LINK
                     ),
                 ));
             }
@@ -310,6 +367,7 @@ impl Track {
             id: draft.id.clone(),
             after: self.after(at, draft, index)?,
             agent: agent.to_string(),
+            publish: draft.publish.clone().flatten(),
             steps,
         })
     }
@@ -337,12 +395,18 @@ impl Track {
             true => format!("row `{}`", draft.id),
             false => format!("row {}", at + 1),
         };
-        Error::Invalid(format!("{} {row}: {what}", label(&self.name)))
+        Error::Invalid(format!("{} {row}: {what}", self.label))
     }
 
     /// Fault of this track, named by track and file.
     pub fn invalid(&self, what: &str) -> Error {
-        Error::Invalid(format!("{}: {what}", label(&self.name)))
+        Error::Invalid(format!("{}: {what}", self.label))
+    }
+}
+
+impl NextFile {
+    pub fn text(&self) -> &str {
+        &self.0
     }
 }
 
@@ -419,6 +483,17 @@ fn walk(
 /// Track name or row id: one ref path part, so `<track>/<id>` splits one way.
 pub fn one_name(name: &str) -> bool {
     !name.contains('/') && git::valid_ref(name)
+}
+
+/// One name at the worktree root, so no symlink directory reaches a host file, and
+/// no worktree link: the host deletes this file before the last commit.
+fn root_file(file: &Option<String>) -> bool {
+    file.as_deref().is_some_and(|name| {
+        !name.trim().is_empty()
+            && !name.contains('/')
+            && !matches!(name, "." | "..")
+            && !name.eq_ignore_ascii_case(git::WORKTREE_LINK)
+    })
 }
 
 /// File name in errors: track name and file.
@@ -531,6 +606,57 @@ rows:
             why.contains("rag-04-retriever -> rag-04-review -> rag-04-retriever"),
             "{why}"
         );
+    }
+
+    #[test]
+    fn next_file_keeps_the_branches_and_the_running_row() {
+        let config = Config::parse(CONFIG).expect("test config must parse");
+        let running = track(EXAMPLE).expect("example must parse");
+        let check =
+            |text: &str, id| running.check_next("next.yaml", text.to_string(), id, &[&config]);
+        check(EXAMPLE, "rag-04-retriever").expect("same file must pass");
+        for (text, id, field) in [
+            (
+                EXAMPLE.replace("feat/laser", "feat/other"),
+                "rag-04-retriever",
+                "`to`",
+            ),
+            (EXAMPLE.to_string(), "gone", "`rows`"),
+            (EXAMPLE.to_string(), "rag-04-review", "`rows`"),
+        ] {
+            let why = check(&text, id).err().expect("next file must fail");
+            let why = why.to_string();
+            assert!(why.contains("next file `next.yaml`"), "{why}");
+            assert!(why.contains(&format!("field {field}")), "{why}");
+        }
+        let other = Config::parse(&CONFIG.replace("  codex:\n    exec: codex exec\n", ""))
+            .expect("other config must parse");
+        running
+            .check_next(
+                "next.yaml",
+                EXAMPLE.to_string(),
+                "rag-04-retriever",
+                &[&config, &other],
+            )
+            .err()
+            .expect("an agent one config lacks must fail");
+    }
+
+    #[test]
+    fn publish_names_one_file_at_the_worktree_root() {
+        let with = |value: &str| {
+            EXAMPLE.replace(
+                "- id: rag-04-review",
+                &format!("- id: rag-04-review\n    publish: {value}"),
+            )
+        };
+        let settled = board(&with("next.yaml")).expect("a root file must pass");
+        let row = settled.row("rag-04-review").expect("row must stand");
+        assert_eq!(row.publish.as_deref(), Some("next.yaml"));
+        for value in ["a/next.yaml", ".", "..", ".GIT", ""] {
+            let why = track(&with(value)).expect_err(value).to_string();
+            assert!(why.contains("field `publish`"), "{value}: {why}");
+        }
     }
 
     #[test]

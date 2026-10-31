@@ -11,6 +11,7 @@ const BRANCHES: &str = "swarm/";
 /// Kinds of kept ref, under `git::KEPT`.
 const LAND: &str = "land/";
 const FAIL: &str = "fail/";
+const PUBLISH: &str = "publish/";
 
 /// Row standing. Read from git and row locks, never stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +138,11 @@ impl Key {
     /// Ref holding the last commit of the row's session. Sole record of finished work.
     pub fn land_ref(&self) -> String {
         format!("{}{LAND}{self}", git::KEPT)
+    }
+
+    /// Ref holding the track commit of the row until its push ends.
+    pub fn publish_ref(&self) -> String {
+        format!("{}{PUBLISH}{self}", git::KEPT)
     }
 
     /// Track tip and `to` tip of the last failed attempt, in that order.

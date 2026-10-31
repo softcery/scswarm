@@ -28,9 +28,10 @@ Facts that follow from the table:
 - A `mounts` entry shared by the slots of one project, for example a cargo registry, lets one row change what the next row of that project builds with. The host file refuses a host path in the `mounts` of two projects.
 - Projects share one unix user, the network and `devices`. A container escape reaches every project. For a stronger wall, run one swarm per user or per VM.
 - The agent never writes git refs. The host commits the worktree. The gitdir mounts read-only, so the agent cannot add a hook or change git config.
+- A row with `publish` lets agent text set the content of its own track branch, past the host checks. Its prompts and `run` steps then run with the credentials the `env` rule binds to that track. Agent text cannot change `from` or `to`, or reach another track.
 - Agent permission flags, for example `--dangerously-skip-permissions`, come from `exec` in your `scswarm.yaml`. scswarm adds none.
 - Review each `to` branch before you merge it. A merge runs nothing, but your next build runs the agent's code on the host.
-- The host pushes `to` and `refs/swarm/*` with its own deploy key or token. No container sees it. Scope it to one repo: one key per project.
+- The host pushes `to`, `refs/swarm/*` and, through `publish`, a track branch with its own deploy key or token. No container sees it. Scope it to one repo: one key per project.
 - A track names its `from` and `to`. Branch push rights on the remote decide who can point rows at which branch.
 
 ## Out of scope

@@ -205,6 +205,7 @@ mod tests {
             project: "alpha".parse().expect("project name must pass"),
             slot: 2,
             track: "laser".to_string(),
+            track_branch: "track/laser".to_string(),
             id: "rag-04-review".to_string(),
             track_tip: "89abcdef0123456789abcdef0123456789abcdef".to_string(),
             base: "0123456789abcdef0123456789abcdef01234567".to_string(),

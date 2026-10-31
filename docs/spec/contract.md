@@ -4,7 +4,7 @@ What a project gives the swarm and what it gets back. Binding.
 
 ## Track file
 
-Each track is a branch named `<tracks><name>`, for example `track/laser`. Its root holds `SWARM.yaml`. The branch is orphan: it shares no history with code. Tool reads, never writes.
+Each track is a branch named `<tracks><name>`, for example `track/laser`. Its root holds `SWARM.yaml`. The branch is orphan: it shares no history with code. Tool reads it. A commit step with `publish` alone writes it: see [Publish](#publish).
 
 ```yaml
 from: main
@@ -46,6 +46,7 @@ rows:
 - `id` becomes a ref, so it must pass `git check-ref-format` and hold no `/`: no space, `..`, `~^:?*[`, control character, leading `-`, or `.lock` end. Write it lowercase ASCII: git refs are case-sensitive, the macOS default filesystem is not.
 - `after`: list of ids of the same track. Absent = none.
 - `agent`: key in `scswarm.yaml` `agents`. Absent = `default_agent`. Runs every prompt and agent commit of the row.
+- `publish`: file name at the worktree root. Absent = the row publishes nothing. See [Publish](#publish).
 - `steps`: run in order, one session. Last step must be a commit step. Anchor at first use carries a repeated step, alias points back.
 
 Step kinds:
@@ -71,7 +72,7 @@ Step kinds:
 | `continue_on_error` | `run` alone: spent tries move to the next step | false |
 
 - Lookup: step field, then `defaults.<kind>` of `scswarm.yaml`, then the default above. Agent commit reads `defaults.prompt`.
-- A literal commit takes no other field.
+- A literal commit takes no policy field.
 - Each case below skips the track. `status` prints the other tracks, then exits 1 and names the track and the field, and the row by `id`, or by its place when `id` is absent or fails its check. A track name that fails its check is named by its fault alone. `serve` reports the same text as `skip`, once per cause, assigns no row of that track, and lets rows in flight finish; the next valid track tip resumes it:
   - track name with `/`, or one git refuses as a ref
   - `from` or `to` git refuses as a branch, `to` equal to `from`, `to` under the `tracks` prefix
@@ -85,9 +86,58 @@ Step kinds:
   - empty `steps`, or a last step that is not a commit
   - a step with no kind key or two, blank text, unknown field, a field its kind does not take
   - `tries` or `timeout` of 0, or a resolved `wait` above the resolved `wait_max`
+  - blank `publish`, a value with `/`, or equal to `.`, `..` or `.git` in any letter case: a deeper path can pass through a symlink directory to a host file, and the host deletes this file
 - Step errors name the step number and field: ``track `laser` SWARM.yaml row `rag-04-retriever`: field `steps` step 4: field `timeout` must be seconds, 1 or more, or stay absent``.
 - Row removed = row gone from swarm. Its commits stay on `to`; branch and land ref stay until `reset`.
 - Track branch deleted on the remote = each of its rows removed, at the next fetch. `to` stays.
+
+### Publish
+
+A row writes the next track file of its own track: rows after it, kept off `to`.
+
+```yaml
+from: main
+to: build
+rows:
+  - id: direct-0002            # publisher, carried over, its `after` removed
+    publish: next.yaml
+    steps: &direct
+      - "/direct"
+      - commit:
+  - id: task-tank-recoil
+    after: [direct-0002]
+    steps:
+      - "/execute docs/tasks/next/task-tank-recoil.yaml."
+      - commit:
+  - id: direct-0003
+    after: [task-tank-recoil]
+    publish: next.yaml
+    steps: *direct
+```
+
+Host, in order:
+
+1. Run every step but the last.
+2. Read the file. Anything but a regular UTF-8 file spends the row: absent, a symlink, a directory, or a file the host cannot read. Any other read fault is a host fault: exit 2, no fail mark.
+3. Parse it as a track file. Check `from` and `to` equal the running track, and that it holds the running row with no `after`: a retry of the row reads this file. Settle its rows against `scswarm.yaml` at the row base and in the worktree, itself a regular file. A failure spends the row and reaches `scswarm log`.
+4. Run the last step. An agent commit gets its message here, and a failure spends the row. The text read in step 2 is the text that lands.
+5. Delete the file from the worktree. Commit the row.
+6. Write a commit on the track tip the row ran against, in the bare repo. Its tree holds `SWARM.yaml` alone. Write the land ref and `refs/swarm/publish/<track>/<id>` in one transaction.
+7. Push that commit while the remote branch holds that tip. Moved or deleted: the file drops, and the track keeps its content. Event `publish-dropped`, a fault line in `scswarm log`, and the row goes on. Turned down by the remote: the row spends.
+8. Delete the publish ref. Merge the row into `to`.
+
+- A next file holds the current round. Rows that landed leave it. Past rounds stay in the track log.
+- To end a run, the last publisher publishes a file with only itself.
+- The carried row runs its steps again only after `reset`: a land ref stands from step 6 on.
+
+| Event | Result |
+|---|---|
+| Kill before the transaction | No track move, no land ref. Row replays from its own track file |
+| Kill after the transaction | Land ref and publish ref stand. Next attempt skips the session, pushes, merges |
+| Remote turns the push down | Fail refs mark the row. Land ref and publish ref stand. A retry after a move of `to` pushes again with no new session. A moved track drops the file |
+| Human push or delete of the track during the row | File drops. Row merges into `to`. New rows of that file never appear |
+| Merge into `to` fails after publish | Fail ref holds the old tip, so the row reads queued. Next attempt skips the session and merges once more. A second failure holds the new tip and reads `failed` |
+| Task row fails | Next publisher waits on `after`. Run stops until a commit on `to` or a push to the track |
 
 ## `host.yaml`
 
@@ -173,8 +223,8 @@ merge:
 
 ## Git
 
-- Remote: `remote` of the project entry. Humans push `from` branches, track branches, and commits on `to`. The tool pushes `to`, land refs and fail refs.
-- Workers and `reset` write land refs and fail refs in the bare repo alone. The project's feed thread, each `poll` they changed since its last push, and `reset`, when done, push `refs/swarm/*` with force and prune: the remote then holds exactly the bare repo's set.
+- Remote: `remote` of the project entry. Humans push `from` branches, track branches, and commits on `to`. The tool pushes `to`, land refs and fail refs, and a track branch through `publish` alone, while that branch holds the tip the row ran against.
+- Workers and `reset` write land refs, publish refs and fail refs in the bare repo alone. The project's feed thread, each `poll` they changed since its last push, and `reset`, when done, push `refs/swarm/*` with force and prune: the remote then holds exactly the bare repo's set.
 - Bare repo `~/swarm/<project>.git`, `origin` = `remote`, refspec `+refs/heads/*:refs/remotes/origin/*`: the layout of any clone. One feed thread per project makes every network call of `serve`; the scheduler cycle reads local refs alone. The feed makes the bare repo on first sight of the project, checks `origin` and writes the refspec at start and after a failed fetch, so a hand-edited refspec heals. One fetch per try. A failed open, fetch or mirror reports `skip` once per cause, and its project rests: no network call and no row of it until the rest ends. The rest starts at `fetch` seconds and doubles per fault in a row, up to 15 min; a good sync ends it. A failed local read skips the project for that cycle and reports once. Other projects run. `status` reads the last fetch.
 - Every git call to a remote runs with `core.sshCommand=ssh -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4`, `http.lowSpeedLimit=1000` and `http.lowSpeedTime=60`. A dead or stalled remote fails the call; git exits on its own and drops its locks.
 - A new bare repo fetches the land refs and fail refs of the remote once, before any mirror. Without that fetch, the first push of `refs/swarm/*` deletes them on the remote. The repo grows at `~/swarm/<project>.git.partial` and takes its name once that fetch lands, so a fault leaves no half-made repo.
@@ -185,7 +235,9 @@ merge:
 | `refs/remotes/origin/*` | fetched remote branches | bare repo |
 | `swarm/<track>/<id>` | row in progress, then its last commit | bare repo |
 | `<to>` | track output | remote, pushed with no force |
+| `<tracks><track>` | track file | remote; humans push it, the tool only through `publish`, with a lease on the tip the row ran against |
 | `refs/swarm/land/<track>/<id>` | last commit of the row session | bare repo, mirrored to remote |
+| `refs/swarm/publish/<track>/<id>` | track commit of a landed row, until its push ends | bare repo, mirrored to remote |
 | `refs/swarm/fail/<track>/<id>/track` | track tip of the failed attempt | bare repo, mirrored to remote |
 | `refs/swarm/fail/<track>/<id>/to` | `to` tip of the failed attempt | bare repo, mirrored to remote |
 
@@ -211,7 +263,7 @@ merge:
 - Precedence: merged, pushed, running, failed, then queued or waiting.
 - A failed row retries when the track tip or the `to` tip moves, so a broken row costs one attempt per tip pair, not one per cycle. Fail refs sit outside `refs/heads/`, so they list as no branch.
 - A branch with no land ref holds a session cut short, unless a worker holds the row lock. `serve` reads it as queued and the worker replays the row from the `to` tip.
-- A pushed row clears its own fail refs. `reset <track>/<id>` clears branch, land ref and fail refs of the row and of every dependant in its track, here, then on the remote.
+- A pushed row clears its own fail refs. `reset <track>/<id>` clears branch, land ref, publish ref and fail refs of the row and of every dependant in its track, here, then on the remote.
 - A try fails on non-zero exit, a signal, `timeout`, a blank agent commit reply, or no `session_id` from an agent with `resume`. A step whose tries are spent fails the row and marks it, except a `run` step with `continue_on_error`.
 - A git or podman failure in a slot is no row failure. It writes no mark: the worker exits 2, `serve` reports `skip` for the project once per cause, and the project rests: no row of it until the rest ends, then the row replays. The rest starts at 60 s and doubles per fault in a row, up to 15 min. Only a worker of the project that exits 0 ends the doubling and clears the reported causes. Workers on other slots run on. A failed image build or pull is a row failure: the worker reaches podman before it builds, so a podman that answers nothing stays a machine fault.
 - Locks: flock on 5 standing directories, no file written. The kernel drops a lock when its holder dies, so a crash leaves nothing to clean.
@@ -242,11 +294,11 @@ scswarm status --tracks PREFIX  same, read from the clone in the working directo
                                   queued, project reads `-`
 scswarm log PROJECT ROW         transcript, one block per try or commit: prompt, command or commit
                                   message, then reply, stdout, stderr, faults
-scswarm reset PROJECT ROW       delete swarm/<track>/<id>, every dependant branch, their land refs
-                                  and fail refs, here, then on the remote
+scswarm reset PROJECT ROW       delete swarm/<track>/<id>, every dependant branch, their land refs,
+                                  publish refs and fail refs, here, then on the remote
 scswarm completions SHELL       completion script on stdout: bash, zsh, fish, elvish, powershell
 scswarm man DIR                 one roff page per visible command into DIR, which must exist
-scswarm work PROJECT --slot N --track NAME --row ID --track-tip SHA --base SHA
+scswarm work PROJECT --slot N --track NAME --track-branch BRANCH --row ID --track-tip SHA --base SHA
              [--env VAR=FILE]... [--mount HOST:GUEST]... [--device PATH]...
                                 internal, hidden from --help: one row attempt; `serve` spawns one
                                   per assignment. Reads the track file at the track tip, config at
@@ -318,6 +370,7 @@ Image: `image` names a Containerfile at the base, built with no tag and run by I
 - `launchctl bootout` leaves rows in flight running. Hard stop: `pkill -f 'scswarm work '`. launchd has no command that kills an abandoned process group.
 - macOS: `devices` must stay empty. Device nodes live in the podman machine VM, so the host check fails each entry.
 - macOS: `mounts` host sides must sit under a podman machine share: `/Users`, `/private`, `/var/folders` by default.
+- macOS: a file the host just deleted, for example through the slot clean, fails to open for write in the container with `No such file or directory` for under 1 s, checked 2026-10-31 on one podman machine: 0 s wait failed, 1 s passed. A row that writes such a file in its first step and masks the exit passes with no file.
 - macOS: a Mac asleep pauses the VM. Steps in flight can hit `timeout` and spend tries.
 - macOS: the podman machine does not start at login. Until it runs, workers exit 2 and their projects rest.
 - systemd logs a left-over process line per running worker at each restart. Expected under `KillMode=process`.
@@ -335,4 +388,21 @@ Image: `image` names a Containerfile at the base, built with no tag and run by I
 - Each cycle reads every track of every project with git subprocesses. Cycle time against project count is unmeasured.
 - Unverified: GitHub limits on ssh fetches from one host. 30 projects at `fetch: 60` make 30 fetches a minute.
 - No token budget. Agent flags in `exec` carry any cap.
+- `publish`: spend has no bound across rows. A publisher that keeps publishing runs until usage ends.
+- `publish`: a failed row stops the run. Nothing alerts on a stop or an end: `status` shows `failed` or every row `pushed`.
+- `publish`: any human push of the track during a publisher row drops its file, a small note included. The event line and the transcript alone say so, and the run stops until someone pushes a new file.
+- `publish`: of two publishers on one track tip, the first push wins and the second file drops. The second row still lands, but a failed merge leaves it off the new file: no retry.
+- `publish`: a change to `scswarm.yaml` on `to` during the row, after the base, can skip the track after the push, until a push to the track or `to` makes it valid.
+- `publish`: each publish moves the track tip, so each failed row kept in the file retries once.
+- `publish`: `reset` of a publisher runs the carried row as the current file writes it, and any file it publishes replaces the track.
+- `publish`: a file that fails its check spends the whole row, and the agent gets no second try.
+- `publish`: wrong `after` links are valid. New rows with no `after` on the publisher start before its task files stand on `to`.
+- `publish`: a new row with an id whose land commit is on `to` reads `pushed` and never runs. The run looks stalled. The project command must pick new ids.
+- `publish`: `status` prints the current track file alone. Old row ids come from the track log.
+- `publish`: the agent can edit code in a publisher row, and any row can edit the project command. No tool check stops either.
+- `publish`: other files on the track branch drop. The root holds `SWARM.yaml`.
+- `publish`: a remote that protects track branches declines the push and fails the row.
+- `publish`: the agent can change `priority`. It orders tracks inside one project alone.
+- `publish`: the host reads the file with no size cap, so a big file costs host memory.
+- `publish`: land refs and row branches of past rounds stay. Each `serve` cycle reads every kept ref. Cost at hundreds of rows is unmeasured.
 - GitHub accepts `refs/swarm/*` from a write deploy key: create, fetch in a fresh clone, delete, all checked 2026-10-22, private repo on a personal account, ssh. The refs stay out of the web UI branch list. Unverified: organization repos, GitHub Enterprise, branch rulesets that target all refs, and the delete of a ref the remote lacks, which git 2.39 over a local path accepts with exit 0.

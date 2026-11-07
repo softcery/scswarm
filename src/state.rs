@@ -51,13 +51,16 @@ pub struct Snapshot {
     /// `to` tip, else the commit `to` starts at.
     pub base: String,
     pub states: Vec<State>,
+    /// `scswarm.yaml` field `image` at the base.
+    pub image: Option<String>,
 }
 
 /// Rows of `track` settled at its base, each with its state. `held`: a worker
 /// holds the row.
 pub fn snapshot(git: &Git, track: Track, held: &dyn Fn(&Key) -> Result<bool>) -> Result<Snapshot> {
     let base = base(git, &track)?;
-    let board = track.board(&Config::at(git, &base)?)?;
+    let config = Config::at(git, &base)?;
+    let board = track.board(&config)?;
     let facts = Facts {
         git,
         kept: git.refs(git::KEPT)?,
@@ -76,6 +79,7 @@ pub fn snapshot(git: &Git, track: Track, held: &dyn Fn(&Key) -> Result<bool>) ->
         board,
         base,
         states,
+        image: config.image,
     })
 }
 

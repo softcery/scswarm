@@ -15,6 +15,7 @@ use crate::lock;
 use crate::paths::{self, Project};
 use crate::pool::{self, Demand, Pool, Queue};
 use crate::repo;
+use crate::runner::{Admit, Runner};
 use crate::state::{self, Address, Snapshot, State};
 use crate::work::Job;
 
@@ -57,15 +58,18 @@ struct Lane {
     workers: Seen,
     offline: Latch,
     skipped: Latch,
+    ignored: Latch,
     /// Track tip and base last reported, by track name.
     tips: BTreeMap<String, (String, String)>,
 }
 
 impl Server {
     fn open() -> Result<Self> {
+        let host = Host::load()?;
+        host.runner.check(host.workers, &host.gids())?;
         Ok(Self {
             pool: Pool::open()?,
-            host: Host::load()?,
+            host,
             lanes: BTreeMap::new(),
             retired: BTreeMap::new(),
             turn: 0,
@@ -95,7 +99,7 @@ impl Server {
             }
         }
         let snapshots = self.read();
-        let idle = self.pool.converge(self.host.workers)?;
+        let idle = self.pool.converge(self.host.workers, &self.host.runner)?;
         let demands: Vec<Demand> = snapshots
             .iter()
             .map(|(project, held)| Demand {
@@ -123,6 +127,9 @@ impl Server {
                 env: entry.env(&track.name).to_vec(),
                 mounts: entry.mounts.clone(),
                 devices: self.host.devices.clone(),
+                runner: self.host.runner.kind(),
+                uid: self.host.runner.uid(),
+                gid: entry.gid,
             })?;
         }
         Ok(())
@@ -175,6 +182,7 @@ impl Server {
     /// project, in host file order.
     fn read(&mut self) -> Vec<(Project, Vec<Snapshot>)> {
         let (host, pool) = (&self.host, &self.pool);
+        let runner = &host.runner;
         thread::scope(|scope| {
             let running: Vec<_> = self
                 .lanes
@@ -183,7 +191,7 @@ impl Server {
                     let entry = host.projects.get(project)?;
                     Some((
                         project,
-                        scope.spawn(move || lane.read(project, entry, pool)),
+                        scope.spawn(move || lane.read(project, entry, runner, pool)),
                     ))
                 })
                 .collect();
@@ -199,10 +207,20 @@ impl Server {
         })
     }
 
-    /// Reread host file each cycle. Unreadable: keep last good copy, editor mid-save
-    /// must not stop the loop.
+    /// Reread host file each cycle. Unreadable, or a runner, slot or project group
+    /// the host cannot run: keep last good copy, editor mid-save must not stop the loop.
     fn reload(&mut self) {
-        match Host::load() {
+        let old = &self.host;
+        let checked = Host::load().and_then(|host| {
+            let moved = host.runner != old.runner
+                || host.workers > old.workers
+                || host.gids() != old.gids();
+            if moved {
+                host.runner.check(host.workers, &host.gids())?;
+            }
+            Ok(host)
+        });
+        match checked {
             Ok(host) => {
                 self.host = host;
                 self.stale.report(&[], event::stale);
@@ -221,6 +239,7 @@ impl Lane {
             workers: Seen::default(),
             offline: Latch::default(),
             skipped: Latch::default(),
+            ignored: Latch::default(),
             tips: BTreeMap::new(),
         })
     }
@@ -245,7 +264,13 @@ impl Lane {
 
     /// Tracks of a project whose feed is up and whose workers do not rest. A read
     /// fault skips the project this cycle.
-    fn read(&mut self, project: &Project, entry: &Entry, pool: &Pool) -> Vec<Snapshot> {
+    fn read(
+        &mut self,
+        project: &Project,
+        entry: &Entry,
+        runner: &Runner,
+        pool: &Pool,
+    ) -> Vec<Snapshot> {
         if self.feed.health() != Health::Up || self.rest.as_ref().is_some_and(Backoff::holds) {
             return Vec::new();
         }
@@ -256,10 +281,16 @@ impl Lane {
             })
         };
         let report = |why: &Error| event::skip(project, why);
-        match repo::open(project).and_then(|repo| read(&repo, entry, &held)) {
-            Ok((snapshots, faults)) => {
+        match repo::open(project).and_then(|repo| read(&repo, entry, runner, &held)) {
+            Ok(Read {
+                snapshots,
+                faults,
+                ignored,
+            }) => {
                 self.offline.report(&[], report);
                 self.skipped.report(&faults, report);
+                self.ignored
+                    .report(&ignored, |why: &Error| event::ignore(project, why));
                 self.report(project, &snapshots);
                 snapshots
             }
@@ -285,16 +316,27 @@ impl Lane {
     }
 }
 
-/// Every track that passes its checks and whose `to` stands, with rows and
-/// states, plus the fault of each track skipped. Git failing faults the project.
+/// One read of one project.
+struct Read {
+    /// Tracks that pass their checks and whose `to` stands, with rows and states.
+    snapshots: Vec<Snapshot>,
+    /// Fault of each track skipped.
+    faults: Vec<Error>,
+    /// Field the runner does not read, once for the project.
+    ignored: Vec<Error>,
+}
+
+/// Every track of the project, checked against the runner. Git failing faults the project.
 fn read(
     repo: &Git,
     entry: &Entry,
+    runner: &Runner,
     held: &dyn Fn(&state::Key) -> Result<bool>,
-) -> Result<(Vec<Snapshot>, Vec<Error>)> {
+) -> Result<Read> {
     let scan = board::scan(repo, &entry.tracks)?;
     let mut faults = scan.faults;
     let mut snapshots = Vec::new();
+    let mut ignored = Vec::new();
     for track in scan.tracks {
         if let Err(why) = credential::check(entry.env(&track.name)) {
             faults.push(track.invalid(&why.to_string()));
@@ -303,13 +345,32 @@ fn read(
         if repo.commit_of(&git::remote_branch(&track.to))?.is_none() {
             continue;
         }
-        match state::snapshot(repo, track, held) {
-            Ok(snapshot) => snapshots.push(snapshot),
-            Err(why @ Error::Invalid(_)) => faults.push(why),
+        let snapshot = match state::snapshot(repo, track, held) {
+            Ok(snapshot) => snapshot,
+            Err(why @ Error::Invalid(_)) => {
+                faults.push(why);
+                continue;
+            }
             Err(why) => return Err(why),
+        };
+        match runner.admits(snapshot.image.as_deref()) {
+            Admit::Run => {}
+            Admit::Skip(why) => {
+                faults.push(snapshot.track.invalid(why));
+                continue;
+            }
+            Admit::Ignore(why) if ignored.is_empty() => {
+                ignored.push(Error::Invalid(why.to_string()));
+            }
+            Admit::Ignore(_) => {}
         }
+        snapshots.push(snapshot);
     }
-    Ok((snapshots, faults))
+    Ok(Read {
+        snapshots,
+        faults,
+        ignored,
+    })
 }
 
 /// Queued rows of one track: new rows, rows cut short, rows whose land commit left `to`.

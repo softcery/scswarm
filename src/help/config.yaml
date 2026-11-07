@@ -1,4 +1,4 @@
-  image: Containerfile.swarm  # Containerfile in the repo, or an image name
+  image: Containerfile.swarm  # Containerfile in the repo, or an image name (podman)
   default_agent: claude
   agents:
     claude:

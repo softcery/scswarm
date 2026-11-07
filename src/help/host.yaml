@@ -1,12 +1,14 @@
   workers: 3                  # slots, shared by every project
-  devices: [/dev/dri]         # host devices passed to every container
+  runner: podman              # or namespace, with uid: first slot uid
+  devices: [/dev/dri]         # host devices passed to every container (podman)
   poll: 5                     # seconds between cycles
   projects:
     alpha:                    # project name: a-z, 0-9, `.`, `_`, `-`
       remote: ~/git/alpha.git # git URL or path, fetched and pushed
       tracks: track/          # branch prefix of every track
       fetch: 60               # seconds between fetches
-      mounts:                 # host:container binds, read-write
+      # gid: 3000             # project group, namespace alone and required there
+      mounts:                 # host:container binds, read-write (podman)
         - ~/cache/alpha/cargo:/home/dev/.cargo/registry
       env:                    # first rule whose glob matches the track
         - match: "*"

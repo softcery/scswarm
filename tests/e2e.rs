@@ -1,7 +1,7 @@
-//! Live slot set, `serve` restart, two tracks, two projects and `publish` against rootless podman
-//! and local remotes. Rows hold `run` and commit steps, agents are stubs: no token spent.
-//! Slots, container names and the host file belong to the user: the test refuses a user whose
-//! host file it did not write.
+//! Live slot set, `serve` restart, two tracks, two projects and `publish` against rootless podman,
+//! and runner `namespace` as root on Linux. Local remotes, stub agents: no token spent. Slots,
+//! container names and the host file belong to the user: the test refuses a user whose host
+//! file it did not write.
 
 use std::collections::BTreeSet;
 use std::env;
@@ -40,6 +40,15 @@ const BASE: &str = "registry.fedoraproject.org/fedora:44";
 const CREDENTIAL: (&str, &str) = ("E2E_CREDENTIAL", "e2e-value");
 /// Named by the `env` edit alone.
 const EXTRA: (&str, &str) = ("E2E_EXTRA", "extra");
+/// First slot uid of the namespace test: inside the uid map of a rootless container.
+const UID: u32 = 20000;
+/// Group of the first project in the namespace test; the next project takes the next gid.
+const GID: u32 = 30000;
+/// Row of the namespace test: edits a tracked file as the slot uid, finds git read-only,
+/// leaves a process the reset must kill.
+const SANDBOXED: &str = "n/sandboxed";
+/// Rows of the namespace test that add one file with two texts.
+const CLASHING: [&str; 2] = ["m/left", "m/right"];
 
 #[test]
 #[ignore = "needs rootless podman or a podman machine: run `make e2e`"]
@@ -73,6 +82,59 @@ fn slot_set_follows_host_file_live() {
         creates, 10,
         "each `create` must answer a change: 1 + 2 + 2 + 3 + 2"
     );
+}
+
+/// Runner `namespace`: rows run as slot uids, git stays read-only, no slot reads the
+/// bare repo of another project, `image` reports once per project, slots move between
+/// projects, and a `uid` change drops each slot through the old uid.
+#[test]
+#[ignore = "needs root on Linux with user namespaces: run `make e2e-namespace`"]
+fn namespace_runs_rows_as_slot_uids() {
+    let mut swarm = Swarm::open();
+    swarm.runner = namespace(UID);
+    swarm.group = Some(GID);
+    swarm.track("track/n", &sandboxed());
+    swarm.with_second(2, &[]);
+    swarm.serve();
+    let rows = ROWS
+        .iter()
+        .chain([&OTHER, &SANDBOXED])
+        .map(|row| label(row));
+    for row in rows.chain([format!("{SECOND}/{ELSEWHERE}")]) {
+        swarm.wait(&format!("push row={row} "), 0);
+    }
+    assert_eq!(
+        swarm.count(0, "ignore project="),
+        2,
+        "`image` must report once per project"
+    );
+    swarm.holds_file("feat/n", "row.txt");
+    resolves_as_slot_uid(&swarm);
+    let from = swarm.mark();
+    swarm.runner = namespace(UID + 10);
+    swarm.with_second(2, &[]);
+    swarm.wait("remove slot=0", from);
+    swarm.rerun(&[ROWS[0]], from);
+    swarm.wait(&format!("push row={} ", label(ROWS[0])), from);
+}
+
+/// Two rows on two slots add one file from one base: the second merge conflicts, and
+/// its `merge` steps write the handed-off file as the slot uid.
+fn resolves_as_slot_uid(swarm: &Swarm) {
+    let from = swarm.mark();
+    swarm.track("track/m", &clashing());
+    for row in CLASHING {
+        swarm.wait(&format!("push row={} ", label(row)), from);
+    }
+    let text = swarm.on_remote(&["show", "feat/m:conflict.txt"]);
+    assert_eq!(
+        text, "resolved\n",
+        "`merge` steps must resolve the conflict"
+    );
+}
+
+fn namespace(uid: u32) -> String {
+    format!("runner: namespace\nuid: {uid}\n")
 }
 
 /// 1 → 3 with rows waiting: new slots take them on the next cycle, priority first.
@@ -461,6 +523,10 @@ struct Swarm {
     work: PathBuf,
     log: PathBuf,
     serve: Option<Child>,
+    /// Host file lines that pick the runner. Empty: `podman`.
+    runner: String,
+    /// Gid of the first project entry, one more for each next. `None`: no `gid`.
+    group: Option<u32>,
 }
 
 impl Swarm {
@@ -473,6 +539,8 @@ impl Swarm {
             work: root.join("work"),
             log: root.join("serve.log"),
             serve: None,
+            runner: String::new(),
+            group: None,
         };
         succeed(
             git()
@@ -570,18 +638,23 @@ impl Swarm {
             .map(|name| format!("{name}: {name}"))
             .collect::<Vec<_>>()
             .join(", ");
-        let entry = |name: &str, remote: &PathBuf| {
+        let entry = |at: u32, name: &str, remote: &PathBuf| {
+            let gid = self
+                .group
+                .map(|first| format!("    gid: {}\n", first + at))
+                .unwrap_or_default();
             format!(
-                "  {name}:\n    remote: {}\n    tracks: track/\n    fetch: 1\n    env:\n      - match: '*'\n        set: {{ {set} }}\n",
+                "  {name}:\n    remote: {}\n    tracks: track/\n    fetch: 1\n{gid}    env:\n      - match: '*'\n        set: {{ {set} }}\n",
                 remote.display()
             )
         };
         let mut text = format!(
-            "{MARK}\nworkers: {workers}\npoll: 1\nprojects:\n{}",
-            entry(PROJECT, &self.remote())
+            "{MARK}\n{}workers: {workers}\npoll: 1\nprojects:\n{}",
+            self.runner,
+            entry(0, PROJECT, &self.remote())
         );
-        for (name, remote) in others {
-            text.push_str(&entry(name, remote));
+        for (at, (name, remote)) in (1..).zip(others) {
+            text.push_str(&entry(at, name, remote));
         }
         fs::write(&file, text).expect("host file must be writable");
     }
@@ -837,6 +910,9 @@ agents:
   stub:
     exec: sh -c 'for file in next-*.yaml; do echo broken > $file; done; echo plan' stub
 commit: Reply with the message.
+merge:
+  - run: echo resolved > conflict.txt
+  - commit: \"e2e: resolve\"
 ";
 
 fn track_a() -> String {
@@ -846,6 +922,31 @@ fn track_a() -> String {
 /// Lower priority: runs once track `a` leaves a slot free.
 fn track_b() -> String {
     track("side", "feat/b", -1, &[OTHER])
+}
+
+/// One row on the slot uid: own uid, tracked file edited, own history read, git write
+/// refused, the other project's bare repo shut, an orphan left for the reset.
+fn sandboxed() -> String {
+    let id = SANDBOXED.split_once('/').expect("key holds a `/`").1;
+    let home = env::var("HOME").expect("HOME must be set");
+    let other = format!("{home}/swarm/{SECOND}.git/HEAD");
+    format!(
+        "from: main\nto: feat/n\nrows:\n  - id: {id}\n    steps:\n      - run: |\n          set -e\n          test \"$(id -u)\" -ge {UID}\n          echo row >> {CONTAINERFILE}\n          echo row > row.txt\n          git status --short\n          git log -1 --format=%H\n          if git add --all 2>/dev/null; then exit 1; fi\n          test ! -r {other}\n          (setsid sleep 300 &)\n      - run: |\n          for f in /proc/[0-9]*/cmdline; do tr '\\000' ' ' < \"$f\" 2>/dev/null; echo; done > \"$TMPDIR/procs\"\n          ! grep -q '^sleep 300' \"$TMPDIR/procs\"\n      - commit: \"{id}\"\n"
+    )
+}
+
+/// Each row writes its own id to one file, slow enough that both start from one base.
+fn clashing() -> String {
+    let rows: String = CLASHING
+        .iter()
+        .map(|key| {
+            let id = key.split_once('/').expect("key holds a `/`").1;
+            format!(
+                "  - id: {id}\n    steps:\n      - run: echo {id} > conflict.txt && sleep {ROW_SECONDS}\n      - commit: \"{id}\"\n"
+            )
+        })
+        .collect();
+    format!("from: main\nto: feat/m\nrows:\n{rows}")
 }
 
 fn track(from: &str, to: &str, priority: i32, rows: &[&str]) -> String {

@@ -13,6 +13,8 @@ use crate::state::Address;
 const SWARM_DIR: &str = "swarm";
 const SLOT_DIR: &str = "slot";
 const SLOT_TREE: &str = "tree";
+const SLOT_HOME: &str = "home";
+const SLOT_TMP: &str = "tmp";
 const BUILD_DIR: &str = "build";
 const BUILD_TREE: &str = "tree";
 const LOG_DIR: &str = "log";
@@ -104,6 +106,34 @@ pub fn tree(index: usize) -> Result<PathBuf> {
     Ok(slot(index)?.join(SLOT_TREE))
 }
 
+/// Home and temp dir of the slot uid under the `namespace` runner.
+pub fn slot_home(index: usize) -> Result<PathBuf> {
+    Ok(slot(index)?.join(SLOT_HOME))
+}
+
+pub fn slot_tmp(index: usize) -> Result<PathBuf> {
+    Ok(slot(index)?.join(SLOT_TMP))
+}
+
+/// Bare repo of each project, made or not.
+pub fn repos() -> Result<Vec<PathBuf>> {
+    let dir = swarm()?;
+    let listing = match fs::read_dir(&dir) {
+        Ok(listing) => listing,
+        Err(why) if why.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(why) => return Err(Error::Failed(format!("directory {}: {why}", dir.display()))),
+    };
+    Ok(listing
+        .filter_map(|entry| Some(entry.ok()?.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == &REPO_SUFFIX[1..]))
+        .collect())
+}
+
+/// Transcripts and row locks of every project.
+pub fn logs() -> Result<PathBuf> {
+    Ok(swarm()?.join(LOG_DIR))
+}
+
 /// `None`: path is no slot worktree.
 pub fn slot_index(path: &Path) -> Result<Option<usize>> {
     let slots = real(&slots()?);
@@ -134,8 +164,7 @@ pub const MERGE_LOG: &str = "merge";
 
 /// One transcript per session, and the row lock.
 pub fn transcripts(row: &Address) -> Result<PathBuf> {
-    Ok(swarm()?
-        .join(LOG_DIR)
+    Ok(logs()?
         .join(row.project.to_string())
         .join(&row.key.track)
         .join(&row.key.id))
@@ -170,7 +199,7 @@ pub fn real(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn slots() -> Result<PathBuf> {
+pub fn slots() -> Result<PathBuf> {
     Ok(swarm()?.join(SLOT_DIR))
 }
 

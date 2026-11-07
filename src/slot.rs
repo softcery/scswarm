@@ -1,39 +1,39 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::process::Command;
 
+use crate::credential::Credential;
 use crate::error::{Error, Result};
-use crate::event;
-use crate::git::{Git, WORKTREE_LINK};
+use crate::git::{Git, Worktree};
 use crate::host::Mount;
-use crate::paths;
-use crate::podman::{self, Container, Spec, Stamp};
+use crate::paths::{self, Project};
+use crate::runner::{Need, Runner};
 use crate::step::Outcome;
 
 /// One try at a conflicted merge.
 pub type Resolve<'a> = dyn FnMut() -> Result<Outcome<()>> + 'a;
 
-/// Worker slot: worktree outside any checkout, container over it. Takes rows of
-/// any project; the worktree moves to the repo of each row.
+/// Worker slot: worktree outside any checkout, runner over it. Takes rows of any
+/// project; the worktree moves to the repo of each row.
 pub struct Slot {
-    git: Git,
     path: PathBuf,
-    container: Container,
+    runner: Runner,
     index: usize,
 }
 
-/// Slot numbers with a slot dir or a container.
-pub fn indices() -> Result<BTreeSet<usize>> {
+/// Slot numbers with a slot dir or runner state.
+pub fn indices(runner: &Runner) -> Result<BTreeSet<usize>> {
     let mut held: BTreeSet<usize> = paths::slot_dirs()?.into_iter().collect();
-    held.extend(podman::slots()?.into_keys());
+    held.extend(runner.held()?);
     Ok(held)
 }
 
-/// Drop container, worktree and slot dir of one slot. Any may be absent.
-pub fn remove(index: usize) -> Result<()> {
-    podman::remove(index)?;
-    Slot::open(index)?.drop_tree()?;
+/// Drop runner state, worktree and slot dir of one slot. Any may be absent.
+pub fn remove(index: usize, runner: &Runner) -> Result<()> {
+    runner.remove(index)?;
+    Slot::open(index, runner)?.drop_tree()?;
     let dir = paths::slot(index)?;
     match dir.exists() {
         true => fs::remove_dir_all(&dir)
@@ -43,60 +43,59 @@ pub fn remove(index: usize) -> Result<()> {
 }
 
 impl Slot {
-    pub fn open(index: usize) -> Result<Self> {
-        let path = paths::tree(index)?;
+    pub fn open(index: usize, runner: &Runner) -> Result<Self> {
         Ok(Self {
-            git: Git::at(path.clone()),
-            path,
-            container: Container::slot(index),
+            path: paths::tree(index)?,
+            runner: runner.clone(),
             index,
         })
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    pub fn container(&self) -> &Container {
-        &self.container
-    }
-
-    /// Stamp of the container standing on this slot. `None` when absent.
-    pub fn stamp(&self) -> Result<Option<Stamp>> {
-        podman::stamp(self.index)
-    }
-
     /// Worktree of `repo`, a foreign one dropped with its ignored files. Then the
-    /// container: restarted if it carries `stamp`, else made again.
+    /// runner readies the slot. Spent: the row's fault.
     pub fn prepare(
         &self,
         repo: &Git,
         base: &str,
-        stamp: &Stamp,
-        standing: Option<Stamp>,
+        project: &Project,
+        image: Option<&str>,
         mounts: &[Mount],
         devices: &[String],
-    ) -> Result<()> {
-        if self.owner()? != Some(paths::real(repo.root())) {
+    ) -> Result<Outcome<()>> {
+        let fresh = !self.path.is_dir() || repo.worktree(&self.path)?.is_none();
+        if fresh {
             self.drop_tree()?;
             repo.worktree_add(&self.path, base)?;
         }
-        if standing.as_ref() == Some(stamp) {
-            return self.container.restart();
-        }
-        self.container.create(&Spec {
-            worktree: &self.path,
-            repo: repo.root(),
-            mounts,
-            devices,
-            stamp,
-        })?;
-        event::create(self.index);
-        Ok(())
+        self.runner.prepare(
+            self.index,
+            &Need {
+                repo,
+                base,
+                project,
+                image,
+                mounts,
+                devices,
+                tree: &self.path,
+                fresh,
+            },
+        )
+    }
+
+    /// Command of one try in the worktree.
+    pub fn exec(&self, credentials: &[Credential], argv: &[String]) -> Result<Command> {
+        self.runner.exec(self.index, &self.path, credentials, argv)
+    }
+
+    /// Kill every process of the slot.
+    pub fn reset(&self) -> Result<()> {
+        self.runner.reset(self.index)
     }
 
     pub fn checkout(&self, branch: &str, rev: &str) -> Result<()> {
-        self.git.checkout_at(branch, rev)
+        let tree = self.tree()?;
+        tree.checkout_at(branch, rev)?;
+        self.runner.handoff(self.index, &tree)
     }
 
     /// Merge `rev`, tip of `name`, into `onto` on no branch: `onto` first parent.
@@ -108,36 +107,38 @@ impl Slot {
         name: &str,
         resolve: &mut Resolve,
     ) -> Result<Outcome<()>> {
-        self.git.checkout_detached(onto)?;
-        let Err(conflict) = self.git.merge(rev, name) else {
+        let tree = self.tree()?;
+        tree.checkout_detached(onto)?;
+        let Err(conflict) = tree.merge(rev, name) else {
             return Ok(Outcome::Done(()));
         };
-        if !self.git.merging()? {
+        if !tree.merging()? {
             return Err(conflict);
         }
+        self.runner.handoff(self.index, &tree)?;
         let spent = match resolve()? {
             Outcome::Spent(why) => format!("{conflict}; `merge` steps: {why}"),
-            Outcome::Done(()) if self.git.merging()? => conflict.to_string(),
+            Outcome::Done(()) if tree.merging()? => conflict.to_string(),
             Outcome::Done(()) => return Ok(Outcome::Done(())),
         };
-        self.git.merge_abort()?;
+        tree.merge_abort()?;
         Ok(Outcome::Spent(spent))
     }
 
     pub fn head(&self) -> Result<String> {
-        self.git.head()
+        self.tree()?.head()
     }
 
     /// Free the branch for another slot. No worktree: nothing to free.
     pub fn release(&self) -> Result<()> {
         match self.owner()? {
-            Some(_) => self.git.detach(),
+            Some((_, tree)) => tree.detach(),
             None => Ok(()),
         }
     }
 
     pub fn commit(&self, message: &str) -> Result<String> {
-        self.git.commit(message)
+        self.tree()?.commit(message)
     }
 
     /// Text of `name` at the worktree root. The agent wrote the tree and the host reads
@@ -178,18 +179,36 @@ impl Slot {
         dropped.map_err(|why| Error::Failed(format!("worktree {}: {why}", path.display())))
     }
 
-    /// Repo that owns the worktree. `None`: no worktree, or its repo is gone.
-    fn owner(&self) -> Result<Option<PathBuf>> {
-        match self.path.join(WORKTREE_LINK).exists() {
-            true => self.git.owner(),
-            false => Ok(None),
+    /// Worktree git of the standing worktree. Errors when none stands.
+    fn tree(&self) -> Result<Worktree> {
+        self.owner()?.map(|(_, tree)| tree).ok_or_else(|| {
+            Error::Failed(format!(
+                "slot {}: worktree {} must stand",
+                self.index,
+                self.path.display()
+            ))
+        })
+    }
+
+    /// Bare repo that registers the worktree, and the worktree git. Read from the
+    /// bare repos alone: the row owns the worktree and its `.git`.
+    fn owner(&self) -> Result<Option<(Git, Worktree)>> {
+        if !self.path.is_dir() {
+            return Ok(None);
         }
+        for root in paths::repos()? {
+            let repo = Git::at(root);
+            if let Some(tree) = repo.worktree(&self.path)? {
+                return Ok(Some((repo, tree)));
+            }
+        }
+        Ok(None)
     }
 
     /// Worktree dir, then its registration in the owner. Owner gone: dir alone.
     fn drop_tree(&self) -> Result<()> {
-        if let Some(owner) = self.owner()? {
-            return Git::at(owner).worktree_remove(&self.path);
+        if let Some((owner, _)) = self.owner()? {
+            return owner.worktree_remove(&self.path);
         }
         match self.path.exists() {
             true => fs::remove_dir_all(&self.path)

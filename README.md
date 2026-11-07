@@ -2,11 +2,11 @@
 
 Runs coding agents on a task board with no human at the keyboard. One binary, one workstation, one swarm per user for any number of repos.
 
-Each team pushes a track: an orphan branch whose `SWARM.yaml` names a `from` branch, a `to` branch and the rows to run. Workers pick every row whose dependencies are pushed, run it in its own git worktree and container, merge it into `to` and push `to` to your remote. You review `to` and merge it.
+Each team pushes a track: an orphan branch whose `SWARM.yaml` names a `from` branch, a `to` branch and the rows to run. Workers pick every row whose dependencies are pushed, run it in its own git worktree and sandbox, merge it into `to` and push `to` to your remote. You review `to` and merge it.
 
 ## Requirements
 
-- Linux or macOS with rootless podman.
+- Linux or macOS with rootless podman. Or, with runner `namespace`, Linux with `scswarm` as root, for example inside an unprivileged container.
 - git 2.30 or newer.
 - An agent CLI that takes a prompt as an argument and prints its reply. Example: `claude -p --output-format json`.
 
@@ -99,9 +99,9 @@ Every `poll` seconds the loop reads each project from local refs, in its own thr
 
 Then it starts one worker process, `scswarm work`, per queued row and free slot: the project with fewest rows running first, then the project served longest ago, then highest `priority` inside it, then the track with fewest rows running. Then it sleeps. A project whose remote fails rests; the others run.
 
-A slot is a git worktree at `~/swarm/slot/<n>/tree` plus one long-lived container `scswarm-<n>`. Slots take rows of any project. A row of another project drops the worktree and container and makes them from its own repo.
+A slot is a git worktree at `~/swarm/slot/<n>/tree` plus its runner: one long-lived container `scswarm-<n>` under `podman`, one uid under `namespace`. Slots take rows of any project. A row of another project drops the worktree and makes it from its own repo.
 
-One row is one session of scripted steps: agent prompts, shell `run` steps, and commit steps. The worker builds the image at the `to` tip, branches `swarm/<track>/<id>` from that tip, and commits at each commit step. At the last one it writes ref `refs/swarm/land/<track>/<id>`, merges the row into the `to` tip with one merge commit and pushes `to` with no force. A branch with no land ref holds a session cut short: the next cycle replays the row from the `to` tip.
+One row is one session of scripted steps: agent prompts, shell `run` steps, and commit steps. The worker readies the slot (under `podman`, it builds the image at the `to` tip), branches `swarm/<track>/<id>` from that tip, and commits at each commit step. At the last one it writes ref `refs/swarm/land/<track>/<id>`, merges the row into the `to` tip with one merge commit and pushes `to` with no force. A branch with no land ref holds a session cut short: the next cycle replays the row from the `to` tip.
 
 Workers outlive `serve`. A restart or an upgrade leaves rows in flight running; the new `serve` waits on their locks.
 
@@ -123,9 +123,9 @@ Git only. No database, no state file. `serve` pushes land and fail refs to the r
 
 Kill the process at any point, restart, every row rebuilds from the repo.
 
-### Git is read-only inside the container
+### Git is read-only in the slot
 
-The gitdir mounts read-only. `git status`, `git log`, `git diff` work. `git add`, `git mv`, `git commit`, `git checkout` fail with `Read-only file system`. The host stages every change with `add --all`, so a plain `mv` still lands. Do not ask the agent for a git write in your prompts.
+The gitdir mounts read-only under `podman`, and belongs to the `serve` user under `namespace`. `git status`, `git log`, `git diff` work. `git add`, `git mv`, `git commit`, `git checkout` fail. The host stages every change with `add --all`, so a plain `mv` still lands. Do not ask the agent for a git write in your prompts.
 
 ## Configure
 
@@ -138,16 +138,19 @@ What this machine gives the swarm. One per user. Never committed.
 | Field | Meaning |
 |---|---|
 | `workers` | slot count, shared by every project |
-| `devices` | host device paths passed as `--device`, for example `/dev/dri` for a GPU |
+| `runner` | `podman` (absent) or `namespace`: how each slot runs its steps. See [Runners](#runners) |
+| `uid` | first slot uid under `namespace`, 1 or more. Slot `n` runs as `uid + n`. Keep the range apart from every other account: the reset kills each process of a slot uid |
+| `devices` | host device paths passed as `--device`, for example `/dev/dri` for a GPU. `podman` alone |
 | `poll` | seconds between loop cycles. Absent = 5 |
 | `projects` | one entry per repo, keyed by project name |
 | `projects.*.remote` | git URL or path the bare repo fetches from and pushes to |
 | `projects.*.tracks` | branch name prefix of every track branch |
 | `projects.*.fetch` | seconds between fetches. Absent = 60 |
-| `projects.*.mounts` | extra `host:container` binds, read-write. Build caches ride here. Two projects never share a host path |
-| `projects.*.env` | ordered rules: the first whose `match` glob takes the track name binds credentials into its containers: `set` maps a variable to a credential |
+| `projects.*.gid` | group of the project under `namespace`, one per project. It owns the bare repo, and each try of the project runs in it |
+| `projects.*.mounts` | extra `host:container` binds, read-write. Build caches ride here. Two projects never share a host path. `podman` alone |
+| `projects.*.env` | ordered rules: the first whose `match` glob takes the track name binds credentials into its slots: `set` maps a variable to a credential |
 
-Every field reloads each cycle. `serve` drops slots at or above `workers`. The worker of each row makes its slot's container, and remakes it when the row's image, project, `mounts` or `devices` differ. A busy slot finishes its row first. `env` applies from the next row on, with no rebuild.
+Every field reloads each cycle. `serve` drops slots at or above `workers`. Under `podman`, the worker of each row makes its slot's container, and remakes it when the row's image, project, `mounts` or `devices` differ. A change of `runner` or `uid` drops each slot through the old runner once idle. A busy slot finishes its row first. `env` applies from the next row on, with no rebuild.
 
 ### Credentials: `~/.config/scswarm/credentials/<NAME>`
 
@@ -162,6 +165,18 @@ env:
 ```
 
 The machine pushes `to` and `refs/swarm/*`. Give it a deploy key or token with write access per repo, outside every container. GitHub binds a deploy key to one repo, so give each `remote` an ssh host alias with its own `IdentityFile`.
+
+### Runners
+
+| | `podman` | `namespace` |
+|---|---|---|
+| Slot | one rootless container | one uid, each try in its own user and PID namespaces |
+| Tools | `image` of `scswarm.yaml` | the host's; `image` reports `ignore` and goes unread |
+| Gitdir | bound read-only | owned by the `serve` user, read by the project `gid` alone |
+| Host | Linux or macOS, rootless podman | Linux, `scswarm` as root |
+| Use | a workstation or VM | inside an unprivileged container that is the tenant boundary |
+
+Under `namespace`, slots share `/proc`, `/tmp`, loopback and the cgroup of the host container: a slot uid reads the prompts of other slots in argv. The home dir of `serve` must grant others `x`. Dir modes and limits: [Runner in docs/spec/contract.md](docs/spec/contract.md#runner).
 
 ### Isolation between projects
 
@@ -191,9 +206,9 @@ merge:
   - commit:
 ```
 
-- `image` naming a path at the `to` tip builds for every row, cached by podman. Builds of one project run one at a time, so slots on one Containerfile share one image ID. Any other value names an image podman resolves.
-- `exec` runs in the container with the prompt appended as the last argument. It must print JSON holding `session_id` and `result`, or plain text taken as `result`. With `resume` set, a reply with no `session_id` fails the try.
-- `exec` must return only when the turn's work ends. The container restarts after every try, which kills anything left running. `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` stops Claude Code from sending a long command to the background and ending the turn with "the command is running in the background". Without it, the next step runs over half-done work. Measured on claude 2.1.280: switch off, turn ends at 13 s, output file never written; switch on, turn holds 209 s, file written. The switch leaves `nohup cmd &` from Bash open; the restart after the try kills it.
+- `image` naming a path at the `to` tip builds for every row, cached by podman. Runner `podman` alone reads it, and needs it. Builds of one project run one at a time, so slots on one Containerfile share one image ID. Any other value names an image podman resolves.
+- `exec` runs in the slot with the prompt appended as the last argument. It must print JSON holding `session_id` and `result`, or plain text taken as `result`. With `resume` set, a reply with no `session_id` fails the try.
+- `exec` must return only when the turn's work ends. The slot resets after every try, which kills anything left running. `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` stops Claude Code from sending a long command to the background and ending the turn with "the command is running in the background". Without it, the next step runs over half-done work. Measured on claude 2.1.280: switch off, turn ends at 13 s, output file never written; switch on, turn holds 209 s, file written. The switch leaves `nohup cmd &` from Bash open; the restart after the try kills it.
 - `--disallowedTools Agent Skill SendMessage ListAgents RemoteTrigger PushNotification` keeps the session flat: no subagent, no skill, no message to another session. A subagent burns the turn budget and writes files the transcript never sees.
 - `resume` is added from the second agent turn on, so one row is one session. Absent = every prompt opens a new session.
 - `commit` is the prompt of every agent commit step: it asks for a message and the host commits with the reply.
@@ -315,7 +330,7 @@ scswarm man DIR                 write one man page per command into DIR
 
 `scswarm --help` prints the full guide: queue steps, `SWARM.yaml`, `scswarm.yaml`, files. `scswarm help <command>` prints one command.
 
-Exit codes: 0 ok, 1 input invalid, usage errors included, 2 git, podman or file system failure. A git or podman failure inside a slot marks no row: `serve` rests that project and runs on.
+Exit codes: 0 ok, 1 input invalid, usage errors included, 2 git, runner or file system failure. A git or runner failure inside a slot marks no row: `serve` rests that project and runs on.
 
 ## Run under systemd
 
@@ -352,7 +367,7 @@ macOS runs containers in a podman machine VM. Start it with `podman machine init
 
 **Row shows `failed`.** Read `scswarm log PROJECT ROW` for the failing step. A failed row waits for a new track tip or `to` tip, so it costs one attempt per push, not one per cycle. To rerun without a push, run `reset`.
 
-**`skip project=P` with no track.** The remote of `P` was out of reach, or git or podman failed in one of its rows. No row got a fail mark. A push the remote turns down, for example branch protection on `to`, fails that row instead. `P` rests: no row for 1 `fetch` interval after a remote fault, 60 s after a slot fault, doubling per fault in a row, up to 15 min. The other projects run on. Read the cause in the journal, or in `~/Library/Logs/scswarm.log` on macOS, and fix the remote or the machine. A remote fault ends at the first good fetch; a slot fault ends once a worker of `P` exits 0. The row replays.
+**`skip project=P` with no track.** The remote of `P` was out of reach, or git or the runner failed in one of its rows. No row got a fail mark. A push the remote turns down, for example branch protection on `to`, fails that row instead. `P` rests: no row for 1 `fetch` interval after a remote fault, 60 s after a slot fault, doubling per fault in a row, up to 15 min. The other projects run on. Read the cause in the journal, or in `~/Library/Logs/scswarm.log` on macOS, and fix the remote or the machine. A remote fault ends at the first good fetch; a slot fault ends once a worker of `P` exits 0. The row replays.
 
 **`skip project=P` naming field `remote`.** `remote` names another URL than `origin` of `~/swarm/P.git`. If the repo moved and the old one is gone, delete `~/swarm/P.git`: the next cycle makes it again from the new remote.
 
@@ -393,7 +408,7 @@ git -C ~/swarm/PROJECT.git for-each-ref refs/swarm/
 - Builds of one project wait on each other, so a slot can wait on another slot's build.
 - One configured agent means one model both writes and audits the work.
 - A step with no `timeout` runs without limit. No token budget: agent flags in `exec` carry any cap.
-- The container restarts after every try and before every row. A server a step needs starts and stops inside one `run`.
+- The slot resets after every try and before every row. A server a step needs starts and stops inside one `run`.
 - A podman fault inside `exec` exits 125 and counts as a failed try. A step command that exits 125 reads the same.
 - The transcript keeps full stdout and stderr of every try. Redirect big output to a file.
 - Slots share the CPU, so timings from a `run` step carry noise from other slots. Set `workers: 1`, or lock inside the script.
@@ -407,7 +422,7 @@ git -C ~/swarm/PROJECT.git for-each-ref refs/swarm/
 - macOS: the podman machine does not start at login. Until it runs, each worker exits 2 and its project rests.
 - Locks sit on `~/swarm`, which must be a local filesystem. NFS breaks them.
 - A worker hung outside a step holds its slot until killed.
-- A git or podman fault in one slot rests its project, up to 15 min.
+- A git or runner fault in one slot rests its project, up to 15 min.
 - A dead remote holds its project's feed up to 30 s on connect, or about 60 s on a stalled transfer. Other projects run on.
 - `mounts` refuses host paths under `~/swarm` or `~/.config/scswarm`, and `..`.
 - After the upgrade to one swarm for many repos, old containers `scswarm-<project>-<n>` stay. Remove them with `podman rm --force`.

@@ -17,7 +17,8 @@ pub const SESSION_SLOT: &str = "{session}";
 /// Project settings. Only reader of `scswarm.yaml`.
 #[derive(Debug)]
 pub struct Config {
-    pub image: String,
+    /// Containerfile path or image name. Runner `podman` alone reads it.
+    pub image: Option<String>,
     pub default_agent: String,
     pub agents: BTreeMap<String, Agent>,
     /// Prompt of every agent commit step: asks for the message the host commits with.
@@ -41,7 +42,8 @@ pub struct Agent {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Written {
-    image: String,
+    #[serde(default)]
+    image: Option<String>,
     default_agent: String,
     agents: BTreeMap<String, Agent>,
     commit: String,
@@ -77,9 +79,13 @@ impl Config {
 
 impl Written {
     fn check(&self) -> Result<()> {
-        if self.image.trim().is_empty() {
+        if self
+            .image
+            .as_deref()
+            .is_some_and(|image| image.trim().is_empty())
+        {
             return Err(invalid(
-                "field `image` must name a Containerfile path or an image",
+                "field `image` must name a Containerfile path or an image, or stay absent",
             ));
         }
         if self.commit.trim().is_empty() {
@@ -167,7 +173,7 @@ merge:
     #[test]
     fn parses_contract_example() {
         let config = Config::parse(EXAMPLE).expect("example must parse");
-        assert_eq!(config.image, "Containerfile.swarm");
+        assert_eq!(config.image.as_deref(), Some("Containerfile.swarm"));
         assert!(config.commit.starts_with("Reply with"), "{}", config.commit);
         assert_eq!(config.merge.expect("merge must parse").len(), 3);
         assert_eq!(

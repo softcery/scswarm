@@ -23,8 +23,13 @@ pub fn reset(repo: &Git, tracks: &str, key: &Key) -> Result<()> {
         if !repo.branch_exists(&branch)? {
             continue;
         }
-        if let Some(path) = checkouts.get(&branch) {
-            Git::at(path.clone()).detach()?;
+        if let Some(tree) = checkouts
+            .get(&branch)
+            .map(|path| repo.worktree(path))
+            .transpose()?
+            .flatten()
+        {
+            tree.detach()?;
         }
         repo.branch_delete(&branch)?;
         println!("deleted {branch}");

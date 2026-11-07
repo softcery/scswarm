@@ -54,7 +54,7 @@ Step kinds:
 | Step | Form | Runs |
 |---|---|---|
 | prompt | string, or `prompt: <text>` | one agent turn in the row session, text as typed |
-| run | `run: <text>` | `sh -c <text>` in the slot container, worktree as working dir |
+| run | `run: <text>` | `sh -c <text>` in the slot, worktree as working dir |
 | agent commit | `commit:` with no value | `commit` prompt of `scswarm.yaml` in the row session; host commits with the reply |
 | literal commit | `commit: <text>` | host commits with the text; no agent call |
 
@@ -166,20 +166,23 @@ projects:
     tracks: track/
 ```
 
-- `workers`: slot count, shared by every project. One worktree, one container each.
-- `devices`: host device paths, absolute. A folder stands for each device node under it, symlinks skipped. Each node passes as `--device` at the same path, into every project's containers. A GPU rides here. A bind in `mounts` cannot carry a device: the `z` relabel of a device node fails.
+- `workers`: slot count, shared by every project. One worktree each.
+- `runner`: `podman` or `namespace`. Absent = `podman`. One per `serve` cycle, so every slot has one sandbox: [Runner](#runner).
+- `uid`: first slot uid, under `namespace` alone and required there, 1 or more. Slot `n` runs as uid `uid + n`. Each must sit in the uid map of `serve`, differ from the uid of `serve`, and own no file and run no process outside its slot: the reset kills every process of that uid. `uid + workers - 1` must fit 32 bits.
+- `devices`: host device paths, absolute. A folder stands for each device node under it, symlinks skipped. Each node passes as `--device` at the same path, into every project's containers. A GPU rides here. A bind in `mounts` cannot carry a device: the `z` relabel of a device node fails. Under `namespace`: must stay empty.
 - `poll`: seconds between scheduler cycles, 1 or more. Absent = 5. A cycle reads local refs; fetch runs on its own clock.
 - `projects`: one entry per repo. Key = project name: ascii lowercase letters, digits, `.`, `_`, `-`. It names the bare repo, the build lock and the log dir. Absent = none.
 - `remote`: git URL or repo path the bare repo fetches from and pushes to. A leading `~/` reads as home. Push needs a deploy key or token on the host, never in a container. GitHub binds a deploy key to one repo: an ssh host alias per repo, for example `github-alpha`, picks its key.
 - `tracks`: branch name prefix of every track branch. Any text that makes a branch name git takes.
+- `gid`: group of the project, under `namespace` alone and required there, 1 or more, one per project, other than the gid of `serve`. It owns the bare repo; each try of the project runs in it. Must sit in the gid map of `serve`.
 - `fetch`: seconds between fetches of `remote`, 1 or more. Absent = 60. A fetch brings human input alone: tracks, `from`, commits on `to`. A worker's push of `to` moves the remote-tracking ref itself. A new track waits up to `fetch` seconds for its first row.
-- `mounts`: extra `host:container` binds, rw, into this project's containers alone. Both sides absolute; host side takes `~/` for home. Build caches ride here. Each of these fails the file, so two projects share no writable path: a host path inside, or holding, a host path of another project's `mounts`, or `~/swarm`, or `${XDG_CONFIG_HOME:-~/.config}/scswarm`; a host side with `..`. Paths compare with symlinks resolved. A host path not yet made compares as written.
-- `env`: ordered rules. `match` is a glob on track names, `*` for any run of characters. The first rule that matches binds credentials into each container of that track's rows: `set` maps an environment variable name to a credential name. Both take letters, digits, `_`. No match: none. Value never reaches an argument list.
+- `mounts`: extra `host:container` binds, rw, into this project's containers alone. Under `namespace`: must stay empty. Both sides absolute; host side takes `~/` for home. Build caches ride here. Each of these fails the file, so two projects share no writable path: a host path inside, or holding, a host path of another project's `mounts`, or `~/swarm`, or `${XDG_CONFIG_HOME:-~/.config}/scswarm`; a host side with `..`. Paths compare with symlinks resolved. A host path not yet made compares as written.
+- `env`: ordered rules. `match` is a glob on track names, `*` for any run of characters. The first rule that matches binds credentials into each slot of that track's rows: `set` maps an environment variable name to a credential name. Both take letters, digits, `_`. No match: none. Value never reaches an argument list.
 - These fields cannot sit in a repo: `remote` and `tracks` say where repo text comes from, `env` keeps one team's key from another team's track, and the rest changes with the machine.
 - Every field reloads on the next cycle. A project added starts its feed thread on the next cycle, which makes the bare repo: `origin`, fetch, then the land and fail refs of the remote. A project removed stops scheduling and its feed ends after its current call; added back before then, it opens once that call ends, so one feed at most runs per project; its rows in flight run on, and their land and fail refs reach the remote only once the project returns.
 - `remote` must match `origin` of a standing bare repo. Another URL skips the project, reported once, with no network call, until the bare repo is deleted: its land and fail refs belong to the old remote.
-- `serve` converges slots each cycle, at start too: drops each idle slot at or above `workers`, and frees the branch of each idle slot below it once per `serve` life. A busy slot drops after its row ends. The worker makes the worktree of its slot and the container. It remakes the worktree when the row's project differs, and the container when it differs from the row in `mounts`, device nodes, image ID or bare repo. A GPU node renumbered at boot remakes it at the next row.
-- `env` bindings and credential values apply from the next row on. No container bakes them.
+- `serve` converges slots each cycle, at start too: drops each idle slot at or above `workers`, and frees the branch of each idle slot below it once per `serve` life. A busy slot drops after its row ends. A change of `runner` or `uid` drops each slot through the old runner once idle. A reload that changes `runner`, `uid` or a `gid`, or adds slots, runs the start check again; a failure reports `stale` and keeps the old file. The worker makes the worktree of its slot and the runner state. It remakes the worktree when the row's project differs, and, under `podman`, the container when it differs from the row in `mounts`, device nodes, image ID or bare repo. A GPU node renumbered at boot remakes it at the next row.
+- `env` bindings and credential values apply from the next row on. No slot bakes them.
 - Absent or unparsable at start: exit 1. Unparsable later: `serve` reports `stale` once per cause, keeps the last good copy, keeps running.
 
 ## Credentials
@@ -214,8 +217,8 @@ merge:
   - commit:
 ```
 
-- `image`: Containerfile path relative to root, or image name. Must hold every tool the agents and the project build need. The worker builds it for every row from a throwaway worktree of the base, so untracked and ignored files stay out of the build context. The image takes no tag: the slot container runs it by ID. An image name the worker pulls when the host lacks it. A failed build or pull fails the row. Agents and image travel together, so a track cannot name an agent its image lacks.
-- `agents.*.exec`: command run inside the container. Prompt appended as last argument. Must print JSON with `session_id` and `result` on stdout, or plain text as `result`. With `resume` set, a reply with no `session_id` fails the try. Must return only after the turn's work ends: a harness that sends work to the background and returns leaves the next step over half-done work, and the restart after the try kills that work.
+- `image`: Containerfile path relative to root, or image name. Optional. Runner `podman` reads it: absent skips each track. Runner `namespace` reads none: present reports `ignore` once per project, and the tracks run. Under `podman`, it must hold every tool the agents and the project build need. The worker builds it for every row from a throwaway worktree of the base, so untracked and ignored files stay out of the build context. The image takes no tag: the slot container runs it by ID. An image name the worker pulls when the host lacks it. A failed build or pull fails the row. Agents and image travel together, so a track cannot name an agent its image lacks.
+- `agents.*.exec`: command run in the slot. Prompt appended as last argument. Must print JSON with `session_id` and `result` on stdout, or plain text as `result`. With `resume` set, a reply with no `session_id` fails the try. Must return only after the turn's work ends: a harness that sends work to the background and returns leaves the next step over half-done work, and the restart after the try kills that work.
 - `agents.*.resume`: arguments added from second turn on. `{session}` = id from first reply. Absent = every prompt opens a new session.
 - `commit`: prompt of every agent commit step. Asks for the commit message; the host commits with the reply. Required, non-empty.
 - `defaults`: policy per step kind, keys `prompt` and `run`, fields as on a step. `continue_on_error` sits under `run` alone. Checked at parse: an error names the field, for example `defaults.prompt.tries`.
@@ -241,11 +244,12 @@ merge:
 | `refs/swarm/fail/<track>/<id>/track` | track tip of the failed attempt | bare repo, mirrored to remote |
 | `refs/swarm/fail/<track>/<id>/to` | `to` tip of the failed attempt | bare repo, mirrored to remote |
 
-- Worker, per row: build the image at the `to` tip, make `swarm/<track>/<id>` at that tip, run the steps, write the land ref. Then merge the row into the `to` tip on no branch, always with a merge commit, so `to` stays first parent and each row is one merge on `to`. Push that commit to `to` with no force. A push the remote refuses as behind fetches, merges onto the new tip, pushes again. A push the remote turns down, for example branch protection, fails the row. Then drop the fail refs.
+- Worker, per row: ready the slot through its runner, `podman` building the image at the `to` tip, make `swarm/<track>/<id>` at that tip, run the steps, write the land ref. Then merge the row into the `to` tip on no branch, always with a merge commit, so `to` stays first parent and each row is one merge on `to`. Push that commit to `to` with no force. A push the remote refuses as behind fetches, merges onto the new tip, pushes again. A push the remote turns down, for example branch protection, fails the row. Then drop the fail refs.
 - A land ref outside `to`, for example after a force-push dropped it, reads as queued: the next worker merges it into `to` again with no new session.
 - Merge conflict: `merge` steps get one try in the conflicted worktree, in the row session. The first commit step closes the merge. Merge commits get no ref. Transcript: `merge`.
 - No `merge` block, a failed merge session, or a conflict left after it: the tool aborts the merge and reports the files. The row fails.
 - A `git merge` error with no `MERGE_HEAD` is git failing, not a conflict: no `merge` steps run.
+- Host git on a slot worktree passes `--git-dir=<bare repo>/worktrees/<name>` and `--work-tree`, the admin dir found from the `gitdir` files of the bare repos. It never reads the worktree's `.git`: the row can rewrite it.
 - Worktree per slot: `~/swarm/slot/<n>/tree`, of the project its last row ran. Never inside a checkout. A row of another project drops it, ignored files included, and adds one from its own bare repo.
 - A slot detaches its worktree when a row ends or fails, and again when `serve` attaches it. A branch left checked out by a crash blocks every other slot.
 - One commit per commit step, no trailer. The host stages with `add --all`: ignored files miss every commit. A commit step with no diff commits empty, so state still moves.
@@ -265,7 +269,7 @@ merge:
 - A branch with no land ref holds a session cut short, unless a worker holds the row lock. `serve` reads it as queued and the worker replays the row from the `to` tip.
 - A pushed row clears its own fail refs. `reset <track>/<id>` clears branch, land ref, publish ref and fail refs of the row and of every dependant in its track, here, then on the remote.
 - A try fails on non-zero exit, a signal, `timeout`, a blank agent commit reply, or no `session_id` from an agent with `resume`. A step whose tries are spent fails the row and marks it, except a `run` step with `continue_on_error`.
-- A git or podman failure in a slot is no row failure. It writes no mark: the worker exits 2, `serve` reports `skip` for the project once per cause, and the project rests: no row of it until the rest ends, then the row replays. The rest starts at 60 s and doubles per fault in a row, up to 15 min. Only a worker of the project that exits 0 ends the doubling and clears the reported causes. Workers on other slots run on. A failed image build or pull is a row failure: the worker reaches podman before it builds, so a podman that answers nothing stays a machine fault.
+- A git or runner failure in a slot is no row failure. It writes no mark: the worker exits 2, `serve` reports `skip` for the project once per cause, and the project rests: no row of it until the rest ends, then the row replays. The rest starts at 60 s and doubles per fault in a row, up to 15 min. Only a worker of the project that exits 0 ends the doubling and clears the reported causes. Workers on other slots run on. A failed image build or pull is a row failure: the worker reaches podman before it builds, so a podman that answers nothing stays a machine fault.
 - Locks: flock on 5 standing directories, no file written. The kernel drops a lock when its holder dies, so a crash leaves nothing to clean.
 
 | Lock | Directory | Holder | `serve` while held |
@@ -299,15 +303,18 @@ scswarm reset PROJECT ROW       delete swarm/<track>/<id>, every dependant branc
 scswarm completions SHELL       completion script on stdout: bash, zsh, fish, elvish, powershell
 scswarm man DIR                 one roff page per visible command into DIR, which must exist
 scswarm work PROJECT --slot N --track NAME --track-branch BRANCH --row ID --track-tip SHA --base SHA
-             [--env VAR=FILE]... [--mount HOST:GUEST]... [--device PATH]...
+             --runner RUNNER [--uid UID] [--gid GID] [--env VAR=FILE]... [--mount HOST:GUEST]...
+             [--device PATH]...
                                 internal, hidden from --help: one row attempt; `serve` spawns one
                                   per assignment. Reads the track file at the track tip, config at
-                                  the base, branches from the base, binds each credential FILE as VAR
+                                  the base, branches from the base, binds each credential FILE as VAR.
+                                  RUNNER: `podman` or `namespace`; UID: first slot uid, GID: project
+                                  group, both `namespace` alone
 ```
 
-Event lines name a row `<project>/<track>/<id>`, and a project fault `skip project=<project>`.
+Event lines name a row `<project>/<track>/<id>`, a project fault `skip project=<project>`, and a field the runner reads none of `ignore project=<project>`.
 
-Exit codes: 0 ok, 1 input invalid (host file, track file, config, unknown row, usage), 2 git, podman or file system failure. A usage error of `work` exits 2: its argv comes from `serve`, so a mismatch is a binary fault and rests the project. `serve` exits 1 only on a host file invalid at start: an invalid track or config skips that track. `work` exits 0 once it pushes the row or writes the fail refs, 2 on a git or podman failure. A worker exit 1 reports `skip` once and rests nothing. Any other worker failure, a signal included, rests its project; `serve` runs on.
+Exit codes: 0 ok, 1 input invalid (host file, track file, config, unknown row, usage, a runner the host cannot run at `serve` start), 2 git, runner or file system failure. A usage error of `work` exits 2: its argv comes from `serve`, so a mismatch is a binary fault and rests the project. `serve` exits 1 only on a host file invalid at start: an invalid track or config skips that track. `work` exits 0 once it pushes the row or writes the fail refs, 2 on a git or runner failure. A worker exit 1 reports `skip` once and rests nothing. Any other worker failure, a signal included, rests its project; `serve` runs on.
 
 `--version` prints the package version, plus the commit when built from a checkout of this repo, marked `-dirty` when `src`, `build.rs` or the manifests differ from it.
 
@@ -317,13 +324,47 @@ Exit codes: 0 ok, 1 input invalid (host file, track file, config, unknown row, u
 
 Scheduling: each idle slot, lowest number first, takes a queued row. The project with fewest rows running first, then the project served longest ago, so projects take turns; inside it, highest `priority`; among tracks of equal priority, the track with fewest rows running, so tracks take turns; file order inside a track. No preemption. `priority` never reaches across projects. `serve` keeps served order in memory: a restart starts every project even.
 
-## Container
+## Runner
 
-Rootless podman, `--userns=keep-id`, one long-lived container per slot, named `scswarm-<n>`. It sleeps; every try of a prompt, `run` or agent commit step is one `podman exec`, then `podman restart --time=0`. The restart kills every process the try left, so a background job never reaches the next step or the commit. The worker restarts the container before each row, so a process a dead worker left inside never reaches the next row. Mounts: slot worktree rw at same path, the row's bare repo ro at same path, the project's `mounts` rw. Every bind carries the `z` flag, so an SELinux host relabels it shared. `devices` pass as `--device`, with no relabel. Credentials arrive as `--env=VAR`, values in the podman environment. Network on. Agent runs with its own permission checks off.
+`runner` of the host file picks one for every slot. Agent runs with its own permission checks off under both.
 
-Git inside the container is read-only: the index sits under the bare repo. `git status`, `git log`, `git diff` work. `git add`, `git mv`, `git commit`, `git checkout` fail with `Read-only file system`. Host stages every change with `add --all` at each commit step, so a plain `mv` lands. Project prompts and command files must not ask the agent for a git write.
+### `podman`
+
+Rootless podman, `--userns=keep-id`, one long-lived container per slot, named `scswarm-<n>`. It sleeps; every try of a prompt, `run` or agent commit step is one `podman exec`, then `podman restart --time=0`. The restart kills every process the try left, so a background job never reaches the next step or the commit. The worker restarts the container before each row, so a process a dead worker left inside never reaches the next row. Mounts: slot worktree rw at same path, the row's bare repo ro at same path, the project's `mounts` rw. Every bind carries the `z` flag, so an SELinux host relabels it shared. `devices` pass as `--device`, with no relabel. Credentials arrive as `--env=VAR`, values in the podman environment. Network on.
 
 Image: `image` names a Containerfile at the base, built with no tag and run by ID, or an image podman resolves. An untagged name reads as `:latest`, the form podman reports.
+
+### `namespace`
+
+Linux, `serve` as root, for example inside an unprivileged container. Slot `n` runs as uid `u = uid + n`, in group `g` = `gid` of the row's project. Each try:
+
+```
+setpriv --reuid <u> --regid <g> --clear-groups --no-new-privs \
+  unshare --user --map-current-user --pid --fork --kill-child <argv>
+```
+
+- The row holds no capability: its user namespace maps `u` alone. Its PID namespace dies with `unshare`, and every process of the try with it.
+- After each try and before each row, `kill -KILL -1` as uid and gid `u` kills what a dead worker left.
+- Environment cleared, then set: `PATH` of `serve`, `HOME` = `~/swarm/slot/<n>/home`, `TMPDIR` = `~/swarm/slot/<n>/tmp`, `safe.directory` = the worktree through `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_0`, `GIT_CONFIG_VALUE_0`, then the credentials, values in the environment.
+- No bind, no image: tools come from the host.
+- Host git writes the worktree. After each checkout, and before the `merge` steps, the host gives `u` and `g` the tracked paths, their dirs and the worktree root.
+- Every bare repo, under both runners, grants others nothing and keeps `core.sharedRepository` `0640`, so git writes each file `0640` whatever the umask.
+- Before each row: the bare repo goes to `g` under the ref store lock, once per change of `gid`: dirs `2750`, files group-readable, root last. A try as `u` in `g` then reads the base commit. A failure exits 2 and rests the project.
+- `serve` start refuses a slot uid equal to its own uid and a `gid` equal to its own gid, then runs `true` as each slot uid below `workers`, and as slot 0 in each `gid`. A failure exits 1.
+
+| Path | Owner | Mode |
+|---|---|---|
+| `~` | `serve` user | others `x` at least; the runner sets none |
+| `~/swarm`, `~/swarm/slot`, `~/swarm/slot/<n>` | `serve` user | `0711` |
+| `~/swarm/log` | `serve` user | `0700` |
+| `~/swarm/<project>.git` | `serve` user, group `g` | `2750`; under `podman` and before the first row, others none |
+| `~/swarm/slot/<n>/tree`, `home`, `tmp` | `u`, group `g` | `0700` |
+
+`home` and `tmp` drop when the slot switches project.
+
+### Git in the slot
+
+Git in the slot is read-only: the index sits under the bare repo, bound ro under `podman`, owned by the `serve` user under `namespace`. `git status`, `git log`, `git diff` work. `git add`, `git mv`, `git commit`, `git checkout` fail with `Read-only file system` under `podman`, `Permission denied` under `namespace`. Host stages every change with `add --all` at each commit step, so a plain `mv` lands. Project prompts and command files must not ask the agent for a git write.
 
 ## Limits
 
@@ -332,7 +373,7 @@ Image: `image` names a Containerfile at the base, built with no tag and run by I
 - A row's failure or crash costs its whole step list: the replay starts from the `to` tip, commits of earlier steps included.
 - A replay appends to the same transcript, so step numbers restart inside `run.jsonl`.
 - Output a later row needs must sit on a tracked path. The slot cleans with no `-x`: an ignored file misses the commit, and stays in the slot worktree for the next row on that slot.
-- The restart after each try kills every process in the container. A server a step needs starts and stops inside one `run`.
+- The reset after each try kills every process of the slot. A server a step needs starts and stops inside one `run`.
 - Slots share the host CPU. Timings from a `run` step carry noise from other slots: set `workers: 1`, or lock inside the script.
 - `status` prints one line per row. A task written as three rows reads as three lines; the tool learns no id pattern, so it groups nothing.
 - A slot due to drop waits for its row to end. A long row holds the old slot past the change.
@@ -357,7 +398,7 @@ Image: `image` names a Containerfile at the base, built with no tag and run by I
 - A step with no `timeout` runs without limit. No cap counts tokens.
 - A podman fault inside `exec` exits 125 and counts as a failed try. A step command that exits 125 reads the same: `sh -c` passes the code through.
 - The transcript keeps full stdout and stderr of every try. Redirect big output to a file.
-- A git or podman failure in one slot rests its project. That row replays from base once the rest ends; rows on other slots run on. A remote out of reach is such a failure; a remote that turns a push down fails the row.
+- A git or runner failure in one slot rests its project. That row replays from base once the rest ends; rows on other slots run on. A remote out of reach is such a failure; a remote that turns a push down fails the row.
 - Podman broken for every slot rests every project in turn, and `serve` keeps running. The journal shows one `skip` per project and cause.
 - A dead remote holds its own feed thread up to the transport bounds; other projects schedule on. The ssh bound replaces any `core.sshCommand` in git config.
 - The scheduler reads refs while a fetch writes them: one cycle can see a new track tip with the old `to`. Each worker runs on the tips it was handed.
@@ -384,6 +425,17 @@ Image: `image` names a Containerfile at the base, built with no tag and run by I
 - Slot pick is the lowest idle index, so a chained row can land on a cold build cache, and a slot switches project whenever the next row asks. Each switch drops the worktree and makes a container.
 - One swarm per unix user. Shell access to that user reaches every project: bare repos, transcripts, credential files.
 - `devices` and the network reach every project's containers. GPU memory can leak between processes, for example LeftoverLocals, CVE-2023-4969.
+- `namespace`: `/proc` is shared. Each slot uid reads the argv of every process in the container, prompts included: [softcery/scswarm#29: prompt through stdin](https://github.com/softcery/scswarm/issues/29). A private `/proc` fails: `mount /proc failed: Permission denied`, probed 2026-11-07 in a rootless podman container.
+- `namespace`: loopback and network are shared. A row reaches each service of the host container.
+- `namespace`: `/tmp` is shared. `TMPDIR` covers the tools that read it.
+- `namespace`: no cgroup per slot. Rows share the memory, CPU and pid caps of the host container.
+- `namespace`: a host container whose PID 1 reaps no orphan keeps the zombies of a worker that died hard, one pid each. Run it with `--init`.
+- `namespace`: no image. A row adds no system package; tools come from the host, or user space through project text. A row that adds `image` gets one `ignore` line.
+- `namespace`: a home dir of `serve` that grants others no `x` fails every row: the try cannot reach the bare repo.
+- `namespace`: a host that refuses user namespaces fails `serve` at start, for example Ubuntu 24.04 with `kernel.apparmor_restrict_unprivileged_userns=1`, or a containerd `RuntimeDefault` seccomp profile. Unmeasured on both.
+- `namespace`: Claude Code first-run prompts come up under a fresh `HOME`. The host image or project text must answer them.
+- `namespace`: the owner handoff walks every tracked path at each checkout. Cost on a big repo is unmeasured.
+- A change of `runner` across a `serve` restart leaves the old runner's state: containers `scswarm-<n>`, or slot `home` and `tmp` dirs. Remove them by hand.
 - Project offboarding: remove its entry, then delete `~/swarm/<project>.git`, `~/swarm/log/<project>`, `~/swarm/build/<project>`, its credential files and its `mounts` host dirs.
 - Each cycle reads every track of every project with git subprocesses. Cycle time against project count is unmeasured.
 - Unverified: GitHub limits on ssh fetches from one host. 30 projects at `fetch: 60` make 30 fetches a minute.

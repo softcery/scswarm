@@ -17,7 +17,7 @@ const SHELL: &str = "sh";
 const ARGV0: &str = "scswarm";
 
 /// Exec'd step, tried under its policy. Each try: transcript line, then
-/// container restart, so no process outlives its try.
+/// slot reset, so no process outlives its try.
 pub struct Call<'a> {
     pub slot: &'a Slot,
     /// Credentials each try gets.
@@ -98,19 +98,16 @@ impl Call<'_> {
         }
     }
 
-    /// One try, then restart, even when the try broke: no process outlives it.
+    /// One try, then reset, even when the try broke: no process outlives it.
     fn once<A: Ask>(&self, ask: &A) -> Result<Judged<A::Reply>> {
         let tried = self.tried(ask);
-        self.slot.container().restart()?;
+        self.slot.reset()?;
         tried
     }
 
     /// Exec, judge, record.
     fn tried<A: Ask>(&self, ask: &A) -> Result<Judged<A::Reply>> {
-        let command =
-            self.slot
-                .container()
-                .exec(self.slot.path(), self.credentials, &ask.argv())?;
+        let command = self.slot.exec(self.credentials, &ask.argv())?;
         let captured = proc::capture(command, self.policy.timeout)?;
         let judged = judge(ask, &captured);
         let entry = ask.sent(Entry {

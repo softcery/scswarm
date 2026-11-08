@@ -169,6 +169,7 @@ fn escape(state: State) -> &'static str {
         State::Waiting => "\x1b[2m",
         State::Queued => "\x1b[33m",
         State::Running => "\x1b[94m",
+        State::Stopped => "\x1b[36m",
         State::Failed => "\x1b[31m",
         State::Pushed => "\x1b[32m",
         State::Merged => "\x1b[35m",

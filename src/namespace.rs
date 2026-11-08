@@ -122,7 +122,7 @@ impl Namespace {
         let logs = paths::logs()?;
         make(&logs)?;
         mode(&logs, PRIVATE)?;
-        regroup(need.repo, gid)?;
+        regroup(need.request.repo, gid)?;
         let home = paths::slot_home(slot)?;
         let made = need.fresh || !home.exists();
         for dir in [home, paths::slot_tmp(slot)?] {
@@ -135,8 +135,8 @@ impl Namespace {
         }
         own(need.tree, uid, gid)?;
         mode(need.tree, PRIVATE)?;
-        let repo = format!("--git-dir={}", paths::arg(need.repo.root())?);
-        let base = format!("{}^{{commit}}", need.base);
+        let repo = format!("--git-dir={}", paths::arg(need.request.repo.root())?);
+        let base = format!("{}^{{commit}}", need.request.base);
         let out = self.run(
             slot,
             gid,
@@ -146,7 +146,7 @@ impl Namespace {
         if !out.status.success() {
             let what = format!(
                 "in gid {gid} must read the base in bare repo {}, each dir above it granting others `x`",
-                need.repo.root().display()
+                need.request.repo.root().display()
             );
             return Err(Error::Failed(self.refused(slot, &what, &out)));
         }

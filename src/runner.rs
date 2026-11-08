@@ -12,6 +12,7 @@ use crate::host::Mount;
 use crate::namespace::Namespace;
 use crate::paths::Project;
 use crate::podman::{self, Container};
+use crate::proc::Stop;
 use crate::step::Outcome;
 
 /// Runner as the host file and `scswarm work` name it.
@@ -34,13 +35,18 @@ pub enum Runner {
 }
 
 /// What one row asks of its slot.
-pub struct Need<'a> {
+pub struct Request<'a> {
     pub repo: &'a Git,
     pub base: &'a str,
     pub project: &'a Project,
     pub image: Option<&'a str>,
     pub mounts: &'a [Mount],
     pub devices: &'a [String],
+}
+
+/// Row request, with the slot worktree that serves it.
+pub struct Need<'a> {
+    pub request: &'a Request<'a>,
     pub tree: &'a Path,
     /// Worktree made for this row: the slot had none, or held another project.
     pub fresh: bool,
@@ -116,9 +122,10 @@ impl Runner {
     }
 
     /// Slot ready for a row: leftovers gone, the row's view in place. Spent: the row's fault.
-    pub fn prepare(&self, slot: usize, need: &Need) -> Result<Outcome<()>> {
+    /// `stop` cuts an image build or pull short.
+    pub fn prepare(&self, slot: usize, need: &Need, stop: &Stop) -> Result<Outcome<()>> {
         match self {
-            Self::Podman => podman::prepare(slot, need),
+            Self::Podman => podman::prepare(slot, need, stop),
             Self::Namespace(namespace) => namespace.prepare(slot, need).map(Outcome::Done),
         }
     }

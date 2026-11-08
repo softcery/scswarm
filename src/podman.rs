@@ -11,7 +11,7 @@ use crate::event;
 use crate::host::Mount;
 use crate::lock;
 use crate::paths;
-use crate::proc;
+use crate::proc::{self, Exit, Stop};
 use crate::runner::Need;
 use crate::step::Outcome;
 
@@ -34,9 +34,6 @@ const INIT: &str = "--init";
 const MOUNTS_LABEL: &str = "scswarm.mounts";
 const DEVICES_LABEL: &str = "scswarm.devices";
 const REPO_LABEL: &str = "scswarm.repo";
-
-/// What a build or pull gave: image ID, or the last line podman printed on failure.
-pub type Made = std::result::Result<String, String>;
 
 /// One long-lived container per slot. Sole owner of podman arguments.
 pub struct Container {
@@ -142,13 +139,19 @@ impl Container {
 
 /// Container restarted if it carries the row's stamp, else made again. Podman
 /// answers before the build, so a failed build is the row's.
-pub fn prepare(slot: usize, need: &Need) -> Result<Outcome<()>> {
+pub fn prepare(slot: usize, need: &Need, stop: &Stop) -> Result<Outcome<()>> {
     let standing = stamp(slot)?;
-    let image = match image(need)? {
-        Ok(image) => image,
-        Err(why) => return Ok(Outcome::Spent(format!("image must build: {why}"))),
+    let image = match image(need, stop)? {
+        Outcome::Done(image) => image,
+        Outcome::Spent(why) => return Ok(Outcome::Spent(format!("image must build: {why}"))),
+        Outcome::Stopped => return Ok(Outcome::Stopped),
     };
-    let stamp = Stamp::new(&image, need.mounts, need.devices, need.repo.root())?;
+    let stamp = Stamp::new(
+        &image,
+        need.request.mounts,
+        need.request.devices,
+        need.request.repo.root(),
+    )?;
     let container = Container::slot(slot);
     if standing.as_ref() == Some(&stamp) {
         container.restart()?;
@@ -156,9 +159,9 @@ pub fn prepare(slot: usize, need: &Need) -> Result<Outcome<()>> {
     }
     container.create(&Spec {
         worktree: need.tree,
-        repo: need.repo.root(),
-        mounts: need.mounts,
-        devices: need.devices,
+        repo: need.request.repo.root(),
+        mounts: need.request.mounts,
+        devices: need.request.devices,
         stamp: &stamp,
     })?;
     event::create(slot);
@@ -215,19 +218,25 @@ pub fn image_id(image: &str) -> Result<Option<String>> {
     Ok(Some(bare_id(id.trim())))
 }
 
-/// Fetch an image from its registry.
-pub fn pull(image: &str) -> Result<Made> {
-    made(&["pull".to_string(), "--quiet".to_string(), image.to_string()])
+/// Fetch an image from its registry. `Done`: image ID. `Spent`: last line podman printed.
+pub fn pull(image: &str, stop: &Stop) -> Result<Outcome<String>> {
+    made(
+        &["pull".to_string(), "--quiet".to_string(), image.to_string()],
+        stop,
+    )
 }
 
 /// Build a Containerfile. The image takes no tag: a slot runs it by ID.
-pub fn build(file: &Path, context: &Path) -> Result<Made> {
-    made(&[
-        "build".to_string(),
-        "--quiet".to_string(),
-        format!("--file={}", paths::arg(file)?),
-        paths::arg(context)?,
-    ])
+pub fn build(file: &Path, context: &Path, stop: &Stop) -> Result<Outcome<String>> {
+    made(
+        &[
+            "build".to_string(),
+            "--quiet".to_string(),
+            format!("--file={}", paths::arg(file)?),
+            paths::arg(context)?,
+        ],
+        stop,
+    )
 }
 
 /// Image name in the form podman reports: an untagged name reads as `:latest`.
@@ -244,28 +253,28 @@ pub fn image_ref(name: &str) -> String {
 
 /// Containerfile at the base builds from a clean worktree of it, under the build
 /// lock. Anything else names an image.
-fn image(need: &Need) -> Result<Made> {
-    let Some(image) = need.image else {
-        return Ok(Err(
+fn image(need: &Need, stop: &Stop) -> Result<Outcome<String>> {
+    let Some(image) = need.request.image else {
+        return Ok(Outcome::Spent(
             "`scswarm.yaml` field `image` must name a Containerfile path or an image".to_string(),
         ));
     };
-    let repo = need.repo;
-    if !repo.has_path(need.base, image)? {
+    let repo = need.request.repo;
+    if !repo.has_path(need.request.base, image)? {
         let name = image_ref(image);
         return match image_id(&name)? {
-            Some(id) => Ok(Ok(id)),
-            None => pull(&name),
+            Some(id) => Ok(Outcome::Done(id)),
+            None => pull(&name, stop),
         };
     }
-    let locked = paths::builds(need.project)?;
+    let locked = paths::builds(need.request.project)?;
     fs::create_dir_all(&locked)
         .map_err(|why| Error::Failed(format!("directory {}: {why}", locked.display())))?;
     let _build = lock::hold(&locked)?;
-    let tree = paths::build(need.project)?;
+    let tree = paths::build(need.request.project)?;
     repo.worktree_remove(&tree)?;
-    repo.worktree_add(&tree, need.base)?;
-    let built = build(&tree.join(image), &tree);
+    repo.worktree_add(&tree, need.request.base)?;
+    let built = build(&tree.join(image), &tree, stop);
     repo.worktree_remove(&tree)?;
     built
 }
@@ -307,15 +316,17 @@ impl Listed {
 }
 
 /// Build or pull: `--quiet` prints the image ID last on stdout.
-fn made(args: &[String]) -> Result<Made> {
-    let out = proc::answer(BIN, here(), args)?;
-    if !out.status.success() {
-        return Ok(Err(proc::last_line(&out)));
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    Ok(Ok(bare_id(
-        stdout.lines().last().unwrap_or_default().trim(),
-    )))
+fn made(args: &[String], stop: &Stop) -> Result<Outcome<String>> {
+    let mut command = Command::new(BIN);
+    command.current_dir(here()).args(args);
+    let captured = proc::capture(command, None, stop)?;
+    Ok(match captured.exit {
+        Exit::Code(0) => Outcome::Done(bare_id(
+            captured.stdout.lines().last().unwrap_or_default().trim(),
+        )),
+        Exit::Stopped => Outcome::Stopped,
+        Exit::Code(_) | Exit::Signal | Exit::Timeout => Outcome::Spent(captured.last_line()),
+    })
 }
 
 /// Image ID with no digest prefix. Both sides of a stamp pass here.

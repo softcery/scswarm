@@ -7,9 +7,9 @@ use std::process::Command;
 use crate::credential::Credential;
 use crate::error::{Error, Result};
 use crate::git::{Git, Worktree};
-use crate::host::Mount;
-use crate::paths::{self, Project};
-use crate::runner::{Need, Runner};
+use crate::paths;
+use crate::proc::Stop;
+use crate::runner::{Need, Request, Runner};
 use crate::step::Outcome;
 
 /// One try at a conflicted merge.
@@ -52,33 +52,22 @@ impl Slot {
     }
 
     /// Worktree of `repo`, a foreign one dropped with its ignored files. Then the
-    /// runner readies the slot. Spent: the row's fault.
-    pub fn prepare(
-        &self,
-        repo: &Git,
-        base: &str,
-        project: &Project,
-        image: Option<&str>,
-        mounts: &[Mount],
-        devices: &[String],
-    ) -> Result<Outcome<()>> {
+    /// runner readies the slot. Spent: the row's fault. Stopped: on `stop`.
+    pub fn prepare(&self, request: &Request, stop: &Stop) -> Result<Outcome<()>> {
+        let repo = request.repo;
         let fresh = !self.path.is_dir() || repo.worktree(&self.path)?.is_none();
         if fresh {
             self.drop_tree()?;
-            repo.worktree_add(&self.path, base)?;
+            repo.worktree_add(&self.path, request.base)?;
         }
         self.runner.prepare(
             self.index,
             &Need {
-                repo,
-                base,
-                project,
-                image,
-                mounts,
-                devices,
+                request,
                 tree: &self.path,
                 fresh,
             },
+            stop,
         )
     }
 
@@ -116,13 +105,14 @@ impl Slot {
             return Err(conflict);
         }
         self.runner.handoff(self.index, &tree)?;
-        let spent = match resolve()? {
-            Outcome::Spent(why) => format!("{conflict}; `merge` steps: {why}"),
-            Outcome::Done(()) if tree.merging()? => conflict.to_string(),
+        let ended = match resolve()? {
+            Outcome::Spent(why) => Outcome::Spent(format!("{conflict}; `merge` steps: {why}")),
+            Outcome::Stopped => Outcome::Stopped,
+            Outcome::Done(()) if tree.merging()? => Outcome::Spent(conflict.to_string()),
             Outcome::Done(()) => return Ok(Outcome::Done(())),
         };
         tree.merge_abort()?;
-        Ok(Outcome::Spent(spent))
+        Ok(ended)
     }
 
     pub fn head(&self) -> Result<String> {

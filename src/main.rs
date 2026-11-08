@@ -12,12 +12,14 @@ mod host;
 mod lock;
 mod log;
 mod man;
+mod namespace;
 mod paths;
 mod podman;
 mod pool;
 mod proc;
 mod repo;
 mod reset;
+mod runner;
 mod script;
 mod serve;
 mod slot;
@@ -245,6 +247,9 @@ mod tests {
                 guest: "/mnt".to_string(),
             }],
             devices: vec!["/dev/dri/card0".to_string()],
+            runner: runner::Kind::Namespace,
+            uid: Some(200_000),
+            gid: Some(3_000),
         };
         let argv = std::iter::once("scswarm".to_string()).chain(job.argv());
         match Cli::try_parse_from(argv).expect("argv must parse").command {

@@ -2,7 +2,7 @@ use std::fs;
 use std::io;
 use std::os::fd::AsFd;
 
-use clap::Args;
+use clap::{Args, ValueEnum};
 
 use crate::board::{self, Row, Track};
 use crate::config::Config;
@@ -13,8 +13,8 @@ use crate::git::{self, Git, Push};
 use crate::host::Mount;
 use crate::lock;
 use crate::paths::{self, Project};
-use crate::podman::{self, Stamp};
 use crate::proc::Stop;
+use crate::runner::{Kind, Request, Runner};
 use crate::script::{Played, Session};
 use crate::slot::Slot;
 use crate::state::{Address, Key};
@@ -32,6 +32,9 @@ const BASE: &str = "base";
 const ENV: &str = "env";
 const MOUNT: &str = "mount";
 const DEVICE: &str = "device";
+const RUNNER: &str = "runner";
+const UID: &str = "uid";
+const GID: &str = "gid";
 
 /// One row attempt on one slot. Argv of `scswarm work`, row lock on stdin: old
 /// `serve` spawns new binary after upgrade, so change needs release note.
@@ -62,6 +65,14 @@ pub struct Job {
     /// Host device nodes, resolved.
     #[arg(long = DEVICE, value_name = "PATH")]
     pub devices: Vec<String>,
+    #[arg(long = RUNNER, value_name = "RUNNER")]
+    pub runner: Kind,
+    /// First slot uid, runner `namespace` alone.
+    #[arg(long = UID, value_name = "UID")]
+    pub uid: Option<u32>,
+    /// Project group, runner `namespace` alone.
+    #[arg(long = GID, value_name = "GID")]
+    pub gid: Option<u32>,
 }
 
 /// Row lock from stdin, slot lock once its last holder ends. `Done`: row pushed.
@@ -86,7 +97,7 @@ pub fn work(repo: &Git, job: &Job) -> Result<Outcome<()>> {
     stop::settle(repo, &address.key, &job.track_branch)?;
     let watch = Watch::new(repo, &address.key, &job.track_branch);
     Attempt {
-        slot: &Slot::open(job.slot)?,
+        slot: &Slot::open(job.slot, &job.runner()?)?,
         stop: &|| watch.stopped(),
         watch: &watch,
         repo,
@@ -126,7 +137,19 @@ impl Job {
         self.devices
             .iter()
             .for_each(|node| flag(DEVICE, node.clone()));
+        if let Some(kind) = self.runner.to_possible_value() {
+            flag(RUNNER, kind.get_name().to_string());
+        }
+        self.uid.iter().for_each(|uid| flag(UID, uid.to_string()));
+        self.gid.iter().for_each(|gid| flag(GID, gid.to_string()));
         argv
+    }
+
+    /// Runner of this row: `serve` checked the host file it came from.
+    pub fn runner(&self) -> Result<Runner> {
+        Runner::new(self.runner, self.uid)
+            .map(|runner| runner.serving(self.gid))
+            .map_err(|why| Error::Failed(format!("arguments `--{RUNNER}`, `--{UID}`: {why}")))
     }
 }
 
@@ -166,27 +189,25 @@ impl Attempt<'_> {
         }
     }
 
-    /// Credentials, image, container, the row session unless a land ref stands, then the merge
-    /// into `to`. Podman answers before the build, so a failed build is the row's.
+    /// Credentials, slot, the row session unless a land ref stands, then the merge
+    /// into `to`.
     fn attempt(&mut self) -> Result<Outcome<()>> {
         let (slot, job, address) = (self.slot, self.job, self.address);
         let key = &address.key;
         let credentials = credential::load(&job.env)?;
-        let standing = slot.stamp()?;
-        let image = match self.image()? {
-            Outcome::Done(image) => image,
-            Outcome::Spent(why) => return Ok(Outcome::Spent(format!("image must build: {why}"))),
-            Outcome::Stopped => return Ok(Outcome::Stopped),
+        let request = Request {
+            repo: self.repo,
+            base: &job.base,
+            project: &address.project,
+            image: self.config.image.as_deref(),
+            mounts: &job.mounts,
+            devices: &job.devices,
         };
-        let stamp = Stamp::new(&image, &job.mounts, &job.devices, self.repo.root())?;
-        slot.prepare(
-            self.repo,
-            &job.base,
-            &stamp,
-            standing,
-            &job.mounts,
-            &job.devices,
-        )?;
+        match slot.prepare(&request, self.stop)? {
+            Outcome::Done(()) => {}
+            Outcome::Spent(why) => return Ok(Outcome::Spent(why)),
+            Outcome::Stopped => return Ok(Outcome::Stopped),
+        }
         let mut session = Session::open(
             slot,
             &credentials,
@@ -326,29 +347,6 @@ impl Attempt<'_> {
         let [on_track, on_to] = self.address.key.fail_refs();
         self.repo.ref_set(&on_track, &self.job.track_tip)?;
         self.repo.ref_set(&on_to, &self.against)
-    }
-
-    /// Containerfile at the base builds from a throwaway worktree of it, free of
-    /// untracked files, under the build lock. Anything else names an image.
-    fn image(&self) -> Result<Outcome<String>> {
-        let (repo, job, image) = (self.repo, self.job, &self.config.image);
-        if !repo.has_path(&job.base, image)? {
-            let name = podman::image_ref(image);
-            return match podman::image_id(&name)? {
-                Some(id) => Ok(Outcome::Done(id)),
-                None => podman::pull(&name, self.stop),
-            };
-        }
-        let locked = paths::builds(&self.address.project)?;
-        fs::create_dir_all(&locked)
-            .map_err(|why| Error::Failed(format!("directory {}: {why}", locked.display())))?;
-        let _build = lock::hold(&locked)?;
-        let tree = paths::build(&self.address.project)?;
-        repo.worktree_remove(&tree)?;
-        repo.worktree_add(&tree, &job.base)?;
-        let built = podman::build(&tree.join(image), &tree, self.stop);
-        repo.worktree_remove(&tree)?;
-        built
     }
 
     fn transcript(&self, name: &str) -> Result<Transcript> {

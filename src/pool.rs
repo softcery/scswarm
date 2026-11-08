@@ -8,6 +8,7 @@ use crate::error::{Error, Result, INVALID, STOPPED};
 use crate::event;
 use crate::lock;
 use crate::paths::{self, Project};
+use crate::runner::Runner;
 use crate::slot::{self, Slot};
 use crate::state::Address;
 use crate::work::Job;
@@ -20,6 +21,10 @@ pub struct Pool {
     workers: BTreeMap<usize, Worker>,
     /// Slots released in this `serve` life.
     attached: BTreeSet<usize>,
+    /// Runner of the last cycle. `None` before the first.
+    runner: Option<Runner>,
+    /// Slots of an earlier runner, each dropped through it once idle.
+    draining: BTreeMap<usize, Runner>,
 }
 
 struct Worker {
@@ -107,24 +112,40 @@ impl Pool {
             exe,
             workers: BTreeMap::new(),
             attached: BTreeSet::new(),
+            runner: None,
+            draining: BTreeMap::new(),
         })
     }
 
-    /// Drop idle slots past `workers`, list idle slots below, lowest first. A busy
-    /// slot drops once idle.
-    pub fn converge(&mut self, workers: usize) -> Result<Vec<usize>> {
+    /// Drop idle slots past `workers` and idle slots of an earlier runner, list idle
+    /// slots below, lowest first. A busy slot drops once idle.
+    pub fn converge(&mut self, workers: usize, runner: &Runner) -> Result<Vec<usize>> {
+        if let Some(old) = self.runner.replace(runner.clone()) {
+            if &old != runner {
+                for index in slot::indices(&old)? {
+                    self.draining.entry(index).or_insert_with(|| old.clone());
+                }
+            }
+        }
         let mut indices: BTreeSet<usize> = (0..workers).collect();
-        indices.extend(slot::indices()?);
+        indices.extend(slot::indices(runner)?);
+        indices.extend(self.draining.keys());
         let mut idle = Vec::new();
         for index in indices {
             if self.busy(index)? {
                 continue;
             }
+            let drained = self.draining.remove(&index);
+            if let Some(old) = &drained {
+                self.remove(index, old)?;
+            }
             if index >= workers {
-                self.remove(index)?;
+                if drained.is_none() {
+                    self.remove(index, runner)?;
+                }
                 continue;
             }
-            self.attach(index)?;
+            self.attach(index, runner)?;
             idle.push(index);
         }
         Ok(idle)
@@ -198,18 +219,18 @@ impl Pool {
     }
 
     /// Idle slot: free its branch once per `serve` life.
-    fn attach(&mut self, index: usize) -> Result<()> {
+    fn attach(&mut self, index: usize, runner: &Runner) -> Result<()> {
         if self.attached.insert(index) {
-            Slot::open(index)?.release()?;
+            Slot::open(index, runner)?.release()?;
             event::attach(index);
         }
         Ok(())
     }
 
-    fn remove(&mut self, index: usize) -> Result<()> {
+    fn remove(&mut self, index: usize, runner: &Runner) -> Result<()> {
         event::remove(index);
         self.attached.remove(&index);
-        slot::remove(index)
+        slot::remove(index, runner)
     }
 }
 

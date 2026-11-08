@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::Path;
 use std::process::Command;
 
@@ -6,9 +7,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::credential::Credential;
 use crate::error::{Error, Result};
+use crate::event;
 use crate::host::Mount;
+use crate::lock;
 use crate::paths;
 use crate::proc::{self, Exit, Stop};
+use crate::runner::Need;
 use crate::step::Outcome;
 
 const BIN: &str = "podman";
@@ -133,6 +137,37 @@ impl Container {
     }
 }
 
+/// Container restarted if it carries the row's stamp, else made again. Podman
+/// answers before the build, so a failed build is the row's.
+pub fn prepare(slot: usize, need: &Need, stop: &Stop) -> Result<Outcome<()>> {
+    let standing = stamp(slot)?;
+    let image = match image(need, stop)? {
+        Outcome::Done(image) => image,
+        Outcome::Spent(why) => return Ok(Outcome::Spent(format!("image must build: {why}"))),
+        Outcome::Stopped => return Ok(Outcome::Stopped),
+    };
+    let stamp = Stamp::new(
+        &image,
+        need.request.mounts,
+        need.request.devices,
+        need.request.repo.root(),
+    )?;
+    let container = Container::slot(slot);
+    if standing.as_ref() == Some(&stamp) {
+        container.restart()?;
+        return Ok(Outcome::Done(()));
+    }
+    container.create(&Spec {
+        worktree: need.tree,
+        repo: need.request.repo.root(),
+        mounts: need.request.mounts,
+        devices: need.request.devices,
+        stamp: &stamp,
+    })?;
+    event::create(slot);
+    Ok(Outcome::Done(()))
+}
+
 /// Slot number and stamp per slot container, running or not.
 pub fn slots() -> Result<BTreeMap<usize, Stamp>> {
     let listing = proc::run(
@@ -214,6 +249,34 @@ pub fn image_ref(name: &str) -> String {
         true => name.to_string(),
         false => format!("{name}:{LATEST}"),
     }
+}
+
+/// Containerfile at the base builds from a clean worktree of it, under the build
+/// lock. Anything else names an image.
+fn image(need: &Need, stop: &Stop) -> Result<Outcome<String>> {
+    let Some(image) = need.request.image else {
+        return Ok(Outcome::Spent(
+            "`scswarm.yaml` field `image` must name a Containerfile path or an image".to_string(),
+        ));
+    };
+    let repo = need.request.repo;
+    if !repo.has_path(need.request.base, image)? {
+        let name = image_ref(image);
+        return match image_id(&name)? {
+            Some(id) => Ok(Outcome::Done(id)),
+            None => pull(&name, stop),
+        };
+    }
+    let locked = paths::builds(need.request.project)?;
+    fs::create_dir_all(&locked)
+        .map_err(|why| Error::Failed(format!("directory {}: {why}", locked.display())))?;
+    let _build = lock::hold(&locked)?;
+    let tree = paths::build(need.request.project)?;
+    repo.worktree_remove(&tree)?;
+    repo.worktree_add(&tree, need.request.base)?;
+    let built = build(&tree.join(image), &tree, stop);
+    repo.worktree_remove(&tree)?;
+    built
 }
 
 /// One container of `podman ps --format json`. Names carry the slot number.

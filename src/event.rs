@@ -118,6 +118,11 @@ pub fn skip(project: &Project, why: &Error) {
     eprintln!("skip project={project} cause={why}");
 }
 
+/// Field the runner does not read: the track runs.
+pub fn ignore(project: &Project, why: &Error) {
+    eprintln!("ignore project={project} cause={why}");
+}
+
 /// Host file unreadable: loop runs on last good copy.
 pub fn stale(why: &Error) {
     eprintln!("stale cause={why}");

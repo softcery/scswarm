@@ -10,6 +10,7 @@ use crate::device;
 use crate::error::{Error, Result};
 use crate::git;
 use crate::paths::{self, Project};
+use crate::runner::{Kind, Runner};
 use crate::yaml;
 
 /// Seconds between scheduler cycles when the host file sets none.
@@ -36,6 +37,7 @@ const ANY: char = '*';
 #[derive(Debug)]
 pub struct Host {
     pub workers: usize,
+    pub runner: Runner,
     /// Host device nodes each container gets at the same path. Resolved at load.
     pub devices: Vec<String>,
     /// Pause between scheduler cycles. Reloads each cycle.
@@ -52,6 +54,8 @@ pub struct Entry {
     pub tracks: String,
     /// Least pause between two fetches of `remote`.
     pub fetch: Duration,
+    /// Group of the bare repo and of each try under `namespace`.
+    pub gid: Option<u32>,
     pub mounts: Vec<Mount>,
     /// Ordered rules: the first rule whose `match` takes a track names its bindings.
     pub env: Vec<EnvRule>,
@@ -78,6 +82,10 @@ pub struct Mount {
 struct Written {
     workers: usize,
     #[serde(default)]
+    runner: Kind,
+    #[serde(default)]
+    uid: Option<u32>,
+    #[serde(default)]
     devices: Vec<String>,
     #[serde(default)]
     poll: Option<u64>,
@@ -92,6 +100,8 @@ struct WrittenEntry {
     tracks: String,
     #[serde(default)]
     fetch: Option<u64>,
+    #[serde(default)]
+    gid: Option<u32>,
     #[serde(default)]
     mounts: Vec<Mount>,
     #[serde(default)]
@@ -130,6 +140,14 @@ impl Host {
                 "project `{project}` must name a key of host file field `projects`"
             ))
         })
+    }
+
+    /// Group of each project, under `namespace`.
+    pub fn gids(&self) -> Vec<u32> {
+        self.projects
+            .values()
+            .filter_map(|entry| entry.gid)
+            .collect()
     }
 
     /// No host path bound into two projects, none in the swarm or config dirs: a
@@ -199,6 +217,7 @@ impl Written {
                 "field `poll` must be seconds, 1 or more, or stay absent",
             ));
         }
+        self.check_runner().map_err(|what| invalid(file, &what))?;
         for (index, path) in self.devices.iter().enumerate() {
             if !path.starts_with('/') {
                 return Err(invalid(
@@ -218,10 +237,59 @@ impl Written {
         Ok(())
     }
 
+    /// Runner from `runner` and `uid`, room for every slot uid. Under `namespace`:
+    /// one gid per project, no bind to make. Under `podman`: no gid.
+    fn check_runner(&self) -> std::result::Result<(), String> {
+        Runner::new(self.runner, self.uid)?;
+        let slots = u32::try_from(self.workers - 1).ok();
+        if let Some(uid) = self.uid {
+            if slots.and_then(|slots| uid.checked_add(slots)).is_none() {
+                return Err("field `uid` plus `workers` must fit a 32-bit uid".to_string());
+            }
+        }
+        if self.runner == Kind::Podman {
+            return match self.projects.iter().find(|(_, entry)| entry.gid.is_some()) {
+                Some((project, _)) => Err(format!(
+                    "field `projects.{project}.gid` must stay absent under runner `podman`"
+                )),
+                None => Ok(()),
+            };
+        }
+        if !self.devices.is_empty() {
+            return Err(
+                "field `devices` must stay empty under runner `namespace`: it binds nothing"
+                    .to_string(),
+            );
+        }
+        let mut gids = BTreeMap::new();
+        for (project, entry) in &self.projects {
+            if !entry.mounts.is_empty() {
+                return Err(format!(
+                    "field `projects.{project}.mounts` must stay empty under runner `namespace`: it binds nothing"
+                ));
+            }
+            let gid = match entry.gid {
+                None | Some(0) => {
+                    return Err(format!(
+                        "field `projects.{project}.gid` must hold a group id of 1 or more under runner `namespace`"
+                    ));
+                }
+                Some(gid) => gid,
+            };
+            if let Some(other) = gids.insert(gid, project) {
+                return Err(format!(
+                    "field `projects.{project}.gid` must differ from field `projects.{other}.gid`: one group per project"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve home paths and device nodes once: later readers hold real paths.
     fn settle(self) -> Result<Host> {
         Ok(Host {
             workers: self.workers,
+            runner: Runner::new(self.runner, self.uid).map_err(Error::Invalid)?,
             devices: device::nodes(&self.devices)?,
             poll: Duration::from_secs(self.poll.unwrap_or(POLL)),
             projects: self
@@ -300,6 +368,7 @@ impl WrittenEntry {
             remote: paths::expand(&self.remote)?,
             tracks: self.tracks,
             fetch: Duration::from_secs(self.fetch.unwrap_or(FETCH)),
+            gid: self.gid,
             mounts,
             env,
         })
@@ -430,6 +499,30 @@ projects:
             .expect_err("a prefix with a space must fail")
             .to_string();
         assert!(why.contains("field `projects.alpha.tracks`"), "{why}");
+    }
+
+    /// Slot uid 0 runs rows as root and its reset kills every process; one group for
+    /// two projects lets each read the other's bare repo.
+    #[test]
+    fn refuses_a_root_slot_and_a_shared_group() {
+        let namespace = EXAMPLE
+            .replace("devices:\n  - /dev/null\n", "runner: namespace\nuid: 0\n")
+            .replace(
+                "    mounts:\n      - ~/alpha/records:/records\n",
+                "    gid: 3000\n",
+            )
+            .replace(
+                "    mounts:\n      - /cache/beta:/cache\n",
+                "    gid: 3000\n",
+            );
+        let why = Host::parse(FILE, &namespace)
+            .expect_err("uid 0 must fail")
+            .to_string();
+        assert!(why.contains("field `uid`"), "{why}");
+        let why = Host::parse(FILE, &namespace.replace("uid: 0", "uid: 20000"))
+            .expect_err("one gid for two projects must fail")
+            .to_string();
+        assert!(why.contains("field `projects.beta.gid`"), "{why}");
     }
 
     #[test]

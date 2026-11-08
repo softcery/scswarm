@@ -138,15 +138,20 @@ pub fn refused<S: AsRef<OsStr>>(bin: &str, args: &[S], out: &Output) -> Error {
     failed(bin, args, &fault(out))
 }
 
+/// Last line a call printed on stderr, else on stdout: the line that names the fault.
+pub fn last_line(out: &Output) -> String {
+    final_line(&fault(out))
+}
+
 impl Captured {
     /// Last line printed on stderr, else on stdout: the line that names the fault.
     pub fn last_line(&self) -> String {
-        spoke(&self.stdout, &self.stderr)
-            .lines()
-            .last()
-            .unwrap_or_default()
-            .to_string()
+        final_line(&spoke(&self.stdout, &self.stderr))
     }
+}
+
+fn final_line(said: &str) -> String {
+    said.lines().last().unwrap_or_default().to_string()
 }
 
 fn output<S: AsRef<OsStr>>(bin: &str, dir: &Path, args: &[S]) -> Result<Output> {

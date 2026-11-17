@@ -358,12 +358,13 @@ impl Worktree {
         self.probe(&["rev-parse", "--verify", "--quiet", MERGE_HEAD])
     }
 
-    /// Undo a conflicted merge. Does nothing when no merge is in flight.
+    /// Undo a conflicted merge, with every change made on it. `merge --abort`
+    /// refuses a conflicted path edited but not staged. No merge in flight: no-op.
     pub fn merge_abort(&self) -> Result<()> {
         if !self.merging()? {
             return Ok(());
         }
-        self.run(&["merge", "--abort"]).map(drop)
+        self.run(&["reset", "--hard"]).map(drop)
     }
 
     /// Paths the index tracks, relative to the worktree root. Unmerged paths once.
@@ -559,6 +560,47 @@ mod tests {
         let commit = tree.commit("row").expect("host commit must land");
         assert!(!marker.exists(), "host commit must run no row hook");
         assert!(repo.commit_of(&commit).expect("lookup").is_some());
+        fs::remove_dir_all(&root).expect("scratch must drop");
+    }
+
+    /// `merge` steps edit a path the merge staged, cannot stage the edit, then fail.
+    #[test]
+    fn aborts_a_merge_with_an_unstaged_edit() {
+        let root = std::env::temp_dir().join(format!("scswarm-git-abort-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let repo = Git::init_bare(&root.join("repo.git")).expect("bare repo must init");
+        for (key, value) in [("user.name", "test"), ("user.email", "test@localhost")] {
+            repo.set_config(key, value).expect("identity must set");
+        }
+        let empty = repo.input(&["mktree"], "").expect("empty tree must write");
+        let seed = repo
+            .run(&["commit-tree", empty.trim(), "-m", "seed"])
+            .expect("seed must commit");
+        let path = root.join("tree");
+        repo.worktree_add(&path, seed.trim())
+            .expect("worktree must add");
+        let tree = repo
+            .worktree(&path)
+            .expect("admin dirs must read")
+            .expect("bare repo must register the tree");
+        let side = |files: &[&str], text: &str| {
+            tree.checkout_detached(seed.trim())
+                .expect("seed must check out");
+            for file in files {
+                fs::write(path.join(file), text).expect("side writes");
+            }
+            tree.commit(text).expect("side must commit")
+        };
+        let ours = side(&["conflict.txt"], "ours\n");
+        let theirs = side(&["conflict.txt", "staged.txt"], "theirs\n");
+        tree.checkout_detached(&ours).expect("ours must check out");
+        tree.merge(&theirs, "theirs")
+            .expect_err("merge must conflict");
+        fs::write(path.join("staged.txt"), "edited\n").expect("edit writes");
+        tree.merge_abort()
+            .expect("abort must take an unstaged edit");
+        assert!(!tree.merging().expect("merge state must read"));
+        assert_eq!(tree.head().expect("head must read"), ours);
         fs::remove_dir_all(&root).expect("scratch must drop");
     }
 
